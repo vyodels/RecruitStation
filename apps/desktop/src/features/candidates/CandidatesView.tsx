@@ -1,6 +1,8 @@
 import React, { useState } from "react";
 import { Panel, StatusBadge } from "../../components";
 import { clampText, formatCompactDate } from "../../lib/format";
+import { useI18n } from "../../lib/i18n";
+import { translateUiToken } from "../../lib/uiText";
 import type { CandidateRecord } from "../../lib/types";
 
 interface CandidatesViewProps {
@@ -8,12 +10,17 @@ interface CandidatesViewProps {
 }
 
 export function CandidatesView({ candidates }: CandidatesViewProps): JSX.Element {
+  const { copy } = useI18n();
   const [selectedId, setSelectedId] = useState(candidates[0]?.id ?? "");
   const selected = candidates.find((candidate) => candidate.id === selectedId) ?? candidates[0];
 
   return (
     <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.2fr) minmax(320px, 0.8fr)", gap: "18px", alignItems: "start" }}>
-      <Panel title="Candidate pipeline" eyebrow="Recruiting scene" description="The current working set ordered by screening readiness across the active recruiting scene.">
+      <Panel
+        title={copy("Candidate pipeline", "候选人流水线")}
+        eyebrow={copy("Recruiting scene", "招聘场景")}
+        description={copy("The current working set ordered by screening readiness across the active recruiting scene.", "当前工作集合按初筛准备度排序，反映活跃招聘场景中的处理顺序。")}
+      >
         <div style={{ display: "grid", gap: "10px" }}>
           {candidates.map((candidate) => (
             <button
@@ -50,25 +57,33 @@ export function CandidatesView({ candidates }: CandidatesViewProps): JSX.Element
         </div>
       </Panel>
 
-      <Panel title={selected?.name ?? "No candidate selected"} eyebrow="Selected profile" description="Detailed context for the active working item.">
+      <Panel
+        title={selected?.name ?? copy("No candidate selected", "未选择候选人")}
+        eyebrow={copy("Selected profile", "当前档案")}
+        description={copy("Detailed context for the active working item.", "当前工作对象的详细上下文。")}
+      >
         {selected ? (
           <div style={{ display: "grid", gap: "14px" }}>
             <div style={{ display: "grid", gap: "8px" }}>
-              <StatusBadge tone={selected.status === "cooldown" ? "neutral" : selected.status === "screening" ? "positive" : "warning"}>{selected.status}</StatusBadge>
+              <StatusBadge tone={selected.status === "cooldown" ? "neutral" : selected.status === "screening" ? "positive" : "warning"}>{translateUiToken(selected.status, copy)}</StatusBadge>
               <div style={{ fontSize: "22px", fontWeight: 800 }}>{selected.title}</div>
               <div style={{ color: "rgba(233,239,255,0.72)", fontSize: "13px" }}>
                 {selected.location} · {selected.experienceYears} years · JD: {selected.jdTitle}
               </div>
             </div>
             <div style={{ display: "grid", gap: "8px" }}>
-              <strong>Next action</strong>
+              <strong>{copy("Next action", "下一步动作")}</strong>
               <p style={{ margin: 0, color: "rgba(233,239,255,0.72)", lineHeight: 1.6 }}>{selected.nextAction}</p>
             </div>
             <div style={{ display: "grid", gap: "8px" }}>
-              <strong>Resume and audit</strong>
-              <p style={{ margin: 0, color: "rgba(233,239,255,0.72)", lineHeight: 1.6 }}>{selected.resumeAvailable ? "Resume is available for scoring and review." : "Resume is pending capture from the communication step."}</p>
+              <strong>{copy("Resume and audit", "简历与审计")}</strong>
+              <p style={{ margin: 0, color: "rgba(233,239,255,0.72)", lineHeight: 1.6 }}>
+                {selected.resumeAvailable
+                  ? copy("Resume is available for scoring and review.", "简历已可用于评分与审查。")
+                  : copy("Resume is pending capture from the communication step.", "简历仍待从沟通环节获取。")}
+              </p>
               <div style={{ color: "rgba(233,239,255,0.6)", fontSize: "12px" }}>
-                {selected.lastContactedAt ? `Last contacted ${formatCompactDate(selected.lastContactedAt)}` : "No outbound contact yet"}
+                {selected.lastContactedAt ? copy(`Last contacted ${formatCompactDate(selected.lastContactedAt)}`, `最近联系于 ${formatCompactDate(selected.lastContactedAt)}`) : copy("No outbound contact yet", "尚无外发联系")}
               </div>
             </div>
             <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>

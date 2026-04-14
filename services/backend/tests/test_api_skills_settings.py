@@ -94,3 +94,12 @@ def test_settings_reload_runtime_provider_config(tmp_path):
         assert container.providers.providers["openai_compatible"].config.base_url == "http://127.0.0.1:8317/v1"
         assert container.providers.providers["openai_compatible"].config.api_key == "test-openai-compatible-key"
         assert container.sync.target["base_url"] == "http://intranet.example/api"
+
+    with make_client(tmp_path) as restarted_client:
+        restarted_container = restarted_client.app.state.container
+        restarted_provider = restarted_container.agent_control.agent_loop.provider
+
+        assert restarted_provider.preferred_provider == "openai_compatible"
+        assert "openai_compatible" in restarted_container.providers.providers
+        assert restarted_container.providers.providers["openai_compatible"].config.base_url == "http://127.0.0.1:8317/v1"
+        assert restarted_container.providers.providers["openai_compatible"].config.api_key == "test-openai-compatible-key"

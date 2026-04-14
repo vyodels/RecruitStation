@@ -2,10 +2,12 @@ import { useEffect, useState } from "react";
 import { Panel, StatusBadge } from "../../components";
 import { apiClient } from "../../lib/api";
 import { formatCompactDate } from "../../lib/format";
+import { useI18n } from "../../lib/i18n";
 import type { CandidateRecord } from "../../lib/types";
 import { CandidatesView } from "./CandidatesView";
 
 export function CandidatesPage() {
+  const { copy } = useI18n();
   const [candidates, setCandidates] = useState<CandidateRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -19,7 +21,7 @@ export function CandidatesPage() {
       setError(null);
       setLastRefreshedAt(new Date().toISOString());
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "Failed to load candidates.");
+      setError(loadError instanceof Error ? loadError.message : copy("Failed to load candidates.", "加载候选人失败。"));
     } finally {
       setLoading(false);
     }
@@ -31,8 +33,8 @@ export function CandidatesPage() {
 
   if (loading && candidates.length === 0) {
     return (
-      <Panel title="Candidate pipeline" eyebrow="Recruiting scene" description="Loading candidates from the local backend...">
-        <div style={{ color: "rgba(233,239,255,0.72)", fontSize: "14px" }}>Synchronizing workspace state.</div>
+      <Panel title={copy("Candidate pipeline", "候选人流水线")} eyebrow={copy("Recruiting scene", "招聘场景")} description={copy("Loading candidates from the local backend...", "正在从本地后端加载候选人...")}>
+        <div style={{ color: "rgba(233,239,255,0.72)", fontSize: "14px" }}>{copy("Synchronizing workspace state.", "正在同步工作区状态。")}</div>
       </Panel>
     );
   }
@@ -41,9 +43,9 @@ export function CandidatesPage() {
     <div style={{ display: "grid", gap: "16px" }}>
       {error ? (
         <Panel
-          title="Candidate pipeline"
-          eyebrow="Recruiting scene"
-          description="The desktop client could not refresh from the backend."
+          title={copy("Candidate pipeline", "候选人流水线")}
+          eyebrow={copy("Recruiting scene", "招聘场景")}
+          description={copy("The desktop client could not refresh from the backend.", "桌面客户端无法从后端刷新数据。")}
           actions={<StatusBadge tone="critical">error</StatusBadge>}
         >
           <div style={{ display: "grid", gap: "12px" }}>
@@ -62,7 +64,7 @@ export function CandidatesPage() {
                 fontWeight: 700,
               }}
             >
-              Retry
+              {copy("Retry", "重试")}
             </button>
           </div>
         </Panel>
@@ -71,10 +73,10 @@ export function CandidatesPage() {
       <div style={{ display: "flex", justifyContent: "space-between", gap: "12px", alignItems: "center" }}>
         <div style={{ color: "rgba(233,239,255,0.72)", fontSize: "13px" }}>
           {loading
-            ? "Refreshing candidate list..."
+            ? copy("Refreshing candidate list...", "正在刷新候选人列表...")
             : lastRefreshedAt
-              ? `Last refreshed ${formatCompactDate(lastRefreshedAt)}`
-              : "Candidate list is loaded from the backend."}
+              ? copy(`Last refreshed ${formatCompactDate(lastRefreshedAt)}`, `最近刷新于 ${formatCompactDate(lastRefreshedAt)}`)
+              : copy("Candidate list is loaded from the backend.", "候选人列表已从后端加载。")}
         </div>
         <button
           type="button"
@@ -90,7 +92,7 @@ export function CandidatesPage() {
             fontWeight: 700,
           }}
         >
-          {loading ? "Refreshing..." : "Refresh"}
+          {loading ? copy("Refreshing...", "刷新中...") : copy("Refresh", "刷新")}
         </button>
       </div>
 

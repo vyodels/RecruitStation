@@ -1,7 +1,9 @@
 import React, { useState } from "react";
 import { Panel, StatusBadge } from "../../components";
 import { formatCompactDate } from "../../lib/format";
+import { useI18n } from "../../lib/i18n";
 import { theme } from "../../lib/theme";
+import { translateUiToken } from "../../lib/uiText";
 import type { CompileTaskRequest, DomainPackRecord, RuntimeExecutionPlan, RuntimeTaskSpec } from "../../lib/types";
 
 interface RuntimeAuthoringViewProps {
@@ -33,6 +35,7 @@ export function RuntimeAuthoringView({
   onCompile,
   onCreateTrial,
 }: RuntimeAuthoringViewProps): JSX.Element {
+  const { copy } = useI18n();
   const [instruction, setInstruction] = useState("打开网站，帮我找到值得用的 PDF 转换器，比较后输出 shortlist。");
   const [title, setTitle] = useState("Research PDF converters");
   const [domainHint, setDomainHint] = useState("web_research");
@@ -40,13 +43,13 @@ export function RuntimeAuthoringView({
   return (
     <div style={{ display: "grid", gap: "18px" }}>
       <Panel
-        title="Task compiler"
-        eyebrow="Natural language entry"
-        description="Describe the task in normal language. The runtime compiles it into a TaskSpec and trial-ready ExecutionPlan."
+        title={copy("Task compiler", "任务编译器")}
+        eyebrow={copy("Natural language entry", "自然语言输入")}
+        description={copy("Describe the task in normal language. The runtime compiles it into a TaskSpec and trial-ready ExecutionPlan.", "用自然语言描述任务。运行时会把它编译成 TaskSpec 和可试跑的 ExecutionPlan。")}
       >
         <div style={{ display: "grid", gap: "12px" }}>
           <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) 220px", gap: "12px" }}>
-            <input style={inputStyle} value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Task title" />
+            <input style={inputStyle} value={title} onChange={(event) => setTitle(event.target.value)} placeholder={copy("Task title", "任务标题")} />
             <select style={inputStyle} value={domainHint} onChange={(event) => setDomainHint(event.target.value)}>
               {domainPacks.map((pack) => (
                 <option key={pack.key} value={pack.key}>
@@ -59,11 +62,11 @@ export function RuntimeAuthoringView({
             style={{ ...inputStyle, minHeight: "120px", resize: "vertical" }}
             value={instruction}
             onChange={(event) => setInstruction(event.target.value)}
-            placeholder="Describe what the agent should do and what output you expect."
+            placeholder={copy("Describe what the agent should do and what output you expect.", "描述希望 agent 执行的动作和你期望的输出。")}
           />
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", flexWrap: "wrap" }}>
             <div style={{ color: theme.colors.muted, fontSize: "13px" }}>
-              New tasks default into supervised trial mode and can later be promoted into templates and skills.
+              {copy("New tasks default into supervised trial mode and can later be promoted into templates and skills.", "新任务默认先进入受监督试跑模式，之后可提升为模板和 skills。")}
             </div>
             <button
               type="button"
@@ -79,16 +82,16 @@ export function RuntimeAuthoringView({
                 color: "#dcfff1",
               }}
             >
-              {compiling ? "Compiling..." : "Compile task"}
+              {compiling ? copy("Compiling...", "编译中...") : copy("Compile task", "编译任务")}
             </button>
           </div>
         </div>
       </Panel>
 
       <Panel
-        title="Recent task specs"
-        eyebrow="Compiled runtime tasks"
-        description="Each task stays local-first. Trial plans can be launched immediately, then reviewed before promotion."
+        title={copy("Recent task specs", "最近任务规格")}
+        eyebrow={copy("Compiled runtime tasks", "已编译运行时任务")}
+        description={copy("Each task stays local-first. Trial plans can be launched immediately, then reviewed before promotion.", "每个任务都遵循本地优先。试跑计划可立即启动，然后在提升前进行审查。")}
       >
         <div style={{ display: "grid", gap: "12px" }}>
           {taskSpecs.map((task) => {
@@ -110,7 +113,7 @@ export function RuntimeAuthoringView({
                     <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
                       <strong>{task.title}</strong>
                       <StatusBadge tone="neutral">{task.domain}</StatusBadge>
-                      <StatusBadge tone={task.status.includes("ready") ? "positive" : "warning"}>{task.status}</StatusBadge>
+                      <StatusBadge tone={task.status.includes("ready") ? "positive" : "warning"}>{translateUiToken(task.status, copy)}</StatusBadge>
                     </div>
                     <div style={{ marginTop: "6px", color: theme.colors.muted, fontSize: "13px", lineHeight: 1.5 }}>{task.goal}</div>
                   </div>
@@ -129,7 +132,7 @@ export function RuntimeAuthoringView({
                         color: "#edf4ff",
                       }}
                     >
-                      {trialTaskId === task.id ? "Creating trial..." : "Start trial"}
+                      {trialTaskId === task.id ? copy("Creating trial...", "创建试跑中...") : copy("Start trial", "启动试跑")}
                     </button>
                   ) : null}
                 </div>
@@ -141,8 +144,8 @@ export function RuntimeAuthoringView({
                   ))}
                 </div>
                 <div style={{ color: "rgba(233,239,255,0.56)", fontSize: "12px" }}>
-                  Updated {formatCompactDate(task.updatedAt)}
-                  {plan ? ` · Plan ${plan.name}` : " · No active plan"}
+                  {copy(`Updated ${formatCompactDate(task.updatedAt)}`, `更新于 ${formatCompactDate(task.updatedAt)}`)}
+                  {plan ? copy(` · Plan ${plan.name}`, ` · 计划 ${plan.name}`) : copy(" · No active plan", " · 暂无活动计划")}
                 </div>
               </article>
             );

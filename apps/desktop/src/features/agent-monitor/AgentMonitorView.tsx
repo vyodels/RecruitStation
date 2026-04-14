@@ -1,6 +1,8 @@
 import React from "react";
 import { Panel, StatusBadge, Timeline } from "../../components";
 import { formatCompactDate } from "../../lib/format";
+import { useI18n } from "../../lib/i18n";
+import { translateUiToken } from "../../lib/uiText";
 import { theme } from "../../lib/theme";
 import type { AgentEvent, AgentQueueItem, AgentSnapshot, RuntimeEpisode, RuntimeEpisodeReplay, SyncBacklogItem, SyncStatusSnapshot } from "../../lib/types";
 
@@ -44,17 +46,17 @@ function backlogTone(status: string): "positive" | "neutral" | "warning" | "crit
   return "neutral";
 }
 
-function syncModeDescription(syncStatus?: SyncStatusSnapshot | null): string {
+function syncModeDescription(syncStatus: SyncStatusSnapshot | null | undefined, copy: (en: string, zh: string) => string): string {
   if (!syncStatus) {
-    return "No sync status available.";
+    return copy("No sync status available.", "暂无同步状态。");
   }
   if (!syncStatus.enabled) {
-    return "Remote sync is disabled. Backlog entries stay local until an intranet target is enabled.";
+    return copy("Remote sync is disabled. Backlog entries stay local until an intranet target is enabled.", "远端同步未启用。backlog 项会保留在本地，直到启用内网目标。");
   }
   if (!syncStatus.remoteAvailable) {
-    return "Remote sync is enabled, but the target is currently unavailable.";
+    return copy("Remote sync is enabled, but the target is currently unavailable.", "远端同步已启用，但当前目标不可用。");
   }
-  return "Remote sync is enabled and reachable.";
+  return copy("Remote sync is enabled and reachable.", "远端同步已启用且可达。");
 }
 
 export function AgentMonitorView({
@@ -73,79 +75,81 @@ export function AgentMonitorView({
   onFlushSync,
   onSelectEpisode,
 }: AgentMonitorViewProps): JSX.Element {
+  const { copy } = useI18n();
+
   return (
     <div style={{ display: "grid", gap: "18px" }}>
       <div style={{ display: "grid", gap: "18px", gridTemplateColumns: "minmax(0, 1.1fr) minmax(320px, 0.9fr)" }}>
         <Panel
-          title="Agent runtime"
-          eyebrow="Serialized execution"
-          description="Current run state, browser lock status, and direct operator actions."
+          title={copy("Agent runtime", "Agent 运行态")}
+          eyebrow={copy("Serialized execution", "串行执行")}
+          description={copy("Current run state, browser lock status, and direct operator actions.", "当前运行状态、浏览器锁状态，以及可直接触发的操作员动作。")}
           actions={
             <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
               <button type="button" onClick={onQueueScreeningTask} disabled={runningAction} style={actionButtonStyle}>
-                Queue recruiting task
+                {copy("Queue recruiting task", "加入招聘任务")}
               </button>
               <button type="button" onClick={onRunOnce} disabled={runningAction} style={actionButtonStyle}>
-                {runningAction ? "Running..." : "Run next task"}
+                {runningAction ? copy("Running...", "运行中...") : copy("Run next task", "运行下一个任务")}
               </button>
             </div>
           }
         >
           <div style={{ display: "grid", gap: "12px" }}>
             <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-              <StatusBadge tone={agent.status === "running" ? "positive" : agent.status === "waiting_human" ? "warning" : "neutral"}>{agent.status}</StatusBadge>
-              <StatusBadge tone={agent.browserLock === "held" ? "warning" : "positive"}>{agent.browserLock}</StatusBadge>
-              <StatusBadge tone={agent.health === "healthy" ? "positive" : agent.health === "warning" ? "warning" : "critical"}>{agent.health}</StatusBadge>
+              <StatusBadge tone={agent.status === "running" ? "positive" : agent.status === "waiting_human" ? "warning" : "neutral"}>{translateUiToken(agent.status, copy)}</StatusBadge>
+              <StatusBadge tone={agent.browserLock === "held" ? "warning" : "positive"}>{translateUiToken(agent.browserLock, copy)}</StatusBadge>
+              <StatusBadge tone={agent.health === "healthy" ? "positive" : agent.health === "warning" ? "warning" : "critical"}>{translateUiToken(agent.health, copy)}</StatusBadge>
             </div>
             <div style={{ display: "grid", gap: "8px", color: "rgba(233,239,255,0.72)", fontSize: "13px" }}>
-              <div>Active task: {agent.activeTask}</div>
-              <div>Uptime: {agent.uptime}</div>
-              <div>Queue depth: {agent.queueDepth}</div>
-              <div>Token budget used: {agent.tokenBudgetUsed}%</div>
+              <div>{copy("Active task", "当前任务")}: {agent.activeTask}</div>
+              <div>{copy("Uptime", "运行时长")}: {agent.uptime}</div>
+              <div>{copy("Queue depth", "队列深度")}: {agent.queueDepth}</div>
+              <div>{copy("Token budget used", "Token 预算使用")}: {agent.tokenBudgetUsed}%</div>
             </div>
           </div>
         </Panel>
-        <Panel title="Sync backlog" eyebrow="Local-First Sync" description="Local backlog state and manual flush controls for optional intranet sync.">
+        <Panel title={copy("Sync backlog", "同步 backlog")} eyebrow={copy("Local-First Sync", "本地优先同步")} description={copy("Local backlog state and manual flush controls for optional intranet sync.", "可选内网同步的本地 backlog 状态和手动 flush 控制。")}>
           <div style={{ display: "grid", gap: "12px" }}>
             <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-              <StatusBadge tone={syncStatus?.enabled ? "positive" : "neutral"}>{syncStatus?.mode ?? "local_only"}</StatusBadge>
+              <StatusBadge tone={syncStatus?.enabled ? "positive" : "neutral"}>{translateUiToken(syncStatus?.mode ?? "local_only", copy)}</StatusBadge>
               <StatusBadge tone={syncStatus?.remoteAvailable ? "positive" : "warning"}>
-                {syncStatus?.remoteAvailable ? "remote reachable" : "remote unavailable"}
+                {syncStatus?.remoteAvailable ? copy("remote reachable", "远端可达") : copy("remote unavailable", "远端不可达")}
               </StatusBadge>
               <StatusBadge tone={syncStatus?.pendingCount ? "warning" : "positive"}>
-                {syncStatus?.pendingCount ?? syncBacklog.length} pending
+                {copy(`${syncStatus?.pendingCount ?? syncBacklog.length} pending`, `${syncStatus?.pendingCount ?? syncBacklog.length} 个待处理`)}
               </StatusBadge>
               {syncStatus?.failedDeliveryCount ? (
-                <StatusBadge tone="warning">{syncStatus.failedDeliveryCount} failed deliveries</StatusBadge>
+                <StatusBadge tone="warning">{copy(`${syncStatus.failedDeliveryCount} failed deliveries`, `${syncStatus.failedDeliveryCount} 个投递失败`)}</StatusBadge>
               ) : null}
-              {syncStatus?.deferredCount ? <StatusBadge tone="neutral">{syncStatus.deferredCount} deferred</StatusBadge> : null}
+              {syncStatus?.deferredCount ? <StatusBadge tone="neutral">{copy(`${syncStatus.deferredCount} deferred`, `${syncStatus.deferredCount} 个已延期`)}</StatusBadge> : null}
             </div>
             <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
-              {syncStatus?.recentErrors[0] ?? syncStatus?.latestError ?? syncModeDescription(syncStatus)}
+              {syncStatus?.recentErrors[0] ?? syncStatus?.latestError ?? syncModeDescription(syncStatus, copy)}
             </div>
             <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-              {syncStatus?.protocolVersion ? <StatusBadge tone="neutral">protocol {syncStatus.protocolVersion}</StatusBadge> : null}
-              {syncStatus?.source ? <StatusBadge tone="neutral">source {syncStatus.source}</StatusBadge> : null}
-              {typeof syncStatus?.backlogTotal === "number" ? <StatusBadge tone="neutral">{syncStatus.backlogTotal} total</StatusBadge> : null}
-              {syncStatus?.lastAttemptAt ? <StatusBadge tone="neutral">Last attempt {formatCompactDate(syncStatus.lastAttemptAt)}</StatusBadge> : null}
-              {syncStatus?.lastSuccessAt ? <StatusBadge tone="neutral">Last success {formatCompactDate(syncStatus.lastSuccessAt)}</StatusBadge> : null}
-              {syncStatus?.nextAttemptAt ? <StatusBadge tone="neutral">Next retry {formatCompactDate(syncStatus.nextAttemptAt)}</StatusBadge> : null}
+              {syncStatus?.protocolVersion ? <StatusBadge tone="neutral">{copy(`protocol ${syncStatus.protocolVersion}`, `协议 ${syncStatus.protocolVersion}`)}</StatusBadge> : null}
+              {syncStatus?.source ? <StatusBadge tone="neutral">{copy(`source ${syncStatus.source}`, `来源 ${syncStatus.source}`)}</StatusBadge> : null}
+              {typeof syncStatus?.backlogTotal === "number" ? <StatusBadge tone="neutral">{copy(`${syncStatus.backlogTotal} total`, `总计 ${syncStatus.backlogTotal}`)}</StatusBadge> : null}
+              {syncStatus?.lastAttemptAt ? <StatusBadge tone="neutral">{copy(`Last attempt ${formatCompactDate(syncStatus.lastAttemptAt)}`, `最近尝试于 ${formatCompactDate(syncStatus.lastAttemptAt)}`)}</StatusBadge> : null}
+              {syncStatus?.lastSuccessAt ? <StatusBadge tone="neutral">{copy(`Last success ${formatCompactDate(syncStatus.lastSuccessAt)}`, `最近成功于 ${formatCompactDate(syncStatus.lastSuccessAt)}`)}</StatusBadge> : null}
+              {syncStatus?.nextAttemptAt ? <StatusBadge tone="neutral">{copy(`Next retry ${formatCompactDate(syncStatus.nextAttemptAt)}`, `下次重试 ${formatCompactDate(syncStatus.nextAttemptAt)}`)}</StatusBadge> : null}
             </div>
             {syncStatus?.byStatus && Object.keys(syncStatus.byStatus).length ? (
               <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
-                Status mix: {Object.entries(syncStatus.byStatus).map(([key, value]) => `${key}=${value}`).join(" · ")}
+                {copy("Status mix", "状态分布")}: {Object.entries(syncStatus.byStatus).map(([key, value]) => `${key}=${value}`).join(" · ")}
               </div>
             ) : null}
             {onFlushSync ? (
               <button type="button" onClick={onFlushSync} disabled={syncingAction} style={actionButtonStyle}>
-                {syncingAction ? "Flushing..." : "Flush backlog"}
+                {syncingAction ? copy("Flushing...", "刷新中...") : copy("Flush backlog", "刷新 backlog")}
               </button>
             ) : null}
           </div>
         </Panel>
       </div>
 
-      <Panel title="Queue audit" eyebrow="Persistent queue" description="Recent queued work and lifecycle audit emitted by the serialized scheduler.">
+      <Panel title={copy("Queue audit", "队列审计")} eyebrow={copy("Persistent queue", "持久化队列")} description={copy("Recent queued work and lifecycle audit emitted by the serialized scheduler.", "串行调度器输出的近期排队任务和生命周期审计。")}>
         <div style={{ display: "grid", gap: "12px" }}>
           {queueItems.length ? (
             queueItems.slice(0, 4).map((item) => (
@@ -162,20 +166,20 @@ export function AgentMonitorView({
               >
                 <div style={{ display: "flex", justifyContent: "space-between", gap: "8px", flexWrap: "wrap" }}>
                   <strong>{item.taskType}</strong>
-                  <StatusBadge tone={backlogTone(item.status)}>{item.status}</StatusBadge>
+                  <StatusBadge tone={backlogTone(item.status)}>{translateUiToken(item.status, copy)}</StatusBadge>
                 </div>
                 <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.5 }}>
                   {item.taskId}
-                  {item.candidateId ? ` · candidate ${item.candidateId}` : ""}
-                  {item.workflowNodeId ? ` · node ${item.workflowNodeId}` : ""}
+                  {item.candidateId ? copy(` · candidate ${item.candidateId}`, ` · 候选人 ${item.candidateId}`) : ""}
+                  {item.workflowNodeId ? copy(` · node ${item.workflowNodeId}`, ` · 节点 ${item.workflowNodeId}`) : ""}
                 </div>
                 <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-                  <StatusBadge tone="neutral">priority {item.priority}</StatusBadge>
-                  <StatusBadge tone="neutral">attempts {item.attempts}</StatusBadge>
+                  <StatusBadge tone="neutral">{copy(`priority ${item.priority}`, `优先级 ${item.priority}`)}</StatusBadge>
+                  <StatusBadge tone="neutral">{copy(`attempts ${item.attempts}`, `尝试 ${item.attempts}`)}</StatusBadge>
                 </div>
                 {item.queueAudit.length ? (
                   <div style={{ color: theme.colors.muted, fontSize: "12px", lineHeight: 1.6 }}>
-                    Audit:{" "}
+                    {copy("Audit", "审计")}:{" "}
                     {item.queueAudit
                       .slice(-3)
                       .map((entry) => `${entry.kind}${entry.error ? ` (${entry.error})` : ""}`)
@@ -185,13 +189,13 @@ export function AgentMonitorView({
               </article>
             ))
           ) : (
-            <div style={{ color: theme.colors.muted, fontSize: "13px" }}>Queue audit will appear after the scheduler persists work items.</div>
+            <div style={{ color: theme.colors.muted, fontSize: "13px" }}>{copy("Queue audit will appear after the scheduler persists work items.", "调度器持久化工作项后，这里会显示队列审计。")}</div>
           )}
         </div>
       </Panel>
 
       <div style={{ display: "grid", gap: "18px", gridTemplateColumns: "minmax(0, 1.1fr) minmax(320px, 0.9fr)" }}>
-        <Panel title="Replay diagnostics" eyebrow="Episode Replay" description="Select a supervised episode to inspect divergence, snapshots, and derived learning artifacts.">
+        <Panel title={copy("Replay diagnostics", "回放诊断")} eyebrow={copy("Episode Replay", "Episode 回放")} description={copy("Select a supervised episode to inspect divergence, snapshots, and derived learning artifacts.", "选择一个受监督 episode，检查偏差、快照和衍生学习产物。")}>
           <div style={{ display: "grid", gap: "12px" }}>
             {episodes.length ? (
               <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
@@ -213,22 +217,22 @@ export function AgentMonitorView({
             {replay ? (
               <div style={{ display: "grid", gap: "12px" }}>
                 <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-                  <StatusBadge tone={replay.episode.divergenceDetected ? "critical" : "positive"}>{replay.episode.status}</StatusBadge>
-                  {replay.patch ? <StatusBadge tone="warning">patch proposed</StatusBadge> : null}
-                  {replay.template ? <StatusBadge tone="positive">template ready</StatusBadge> : null}
-                  {replay.approval ? <StatusBadge tone="warning">approval pending</StatusBadge> : null}
+                  <StatusBadge tone={replay.episode.divergenceDetected ? "critical" : "positive"}>{translateUiToken(replay.episode.status, copy)}</StatusBadge>
+                  {replay.patch ? <StatusBadge tone="warning">{copy("patch proposed", "patch 已提出")}</StatusBadge> : null}
+                  {replay.template ? <StatusBadge tone="positive">{copy("template ready", "模板已就绪")}</StatusBadge> : null}
+                  {replay.approval ? <StatusBadge tone="warning">{copy("approval pending", "审批待处理")}</StatusBadge> : null}
                 </div>
                 <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
-                  {replay.episode.resultSummary ?? "No replay summary available."}
+                  {replay.episode.resultSummary ?? copy("No replay summary available.", "暂无回放摘要。")}
                 </div>
                 <Timeline events={replay.diagnostics} />
               </div>
             ) : (
-              <div style={{ color: theme.colors.muted, fontSize: "13px" }}>Replay diagnostics will appear after you select a trial episode.</div>
+              <div style={{ color: theme.colors.muted, fontSize: "13px" }}>{copy("Replay diagnostics will appear after you select a trial episode.", "选择试跑 episode 后，这里会显示回放诊断。")}</div>
             )}
           </div>
         </Panel>
-        <Panel title="Replay context" eyebrow="Snapshots and backlog" description="Captured environment state and the newest local sync backlog entries.">
+        <Panel title={copy("Replay context", "回放上下文")} eyebrow={copy("Snapshots and backlog", "快照与 backlog")} description={copy("Captured environment state and the newest local sync backlog entries.", "捕获的环境状态与最新本地同步 backlog 条目。")}>
           <div style={{ display: "grid", gap: "12px" }}>
             {replay?.snapshots?.length ? (
               replay.snapshots.map((snapshot) => (
@@ -247,11 +251,11 @@ export function AgentMonitorView({
                     <strong>{snapshot.title ?? snapshot.environmentKey ?? snapshot.id}</strong>
                     <StatusBadge tone="neutral">{snapshot.pageType ?? snapshot.source}</StatusBadge>
                   </div>
-                  <div style={{ color: theme.colors.muted, fontSize: "13px" }}>{snapshot.url ?? "No URL captured."}</div>
+                  <div style={{ color: theme.colors.muted, fontSize: "13px" }}>{snapshot.url ?? copy("No URL captured.", "未捕获 URL。")}</div>
                 </article>
               ))
             ) : (
-              <div style={{ color: theme.colors.muted, fontSize: "13px" }}>No replay snapshots available for the selected episode.</div>
+              <div style={{ color: theme.colors.muted, fontSize: "13px" }}>{copy("No replay snapshots available for the selected episode.", "所选 episode 暂无回放快照。")}</div>
             )}
             <div style={{ display: "grid", gap: "8px" }}>
               {syncBacklog.slice(0, 3).map((item) => (
@@ -268,22 +272,22 @@ export function AgentMonitorView({
                 >
                   <div style={{ display: "flex", justifyContent: "space-between", gap: "8px", flexWrap: "wrap" }}>
                     <strong>{item.entityType}</strong>
-                    <StatusBadge tone={backlogTone(item.status)}>{item.status}</StatusBadge>
+                    <StatusBadge tone={backlogTone(item.status)}>{translateUiToken(item.status, copy)}</StatusBadge>
                   </div>
                   <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.5 }}>
                     {item.payloadSummary ?? item.target}
                   </div>
                   <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
                     <StatusBadge tone="neutral">{item.target}</StatusBadge>
-                    <StatusBadge tone="neutral">attempts {item.attemptCount}</StatusBadge>
+                    <StatusBadge tone="neutral">{copy(`attempts ${item.attemptCount}`, `尝试 ${item.attemptCount}`)}</StatusBadge>
                     {item.deliveryMode ? <StatusBadge tone="neutral">{item.deliveryMode}</StatusBadge> : null}
-                    {item.protocolVersion ? <StatusBadge tone="neutral">protocol {item.protocolVersion}</StatusBadge> : null}
+                    {item.protocolVersion ? <StatusBadge tone="neutral">{copy(`protocol ${item.protocolVersion}`, `协议 ${item.protocolVersion}`)}</StatusBadge> : null}
                   </div>
                   {(item.lastAttemptedAt || item.nextAttemptAt || item.lastError) ? (
                     <div style={{ color: theme.colors.muted, fontSize: "12px", lineHeight: 1.6 }}>
-                      {item.lastAttemptedAt ? `Last attempt ${formatCompactDate(item.lastAttemptedAt)} · ` : ""}
-                      {item.nextAttemptAt ? `Next retry ${formatCompactDate(item.nextAttemptAt)} · ` : ""}
-                      {item.lastError ? `Error: ${item.lastError}` : "No delivery error recorded."}
+                      {item.lastAttemptedAt ? copy(`Last attempt ${formatCompactDate(item.lastAttemptedAt)} · `, `最近尝试于 ${formatCompactDate(item.lastAttemptedAt)} · `) : ""}
+                      {item.nextAttemptAt ? copy(`Next retry ${formatCompactDate(item.nextAttemptAt)} · `, `下次重试 ${formatCompactDate(item.nextAttemptAt)} · `) : ""}
+                      {item.lastError ? copy(`Error: ${item.lastError}`, `错误：${item.lastError}`) : copy("No delivery error recorded.", "未记录投递错误。")}
                     </div>
                   ) : null}
                 </article>
@@ -293,7 +297,7 @@ export function AgentMonitorView({
         </Panel>
       </div>
 
-      <Panel title="Runtime events" eyebrow="Agent stream" description="Events that can be surfaced in the final desktop event stream.">
+      <Panel title={copy("Runtime events", "运行时事件")} eyebrow={copy("Agent stream", "Agent 事件流")} description={copy("Events that can be surfaced in the final desktop event stream.", "可在桌面事件流中展示的运行时事件。")}>
         <Timeline
           events={events.map((event) => ({
             id: event.id,

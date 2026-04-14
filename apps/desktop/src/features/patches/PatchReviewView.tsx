@@ -1,6 +1,7 @@
 import React from "react";
 import { Panel, StatusBadge } from "../../components";
 import { formatCompactDate } from "../../lib/format";
+import { useI18n } from "../../lib/i18n";
 import type { RuntimePatch } from "../../lib/types";
 
 interface PatchReviewViewProps {
@@ -19,11 +20,13 @@ const buttonStyle = {
 } as const;
 
 export function PatchReviewView({ patches, busyPatchId, onApprove, onReject }: PatchReviewViewProps): JSX.Element {
+  const { copy } = useI18n();
+
   return (
     <Panel
-      title="Workflow patches"
-      eyebrow="Divergence review"
-      description="When a trial diverges from the current plan, the runtime proposes a patch. Review it here before rollout."
+      title={copy("Workflow patches", "工作流补丁")}
+      eyebrow={copy("Divergence review", "偏差审查")}
+      description={copy("When a trial diverges from the current plan, the runtime proposes a patch. Review it here before rollout.", "当试跑偏离当前计划时，运行时会提出一个 patch。请在 rollout 前在此审查。")}
     >
       <div style={{ display: "grid", gap: "12px" }}>
         {patches.map((patch) => {
@@ -49,34 +52,34 @@ export function PatchReviewView({ patches, busyPatchId, onApprove, onReject }: P
                     </StatusBadge>
                   </div>
                   <div style={{ marginTop: "6px", color: "rgba(233,239,255,0.7)", fontSize: "13px", lineHeight: 1.5 }}>
-                    {patch.divergenceSummary ?? patch.rationale ?? "No patch summary provided."}
+                    {patch.divergenceSummary ?? patch.rationale ?? copy("No patch summary provided.", "未提供 patch 摘要。")}
                   </div>
                 </div>
                 <div style={{ color: "rgba(233,239,255,0.56)", fontSize: "12px" }}>
-                  {patch.reviewedAt ? `Reviewed ${formatCompactDate(patch.reviewedAt)}` : `Raised ${formatCompactDate(patch.createdAt)}`}
+                  {patch.reviewedAt ? copy(`Reviewed ${formatCompactDate(patch.reviewedAt)}`, `审查于 ${formatCompactDate(patch.reviewedAt)}`) : copy(`Raised ${formatCompactDate(patch.createdAt)}`, `提出于 ${formatCompactDate(patch.createdAt)}`)}
                 </div>
               </div>
               <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
                 <StatusBadge tone="neutral">{patch.patchKind}</StatusBadge>
-                {patch.templateId ? <StatusBadge tone="neutral">template {patch.templateId.slice(0, 8)}</StatusBadge> : null}
-                {patch.executionEpisodeId ? <StatusBadge tone="neutral">episode {patch.executionEpisodeId.slice(0, 8)}</StatusBadge> : null}
+                {patch.templateId ? <StatusBadge tone="neutral">{copy(`template ${patch.templateId.slice(0, 8)}`, `模板 ${patch.templateId.slice(0, 8)}`)}</StatusBadge> : null}
+                {patch.executionEpisodeId ? <StatusBadge tone="neutral">{copy(`episode ${patch.executionEpisodeId.slice(0, 8)}`, `episode ${patch.executionEpisodeId.slice(0, 8)}`)}</StatusBadge> : null}
                 {patch.runtimeMetadata?.apply_result && typeof patch.runtimeMetadata.apply_result === "object" ? (
                   <StatusBadge tone="positive">
-                    plan {String((patch.runtimeMetadata.apply_result as Record<string, unknown>).execution_plan_version ?? "applied")}
+                    {copy(`plan ${String((patch.runtimeMetadata.apply_result as Record<string, unknown>).execution_plan_version ?? "applied")}`, `计划 ${String((patch.runtimeMetadata.apply_result as Record<string, unknown>).execution_plan_version ?? "applied")}`)}
                   </StatusBadge>
                 ) : null}
               </div>
               {patch.runtimeMetadata?.apply_result && typeof patch.runtimeMetadata.apply_result === "object" ? (
                 <div style={{ color: "rgba(233,239,255,0.68)", fontSize: "13px", lineHeight: 1.6 }}>
-                  Applied artifacts:
+                  {copy("Applied artifacts", "已应用产物")}:
                   {(() => {
                     const result = patch.runtimeMetadata.apply_result as Record<string, unknown>;
                     const parts = [
-                      result.execution_plan_id ? ` plan ${String(result.execution_plan_id).slice(0, 8)}` : "",
-                      result.template_id ? ` template ${String(result.template_id).slice(0, 8)}` : "",
-                      result.previous_plan_id ? ` from ${String(result.previous_plan_id).slice(0, 8)}` : "",
+                      result.execution_plan_id ? copy(` plan ${String(result.execution_plan_id).slice(0, 8)}`, ` 计划 ${String(result.execution_plan_id).slice(0, 8)}`) : "",
+                      result.template_id ? copy(` template ${String(result.template_id).slice(0, 8)}`, ` 模板 ${String(result.template_id).slice(0, 8)}`) : "",
+                      result.previous_plan_id ? copy(` from ${String(result.previous_plan_id).slice(0, 8)}`, ` 来自 ${String(result.previous_plan_id).slice(0, 8)}`) : "",
                     ].filter(Boolean);
-                    return parts.length ? parts.join(" ·") : " no persisted artifacts recorded.";
+                    return parts.length ? parts.join(" ·") : copy(" no persisted artifacts recorded.", " 未记录持久化产物。");
                   })()}
                 </div>
               ) : null}
@@ -88,7 +91,7 @@ export function PatchReviewView({ patches, busyPatchId, onApprove, onReject }: P
                     disabled={busy}
                     style={{ ...buttonStyle, background: "rgba(93,216,163,0.14)", color: "#d7ffef" }}
                   >
-                    {busy ? "Working..." : "Approve and apply"}
+                    {busy ? copy("Working...", "处理中...") : copy("Approve and apply", "批准并应用")}
                   </button>
                   <button
                     type="button"
@@ -96,7 +99,7 @@ export function PatchReviewView({ patches, busyPatchId, onApprove, onReject }: P
                     disabled={busy}
                     style={{ ...buttonStyle, background: "rgba(255,122,122,0.12)", color: "#ffd9d9" }}
                   >
-                    Reject
+                    {copy("Reject", "拒绝")}
                   </button>
                 </div>
               ) : null}

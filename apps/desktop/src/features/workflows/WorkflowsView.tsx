@@ -1,6 +1,8 @@
 import React from "react";
 import { Panel, StatusBadge } from "../../components";
 import { formatCompactDate } from "../../lib/format";
+import { useI18n } from "../../lib/i18n";
+import { translateUiToken } from "../../lib/uiText";
 import type { WorkflowDefinition } from "../../lib/types";
 
 interface WorkflowsViewProps {
@@ -8,6 +10,8 @@ interface WorkflowsViewProps {
 }
 
 export function WorkflowsView({ workflows }: WorkflowsViewProps): JSX.Element {
+  const { copy } = useI18n();
+
   return (
     <div style={{ display: "grid", gap: "18px" }}>
       {workflows.map((workflow) => (
@@ -15,8 +19,8 @@ export function WorkflowsView({ workflows }: WorkflowsViewProps): JSX.Element {
           key={workflow.id}
           title={workflow.name}
           eyebrow={workflow.jdTitle}
-          description={`Version ${workflow.version} · Updated ${formatCompactDate(workflow.updatedAt)}`}
-          actions={<StatusBadge tone={workflow.status === "active" ? "positive" : workflow.status === "draft" ? "warning" : "neutral"}>{workflow.status}</StatusBadge>}
+          description={copy(`Version ${workflow.version} · Updated ${formatCompactDate(workflow.updatedAt)}`, `版本 ${workflow.version} · 更新于 ${formatCompactDate(workflow.updatedAt)}`)}
+          actions={<StatusBadge tone={workflow.status === "active" ? "positive" : workflow.status === "draft" ? "warning" : "neutral"}>{translateUiToken(workflow.status, copy)}</StatusBadge>}
         >
           <div style={{ display: "grid", gap: "10px" }}>
             {workflow.nodes.map((node, index) => (
@@ -40,11 +44,11 @@ export function WorkflowsView({ workflows }: WorkflowsViewProps): JSX.Element {
                   <div style={{ fontWeight: 700 }}>{node.name}</div>
                   <div style={{ color: "rgba(233,239,255,0.72)", fontSize: "13px", lineHeight: 1.5 }}>{node.description}</div>
                   <div style={{ color: "rgba(233,239,255,0.55)", fontSize: "12px", marginTop: "4px" }}>
-                    Node {node.id} · Owner {node.owner}
+                    {copy(`Node ${node.id} · Owner ${node.owner}`, `节点 ${node.id} · 负责人 ${node.owner}`)}
                   </div>
                 </div>
                 <StatusBadge tone={node.status === "approved" ? "positive" : node.status === "running" ? "warning" : node.status === "blocked" ? "critical" : "neutral"}>
-                  {node.kind}
+                  {translateUiToken(node.kind, copy)}
                 </StatusBadge>
               </div>
             ))}
@@ -54,4 +58,3 @@ export function WorkflowsView({ workflows }: WorkflowsViewProps): JSX.Element {
     </div>
   );
 }
-

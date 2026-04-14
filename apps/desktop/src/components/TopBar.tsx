@@ -1,5 +1,7 @@
 import React from "react";
+import { useI18n } from "../lib/i18n";
 import { theme } from "../lib/theme";
+import { translateUiToken } from "../lib/uiText";
 import type { AgentSnapshot, SettingsSnapshot } from "../lib/types";
 import { StatusBadge } from "./StatusBadge";
 
@@ -22,6 +24,7 @@ const actionButtonStyle = {
 } as const;
 
 export function TopBar({ agent, settings, transport, onRefresh, refreshing }: TopBarProps): JSX.Element {
+  const { language, setLanguage, copy } = useI18n();
   return (
     <header
       style={{
@@ -36,21 +39,48 @@ export function TopBar({ agent, settings, transport, onRefresh, refreshing }: To
       }}
     >
       <div>
-        <div style={{ color: theme.colors.muted, fontSize: "12px" }}>Workspace</div>
+        <div style={{ color: theme.colors.muted, fontSize: "12px" }}>{copy("Workspace", "工作台")}</div>
         <div style={{ display: "flex", alignItems: "center", gap: "10px", marginTop: "4px" }}>
-          <h2 style={{ margin: 0, fontSize: "18px" }}>General automation runtime</h2>
-          <StatusBadge tone={agent.health === "healthy" ? "positive" : agent.health === "warning" ? "warning" : "critical"}>{agent.status}</StatusBadge>
+          <h2 style={{ margin: 0, fontSize: "18px" }}>{copy("General automation runtime", "通用自动化运行时")}</h2>
+          <StatusBadge tone={agent.health === "healthy" ? "positive" : agent.health === "warning" ? "warning" : "critical"}>{translateUiToken(agent.status, copy)}</StatusBadge>
         </div>
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap", justifyContent: "end" }}>
+        <div style={{ display: "inline-flex", border: `1px solid ${theme.colors.border}`, borderRadius: theme.radius.md, overflow: "hidden" }}>
+          {[
+            { key: "en", label: "EN" },
+            { key: "zh-CN", label: "中文" },
+          ].map((option) => {
+            const active = language === option.key;
+            return (
+              <button
+                key={option.key}
+                type="button"
+                onClick={() => setLanguage(option.key as "en" | "zh-CN")}
+                style={{
+                  border: "none",
+                  background: active ? "rgba(122,167,255,0.18)" : "transparent",
+                  color: theme.colors.text,
+                  padding: "8px 12px",
+                  cursor: "pointer",
+                  fontWeight: 700,
+                }}
+              >
+                {option.label}
+              </button>
+            );
+          })}
+        </div>
         <StatusBadge tone={transport === "http" ? "positive" : "warning"}>
-          {transport === "http" ? "backend connected" : "mock fallback"}
+          {transport === "http" ? copy("backend connected", "后端已连接") : copy("mock fallback", "降级为本地 mock")}
         </StatusBadge>
         <StatusBadge tone="neutral">{settings.platform.account}</StatusBadge>
-        <StatusBadge tone={settings.intranetEnabled ? "positive" : "neutral"}>{settings.intranetEnabled ? "intranet sync on" : "local only"}</StatusBadge>
-        <StatusBadge tone={settings.desktopApprovalsOnly ? "warning" : "neutral"}>desktop approvals</StatusBadge>
+        <StatusBadge tone={settings.intranetEnabled ? "positive" : "neutral"}>
+          {settings.intranetEnabled ? copy("intranet sync on", "内网同步开启") : copy("local only", "仅本地")}
+        </StatusBadge>
+        <StatusBadge tone={settings.desktopApprovalsOnly ? "warning" : "neutral"}>{copy("desktop approvals", "桌面审批")}</StatusBadge>
         <button type="button" onClick={onRefresh} disabled={refreshing} style={actionButtonStyle}>
-          {refreshing ? "Refreshing..." : "Refresh"}
+          {refreshing ? copy("Refreshing...", "刷新中...") : copy("Refresh", "刷新")}
         </button>
       </div>
     </header>

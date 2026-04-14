@@ -1,11 +1,21 @@
 import React, { useEffect, useState } from "react";
 import { Panel, StatusBadge } from "../../components";
+import { useI18n } from "../../lib/i18n";
 import type { SettingsSnapshot } from "../../lib/types";
 
 interface SettingsViewProps {
   settings: SettingsSnapshot;
   saving?: boolean;
   onSave(settings: Partial<SettingsSnapshot>): Promise<void> | void;
+}
+
+function translateSettingLabel(value: string): string {
+  const table: Record<string, string> = {
+    "Recruiting scene profile": "招聘场景配置",
+    "Primary OpenAI API": "主 OpenAI API",
+    "Fallback Anthropic": "备用 Anthropic",
+  };
+  return table[value] ?? value;
 }
 
 const inputStyle = {
@@ -18,6 +28,7 @@ const inputStyle = {
 } as const;
 
 export function SettingsView({ settings, saving, onSave }: SettingsViewProps): JSX.Element {
+  const { copy } = useI18n();
   const [draft, setDraft] = useState(settings);
 
   useEffect(() => {
@@ -26,17 +37,17 @@ export function SettingsView({ settings, saving, onSave }: SettingsViewProps): J
 
   return (
     <div style={{ display: "grid", gap: "18px", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))" }}>
-      <Panel title="Execution settings" eyebrow="Local-first" description="Base workspace settings and safety gates.">
+      <Panel title={copy("Execution settings", "执行设置")} eyebrow={copy("Local-first", "本地优先")} description={copy("Base workspace settings and safety gates.", "工作台基础设置与安全控制。")}>
         <div style={{ display: "grid", gap: "10px" }}>
-          <StatusBadge tone={draft.desktopApprovalsOnly ? "warning" : "neutral"}>{draft.desktopApprovalsOnly ? "desktop approvals only" : "mixed approvals"}</StatusBadge>
-          <StatusBadge tone={draft.intranetEnabled ? "positive" : "neutral"}>{draft.intranetEnabled ? "intranet sync enabled" : "no intranet sync"}</StatusBadge>
+          <StatusBadge tone={draft.desktopApprovalsOnly ? "warning" : "neutral"}>{draft.desktopApprovalsOnly ? copy("desktop approvals only", "仅桌面审批") : copy("mixed approvals", "混合审批")}</StatusBadge>
+          <StatusBadge tone={draft.intranetEnabled ? "positive" : "neutral"}>{draft.intranetEnabled ? copy("intranet sync enabled", "已启用内网同步") : copy("no intranet sync", "未启用内网同步")}</StatusBadge>
           <StatusBadge tone={draft.skillHealthAutonomyEnabled ? "positive" : "neutral"}>
             {draft.skillHealthAutonomyEnabled
-              ? `skill health autonomy every ${draft.skillHealthAutonomyIntervalSeconds}s`
-              : "skill health autonomy idle"}
+              ? copy(`skill health autonomy every ${draft.skillHealthAutonomyIntervalSeconds}s`, `skill health 巡检每 ${draft.skillHealthAutonomyIntervalSeconds} 秒执行一次`)
+              : copy("skill health autonomy idle", "skill health 巡检未启用")}
           </StatusBadge>
           <div style={{ color: "rgba(233,239,255,0.72)", fontSize: "13px" }}>
-            Locale {draft.locale} · Timezone {draft.timezone}
+            {copy("Locale", "语言区域")} {draft.locale} · {copy("Timezone", "时区")} {draft.timezone}
           </div>
           <label style={{ display: "flex", alignItems: "center", gap: "10px", fontSize: "14px" }}>
             <input
@@ -44,7 +55,7 @@ export function SettingsView({ settings, saving, onSave }: SettingsViewProps): J
               checked={draft.intranetEnabled}
               onChange={(event) => setDraft((current) => ({ ...current, intranetEnabled: event.target.checked }))}
             />
-            Enable intranet sync
+            {copy("Enable intranet sync", "启用内网同步")}
           </label>
           <label style={{ display: "flex", alignItems: "center", gap: "10px", fontSize: "14px" }}>
             <input
@@ -52,7 +63,7 @@ export function SettingsView({ settings, saving, onSave }: SettingsViewProps): J
               checked={draft.desktopApprovalsOnly}
               onChange={(event) => setDraft((current) => ({ ...current, desktopApprovalsOnly: event.target.checked }))}
             />
-            Keep approvals desktop-only
+            {copy("Keep approvals desktop-only", "审批仅在桌面端完成")}
           </label>
           <label style={{ display: "flex", alignItems: "center", gap: "10px", fontSize: "14px" }}>
             <input
@@ -65,10 +76,10 @@ export function SettingsView({ settings, saving, onSave }: SettingsViewProps): J
                 }))
               }
             />
-            Enable periodic skill health autonomy
+            {copy("Enable periodic skill health autonomy", "启用周期性 skill health 巡检")}
           </label>
           <label style={{ display: "grid", gap: "6px", fontSize: "13px", color: "rgba(233,239,255,0.72)" }}>
-            Skill health autonomy interval (seconds)
+            {copy("Skill health autonomy interval (seconds)", "skill health 巡检间隔（秒）")}
             <input
               type="number"
               min={1}
@@ -84,10 +95,10 @@ export function SettingsView({ settings, saving, onSave }: SettingsViewProps): J
           </label>
         </div>
       </Panel>
-      <Panel title="Platform profile" eyebrow={draft.platform.name} description="Current platform account and contact policy.">
+      <Panel title={copy("Platform profile", "平台配置")} eyebrow={translateSettingLabel(draft.platform.name)} description={copy("Current platform account and contact policy.", "当前平台账号与联络策略。")}>
         <div style={{ display: "grid", gap: "10px" }}>
           <label style={{ display: "grid", gap: "6px", fontSize: "13px", color: "rgba(233,239,255,0.72)" }}>
-            Account
+            {copy("Account", "账号")}
             <input
               type="text"
               value={draft.platform.account}
@@ -101,7 +112,7 @@ export function SettingsView({ settings, saving, onSave }: SettingsViewProps): J
             />
           </label>
           <label style={{ display: "grid", gap: "6px", fontSize: "13px", color: "rgba(233,239,255,0.72)" }}>
-            Cooldown days
+            {copy("Cooldown days", "冷却天数")}
             <input
               type="number"
               min={1}
@@ -119,7 +130,7 @@ export function SettingsView({ settings, saving, onSave }: SettingsViewProps): J
             />
           </label>
           <StatusBadge tone={draft.platform.allowOutboundMessaging ? "positive" : "warning"}>
-            {draft.platform.allowOutboundMessaging ? "outbound messaging on" : "outbound messaging gated"}
+            {draft.platform.allowOutboundMessaging ? copy("outbound messaging on", "允许外发消息") : copy("outbound messaging gated", "外发消息受控")}
           </StatusBadge>
           <label style={{ display: "flex", alignItems: "center", gap: "10px", fontSize: "14px" }}>
             <input
@@ -132,16 +143,16 @@ export function SettingsView({ settings, saving, onSave }: SettingsViewProps): J
                 }))
               }
             />
-            Allow outbound messaging
+            {copy("Allow outbound messaging", "允许外发消息")}
           </label>
         </div>
       </Panel>
-      <Panel title="Providers" eyebrow="LLM routing" description="Provider preferences and deployment targets.">
+      <Panel title={copy("Providers", "模型提供方")} eyebrow={copy("LLM routing", "LLM 路由")} description={copy("Provider preferences and deployment targets.", "模型提供方偏好与部署目标。")}>
         <div style={{ display: "grid", gap: "10px" }}>
           {draft.providers.map((provider) => (
             <article key={provider.name} style={{ padding: "14px", borderRadius: "16px", background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)" }}>
               <div style={{ display: "flex", justifyContent: "space-between", gap: "8px" }}>
-                <strong>{provider.name}</strong>
+                <strong>{translateSettingLabel(provider.name)}</strong>
                 <StatusBadge tone={provider.enabled ? "positive" : "neutral"}>{provider.kind}</StatusBadge>
               </div>
               <div style={{ color: "rgba(233,239,255,0.72)", fontSize: "13px", marginTop: "6px" }}>{provider.model}</div>
@@ -171,7 +182,7 @@ export function SettingsView({ settings, saving, onSave }: SettingsViewProps): J
               fontWeight: 700,
             }}
           >
-            {saving ? "Saving..." : "Save settings"}
+            {saving ? copy("Saving...", "保存中...") : copy("Save settings", "保存设置")}
           </button>
         </div>
       </Panel>

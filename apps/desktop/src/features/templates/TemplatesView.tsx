@@ -1,6 +1,7 @@
 import React from "react";
 import { Panel, StatusBadge } from "../../components";
 import { formatCompactDate } from "../../lib/format";
+import { useI18n } from "../../lib/i18n";
 import { theme } from "../../lib/theme";
 import type { RuntimeTemplate } from "../../lib/types";
 
@@ -9,11 +10,13 @@ interface TemplatesViewProps {
 }
 
 export function TemplatesView({ templates }: TemplatesViewProps): JSX.Element {
+  const { copy } = useI18n();
+
   return (
     <Panel
-      title="Template library"
-      eyebrow="Reusable workflows"
-      description="Validated runs are promoted here as reusable templates. Draft templates stay approval-gated until they are confirmed."
+      title={copy("Template library", "模板库")}
+      eyebrow={copy("Reusable workflows", "可复用工作流")}
+      description={copy("Validated runs are promoted here as reusable templates. Draft templates stay approval-gated until they are confirmed.", "已验证的运行会在这里提升为可复用模板。草稿模板在确认前仍受审批控制。")}
     >
       <div style={{ display: "grid", gap: "12px" }}>
         {templates.map((template) => {
@@ -41,12 +44,12 @@ export function TemplatesView({ templates }: TemplatesViewProps): JSX.Element {
                   </div>
                   <div style={{ marginTop: "6px", color: theme.colors.muted, fontSize: "13px" }}>{template.templateKey}</div>
                 </div>
-                <div style={{ color: "rgba(233,239,255,0.56)", fontSize: "12px" }}>Updated {formatCompactDate(template.updatedAt)}</div>
+                <div style={{ color: "rgba(233,239,255,0.56)", fontSize: "12px" }}>{copy(`Updated ${formatCompactDate(template.updatedAt)}`, `更新于 ${formatCompactDate(template.updatedAt)}`)}</div>
               </div>
               <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
                 <StatusBadge tone="neutral">v{template.version}</StatusBadge>
-                <StatusBadge tone="neutral">{steps.length} steps</StatusBadge>
-                {template.lastValidatedAt ? <StatusBadge tone="neutral">Validated {formatCompactDate(template.lastValidatedAt)}</StatusBadge> : null}
+                <StatusBadge tone="neutral">{copy(`${steps.length} steps`, `${steps.length} 步`)}</StatusBadge>
+                {template.lastValidatedAt ? <StatusBadge tone="neutral">{copy(`Validated ${formatCompactDate(template.lastValidatedAt)}`, `验证于 ${formatCompactDate(template.lastValidatedAt)}`)}</StatusBadge> : null}
               </div>
               {template.validationSummary ? (
                 <div style={{ color: "rgba(233,239,255,0.74)", fontSize: "13px", lineHeight: 1.5 }}>{template.validationSummary}</div>

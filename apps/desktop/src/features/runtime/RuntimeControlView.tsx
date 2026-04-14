@@ -1,7 +1,9 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Panel, StatusBadge, Timeline } from "../../components";
 import { formatCompactDate } from "../../lib/format";
+import { useI18n } from "../../lib/i18n";
 import { theme } from "../../lib/theme";
+import { translateUiToken } from "../../lib/uiText";
 import type {
   CompileTaskRequest,
   DomainPackRecord,
@@ -188,6 +190,7 @@ export function RuntimeControlView({
   onApprovePatch,
   onRejectPatch,
 }: RuntimeControlViewProps): JSX.Element {
+  const { copy } = useI18n();
   const [instruction, setInstruction] = useState("打开网站，给我按照要求找到候选人，拿到简历，上传内网，评分。");
   const [domainHint, setDomainHint] = useState("");
   const [replanPlanId, setReplanPlanId] = useState(data.plans[0]?.id ?? "");
@@ -261,7 +264,7 @@ export function RuntimeControlView({
               </div>
               <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
                 <StatusBadge tone="neutral">{task.domain}</StatusBadge>
-                <StatusBadge tone={task.status.includes("ready") ? "positive" : "warning"}>{task.status}</StatusBadge>
+                <StatusBadge tone={task.status.includes("ready") ? "positive" : "warning"}>{translateUiToken(task.status, copy)}</StatusBadge>
               </div>
             </div>
             <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
@@ -270,17 +273,17 @@ export function RuntimeControlView({
                   {capability}
                 </StatusBadge>
               ))}
-              {compiledQualitySummary(task).source ? <StatusBadge tone="neutral">compiler {compiledQualitySummary(task).source}</StatusBadge> : null}
+              {compiledQualitySummary(task).source ? <StatusBadge tone="neutral">{copy(`compiler ${compiledQualitySummary(task).source}`, `编译器 ${compiledQualitySummary(task).source}`)}</StatusBadge> : null}
               {compiledQualitySummary(task).qualityBand ? (
                 <StatusBadge tone={compilerQualityTone(compiledQualitySummary(task).qualityBand)}>
-                  quality {compiledQualitySummary(task).qualityBand}
+                  {copy(`quality ${compiledQualitySummary(task).qualityBand}`, `质量 ${compiledQualitySummary(task).qualityBand}`)}
                 </StatusBadge>
               ) : null}
-              {compiledQualitySummary(task).repairApplied ? <StatusBadge tone="warning">repair applied</StatusBadge> : null}
+              {compiledQualitySummary(task).repairApplied ? <StatusBadge tone="warning">{copy("repair applied", "已应用修复")}</StatusBadge> : null}
             </div>
             {compactRecordEntries(task.outputContract, 4).length ? (
               <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
-                Output contract:{" "}
+                {copy("Output contract", "输出契约")}:{" "}
                 {compactRecordEntries(task.outputContract, 4)
                   .map(([key, value]) => `${key}=${typeof value === "string" ? value : summarizeJson(value)}`)
                   .join(" · ")}
@@ -288,13 +291,13 @@ export function RuntimeControlView({
             ) : null}
             {compiledQualitySummary(task).warnings.length ? (
               <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
-                Compiler warnings: {compiledQualitySummary(task).warnings.join(" · ")}
+                {copy("Compiler warnings", "编译警告")}: {compiledQualitySummary(task).warnings.join(" · ")}
               </div>
             ) : null}
             {linkedPlan ? (
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px", flexWrap: "wrap" }}>
                 <div style={{ color: theme.colors.muted, fontSize: "13px" }}>
-                  Linked plan: <strong style={{ color: theme.colors.text }}>{linkedPlan.name}</strong>
+                  {copy("Linked plan", "关联计划")}: <strong style={{ color: theme.colors.text }}>{linkedPlan.name}</strong>
                 </div>
                 <button
                   type="button"
@@ -302,7 +305,7 @@ export function RuntimeControlView({
                   disabled={busy}
                   style={actionButtonStyle}
                 >
-                  Create trial run
+                  {copy("Create trial run", "创建试跑")}
                 </button>
               </div>
             ) : null}
@@ -336,18 +339,18 @@ export function RuntimeControlView({
               <div>
                 <strong>{plan.name}</strong>
                 <div style={{ color: theme.colors.muted, fontSize: "13px", marginTop: "6px", lineHeight: 1.6 }}>
-                  Mode {plan.mode} · Approval {plan.approvalState} · v{plan.version}
+                  {copy(`Mode ${plan.mode} · Approval ${plan.approvalState} · v${plan.version}`, `模式 ${plan.mode} · 审批 ${plan.approvalState} · v${plan.version}`)}
                 </div>
               </div>
               <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-                <StatusBadge tone={toneFromRuntimeStatus(plan.status)}>{plan.status}</StatusBadge>
+                <StatusBadge tone={toneFromRuntimeStatus(plan.status)}>{translateUiToken(plan.status, copy)}</StatusBadge>
                 {linkedAssessment ? (
                   <StatusBadge tone={toneFromRuntimeStatus(linkedAssessment.status)}>{linkedAssessment.sceneType}</StatusBadge>
                 ) : null}
               </div>
             </div>
             <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-              <StatusBadge tone="neutral">{plan.planBody.steps.length} steps</StatusBadge>
+              <StatusBadge tone="neutral">{copy(`${plan.planBody.steps.length} steps`, `${plan.planBody.steps.length} 步`)}</StatusBadge>
               {capabilities.map((capability) => (
                 <StatusBadge key={`${plan.id}-${capability}`} tone="neutral">
                   {capability}
@@ -357,8 +360,8 @@ export function RuntimeControlView({
             <div style={{ display: "flex", justifyContent: "space-between", gap: "10px", alignItems: "center", flexWrap: "wrap" }}>
               <div style={{ color: theme.colors.muted, fontSize: "13px" }}>
                 {linkedAssessment
-                  ? `${linkedAssessment.sceneLabel} · confidence ${formatConfidence(linkedAssessment.confidence)}`
-                  : "No scene assessment recorded yet."}
+                  ? copy(`${linkedAssessment.sceneLabel} · confidence ${formatConfidence(linkedAssessment.confidence)}`, `${linkedAssessment.sceneLabel} · 置信度 ${formatConfidence(linkedAssessment.confidence)}`)
+                  : copy("No scene assessment recorded yet.", "尚未记录场景评估。")}
               </div>
               <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
                 <button
@@ -367,14 +370,14 @@ export function RuntimeControlView({
                   disabled={busy || busyPlanId === plan.id}
                   style={{ ...actionButtonStyle, background: "rgba(93,216,163,0.12)" }}
                 >
-                  {busyPlanId === plan.id ? "Queueing..." : "Launch execution"}
+                  {busyPlanId === plan.id ? copy("Queueing...", "入队中...") : copy("Launch execution", "启动执行")}
                 </button>
                 <button
                   type="button"
                   onClick={() => setReplanPlanId(plan.id)}
                   style={{ ...actionButtonStyle, background: isSelected ? "rgba(122,167,255,0.24)" : actionButtonStyle.background }}
                 >
-                  {isSelected ? "Selected for replan" : "Use for replan"}
+                  {isSelected ? copy("Selected for replan", "已选为重规划目标") : copy("Use for replan", "用于重规划")}
                 </button>
               </div>
             </div>
@@ -406,24 +409,24 @@ export function RuntimeControlView({
               <div>
                 <strong>{task?.title ?? episode.id}</strong>
                 <div style={{ color: theme.colors.muted, fontSize: "13px", marginTop: "6px" }}>
-                  {plan?.name ?? "Detached plan"} · {episode.mode}
+                  {plan?.name ?? copy("Detached plan", "脱离计划")} · {episode.mode}
                 </div>
               </div>
               <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
                 <StatusBadge tone={episode.divergenceDetected ? "critical" : "positive"}>
-                  {episode.divergenceDetected ? "diverged" : episode.status}
+                  {episode.divergenceDetected ? copy("diverged", "已偏离") : translateUiToken(episode.status, copy)}
                 </StatusBadge>
-                <StatusBadge tone="neutral">{metricStepCount(episode)} steps</StatusBadge>
+                <StatusBadge tone="neutral">{copy(`${metricStepCount(episode)} steps`, `${metricStepCount(episode)} 步`)}</StatusBadge>
               </div>
             </div>
             <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
-              {episode.resultSummary ?? "No trial summary recorded yet."}
+              {episode.resultSummary ?? copy("No trial summary recorded yet.", "尚未记录试跑摘要。")}
             </div>
             <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
               <StatusBadge tone="neutral">
-                {episode.requiresConfirmation ? "awaits confirmation" : "confirmed or ungated"}
+                {episode.requiresConfirmation ? copy("awaits confirmation", "等待确认") : copy("confirmed or ungated", "已确认或无需审批")}
               </StatusBadge>
-              {episode.finishedAt ? <StatusBadge tone="neutral">Finished {formatCompactDate(episode.finishedAt)}</StatusBadge> : null}
+              {episode.finishedAt ? <StatusBadge tone="neutral">{copy(`Finished ${formatCompactDate(episode.finishedAt)}`, `完成于 ${formatCompactDate(episode.finishedAt)}`)}</StatusBadge> : null}
             </div>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px", flexWrap: "wrap" }}>
               <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
@@ -433,7 +436,7 @@ export function RuntimeControlView({
                   disabled={busy}
                   style={{ ...actionButtonStyle, background: isSelected ? "rgba(122,167,255,0.24)" : actionButtonStyle.background }}
                 >
-                  {isSelected ? "Diagnostics selected" : "Inspect diagnostics"}
+                  {isSelected ? copy("Diagnostics selected", "已选诊断") : copy("Inspect diagnostics", "查看诊断")}
                 </button>
                 <button
                   type="button"
@@ -441,7 +444,7 @@ export function RuntimeControlView({
                   disabled={busy || busyEpisodeId === episode.id}
                   style={{ ...actionButtonStyle, background: "rgba(93,216,163,0.12)" }}
                 >
-                  {busyEpisodeId === episode.id ? "Refreshing..." : "Refresh learning"}
+                  {busyEpisodeId === episode.id ? copy("Refreshing...", "刷新中...") : copy("Refresh learning", "刷新学习结果")}
                 </button>
                 {episode.status === "pending" ? (
                   <button
@@ -450,7 +453,7 @@ export function RuntimeControlView({
                     disabled={busy || busyEpisodeId === episode.id}
                     style={actionButtonStyle}
                   >
-                    {busyEpisodeId === episode.id ? "Executing..." : "Execute trial"}
+                    {busyEpisodeId === episode.id ? copy("Executing...", "执行中...") : copy("Execute trial", "执行试跑")}
                   </button>
                 ) : null}
                 {episode.requiresConfirmation || episode.status === "awaiting_review" ? (
@@ -460,7 +463,7 @@ export function RuntimeControlView({
                     disabled={busy || busyEpisodeId === episode.id}
                     style={{ ...actionButtonStyle, background: "rgba(93,216,163,0.18)" }}
                   >
-                    {busyEpisodeId === episode.id ? "Confirming..." : "Confirm trial"}
+                    {busyEpisodeId === episode.id ? copy("Confirming...", "确认中...") : copy("Confirm trial", "确认试跑")}
                   </button>
                 ) : null}
               </div>
@@ -488,29 +491,29 @@ export function RuntimeControlView({
           <div style={{ display: "flex", justifyContent: "space-between", gap: "12px", flexWrap: "wrap" }}>
             <div>
               <strong>{template.name}</strong>
-              <div style={{ color: theme.colors.muted, fontSize: "13px", marginTop: "6px" }}>{template.validationSummary ?? "No validation summary yet."}</div>
+              <div style={{ color: theme.colors.muted, fontSize: "13px", marginTop: "6px" }}>{template.validationSummary ?? copy("No validation summary yet.", "暂无验证摘要。")}</div>
             </div>
           <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
             <StatusBadge tone="neutral">{template.domain}</StatusBadge>
-            <StatusBadge tone={template.status === "active" ? "positive" : "warning"}>{template.status}</StatusBadge>
+            <StatusBadge tone={template.status === "active" ? "positive" : "warning"}>{translateUiToken(template.status, copy)}</StatusBadge>
             {typeof template.activationStrategy.governance === "object" && template.activationStrategy.governance !== null ? (
               <StatusBadge tone="neutral">
-                governance {String((template.activationStrategy.governance as Record<string, unknown>).episode_quality_band ?? "tracked")}
+                {copy(`governance ${String((template.activationStrategy.governance as Record<string, unknown>).episode_quality_band ?? "tracked")}`, `治理 ${String((template.activationStrategy.governance as Record<string, unknown>).episode_quality_band ?? "tracked")}`)}
               </StatusBadge>
             ) : null}
           </div>
           </div>
           <div style={{ color: theme.colors.muted, fontSize: "13px" }}>
-            {Array.isArray(template.templateBody.steps) ? (template.templateBody.steps as unknown[]).length : 0} planned steps · v{template.version}
+            {copy(`${Array.isArray(template.templateBody.steps) ? (template.templateBody.steps as unknown[]).length : 0} planned steps · v${template.version}`, `${Array.isArray(template.templateBody.steps) ? (template.templateBody.steps as unknown[]).length : 0} 个计划步骤 · v${template.version}`)}
           </div>
           {typeof template.activationStrategy.governance === "object" && template.activationStrategy.governance !== null ? (
             <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
-              Governance:{" "}
+              {copy("Governance", "治理")}:{" "}
               {compactRecordEntries(template.activationStrategy.governance as Record<string, unknown>, 4)
                 .map(([key, value]) => `${key}=${typeof value === "string" ? value : summarizeJson(value)}`)
                 .join(" · ")}
-            </div>
-          ) : null}
+              </div>
+            ) : null}
         </article>
       ))}
     </div>
@@ -534,20 +537,20 @@ export function RuntimeControlView({
             <div>
               <strong>{patch.title}</strong>
               <div style={{ color: theme.colors.muted, fontSize: "13px", marginTop: "6px" }}>
-                {patch.divergenceSummary ?? patch.rationale ?? "No rationale supplied."}
+                {patch.divergenceSummary ?? patch.rationale ?? copy("No rationale supplied.", "未提供原因说明。")}
               </div>
             </div>
             <StatusBadge tone={patch.status === "pending_review" ? "warning" : patch.status === "applied" ? "positive" : "neutral"}>
-              {patch.status}
+              {translateUiToken(patch.status, copy)}
             </StatusBadge>
           </div>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px", flexWrap: "wrap" }}>
-            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-              <StatusBadge tone="neutral">{patch.patchKind}</StatusBadge>
-              {patch.templateId ? <StatusBadge tone="neutral">template linked</StatusBadge> : null}
+              <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                <StatusBadge tone="neutral">{patch.patchKind}</StatusBadge>
+              {patch.templateId ? <StatusBadge tone="neutral">{copy("template linked", "模板已关联")}</StatusBadge> : null}
               {patch.runtimeMetadata.episode_quality_band ? (
                 <StatusBadge tone={String(patch.runtimeMetadata.episode_quality_band) === "high" ? "positive" : "warning"}>
-                  quality {String(patch.runtimeMetadata.episode_quality_band)}
+                  {copy(`quality ${String(patch.runtimeMetadata.episode_quality_band)}`, `质量 ${String(patch.runtimeMetadata.episode_quality_band)}`)}
                 </StatusBadge>
               ) : null}
             </div>
@@ -559,7 +562,7 @@ export function RuntimeControlView({
                   disabled={busy || actionPatchId === patch.id}
                   style={actionButtonStyle}
                 >
-                  Approve patch
+                  {copy("Approve patch", "批准 patch")}
                 </button>
                 <button
                   type="button"
@@ -567,14 +570,14 @@ export function RuntimeControlView({
                   disabled={busy || actionPatchId === patch.id}
                   style={{ ...actionButtonStyle, background: "rgba(255,128,128,0.12)" }}
                 >
-                  Reject patch
+                  {copy("Reject patch", "拒绝 patch")}
                 </button>
               </div>
             ) : null}
           </div>
           {compactRecordEntries(patch.runtimeMetadata, 5).length ? (
             <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
-              Metadata:{" "}
+              {copy("Metadata", "元数据")}:{" "}
               {compactRecordEntries(patch.runtimeMetadata, 5)
                 .map(([key, value]) => `${key}=${typeof value === "string" ? value : summarizeJson(value)}`)
                 .join(" · ")}
@@ -608,12 +611,12 @@ export function RuntimeControlView({
           </div>
           <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
             <StatusBadge tone={domain.maturity === "beta" ? "positive" : domain.maturity === "stable" ? "positive" : "warning"}>
-              {domain.maturity}
+              {translateUiToken(domain.maturity, copy)}
             </StatusBadge>
             <StatusBadge tone="neutral">v{domain.version}</StatusBadge>
-            <StatusBadge tone="neutral">{domain.runtimeOnly ? "runtime only" : "packaged"}</StatusBadge>
+            <StatusBadge tone="neutral">{domain.runtimeOnly ? copy("runtime only", "仅运行时") : copy("packaged", "已打包")}</StatusBadge>
             <StatusBadge tone="neutral">
-              {domain.activeTemplateCount}/{domain.templateCount || domain.templateKeys.length} active templates
+              {copy(`${domain.activeTemplateCount}/${domain.templateCount || domain.templateKeys.length} active templates`, `${domain.activeTemplateCount}/${domain.templateCount || domain.templateKeys.length} 个活动模板`)}
             </StatusBadge>
             {domain.defaultCapabilities.map((capability) => (
               <StatusBadge key={`${domain.key}-${capability}`} tone="neutral">
@@ -623,17 +626,17 @@ export function RuntimeControlView({
           </div>
           {domain.compilerHints.length ? (
             <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
-              Compiler hints: {domain.compilerHints.join(" · ")}
+              {copy("Compiler hints", "编译提示")}: {domain.compilerHints.join(" · ")}
             </div>
           ) : null}
           {domain.sceneExpectations.length ? (
             <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
-              Scene expectations: {domain.sceneExpectations.join(" · ")}
+              {copy("Scene expectations", "场景预期")}: {domain.sceneExpectations.join(" · ")}
             </div>
           ) : null}
           {compactRecordEntries(domain.trialExpectations, 4).length ? (
             <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
-              Trial expectations:{" "}
+              {copy("Trial expectations", "试跑预期")}:{" "}
               {compactRecordEntries(domain.trialExpectations, 4)
                 .map(([key, value]) => `${key}=${typeof value === "string" ? value : summarizeJson(value)}`)
                 .join(" · ")}
@@ -641,7 +644,7 @@ export function RuntimeControlView({
           ) : null}
           {compactRecordEntries(domain.qualityGates, 4).length ? (
             <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
-              Quality gates:{" "}
+              {copy("Quality gates", "质量门槛")}:{" "}
               {compactRecordEntries(domain.qualityGates, 4)
                 .map(([key, value]) => `${key}=${typeof value === "string" ? value : summarizeJson(value)}`)
                 .join(" · ")}
@@ -649,7 +652,7 @@ export function RuntimeControlView({
           ) : null}
           {domain.sampleTasks.length ? (
             <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
-              Example: {domain.sampleTasks[0]}
+              {copy("Example", "示例")}: {domain.sampleTasks[0]}
             </div>
           ) : null}
         </article>
@@ -678,13 +681,13 @@ export function RuntimeControlView({
                 <strong>{driver.name}</strong>
                 <div style={{ color: theme.colors.muted, fontSize: "13px", marginTop: "6px" }}>{driver.scope}</div>
               </div>
-              <StatusBadge tone={toneFromRuntimeStatus(driver.status)}>{driver.status}</StatusBadge>
+              <StatusBadge tone={toneFromRuntimeStatus(driver.status)}>{translateUiToken(driver.status, copy)}</StatusBadge>
             </div>
             <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
               <StatusBadge tone="neutral">{driver.category}</StatusBadge>
               <StatusBadge tone="neutral">{driver.safetyMode}</StatusBadge>
               <StatusBadge tone={driver.supportsWrite ? "warning" : "neutral"}>
-                {driver.supportsWrite ? "write-enabled" : "read-only"}
+                {driver.supportsWrite ? copy("write-enabled", "可写") : copy("read-only", "只读")}
               </StatusBadge>
             </div>
             <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>{driver.description}</div>
@@ -703,7 +706,7 @@ export function RuntimeControlView({
 
   const renderEnvironmentAssessments = (assessments: RuntimeEnvironmentAssessment[]): JSX.Element => (
     !assessments.length ? (
-      <div style={{ color: theme.colors.muted }}>No live assessments yet. Refresh the selected scene to evaluate the current environment.</div>
+      <div style={{ color: theme.colors.muted }}>{copy("No live assessments yet. Refresh the selected scene to evaluate the current environment.", "暂无实时评估。请刷新所选场景以评估当前环境。")}</div>
     ) : (
     <div style={{ display: "grid", gap: "14px" }}>
       {assessments.map((assessment) => {
@@ -726,7 +729,7 @@ export function RuntimeControlView({
                 <div style={{ color: theme.colors.muted, fontSize: "13px", marginTop: "6px" }}>{assessment.summary}</div>
               </div>
               <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-                <StatusBadge tone={toneFromRuntimeStatus(assessment.status)}>{assessment.status}</StatusBadge>
+                <StatusBadge tone={toneFromRuntimeStatus(assessment.status)}>{translateUiToken(assessment.status, copy)}</StatusBadge>
                 <StatusBadge tone="neutral">{formatConfidence(assessment.confidence)}</StatusBadge>
               </div>
             </div>
@@ -735,24 +738,24 @@ export function RuntimeControlView({
               <StatusBadge tone="neutral">{assessment.sceneType}</StatusBadge>
               <StatusBadge tone="neutral">{assessment.sceneProfile.interactionMode}</StatusBadge>
               <StatusBadge tone={assessment.plannerGuidance.requiresHumanReview ? "warning" : "neutral"}>
-                planner {assessment.plannerGuidance.posture}
+                {copy(`planner ${assessment.plannerGuidance.posture}`, `规划器 ${assessment.plannerGuidance.posture}`)}
               </StatusBadge>
             </div>
             {assessment.driftSignals.length ? (
               <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
-                Drift: {assessment.driftSignals.join(" · ")}
+                {copy("Drift", "漂移")}: {assessment.driftSignals.join(" · ")}
               </div>
             ) : (
               <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
-                Scene is aligned with the current execution model.
+                {copy("Scene is aligned with the current execution model.", "当前场景与执行模型保持一致。")}
               </div>
             )}
             <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
-              Auth {assessment.sceneProfile.authState} · {assessment.sceneProfile.entityCount} entities · {assessment.sceneProfile.affordanceCount} affordances
+              {copy(`Auth ${assessment.sceneProfile.authState} · ${assessment.sceneProfile.entityCount} entities · ${assessment.sceneProfile.affordanceCount} affordances`, `认证 ${assessment.sceneProfile.authState} · ${assessment.sceneProfile.entityCount} 个实体 · ${assessment.sceneProfile.affordanceCount} 个可执行动作`)}
             </div>
             {assessment.sceneProfile.primaryTargets.length ? (
               <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
-                Targets: {assessment.sceneProfile.primaryTargets.join(" · ")}
+                {copy("Targets", "目标")}: {assessment.sceneProfile.primaryTargets.join(" · ")}
               </div>
             ) : null}
             <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
@@ -763,13 +766,13 @@ export function RuntimeControlView({
               ))}
               {assessment.plannerGuidance.insertedCapabilities.map((capability) => (
                 <StatusBadge key={`${assessment.id}-inserted-${capability}`} tone="warning">
-                  next {capability}
+                  {copy(`next ${capability}`, `下一步 ${capability}`)}
                 </StatusBadge>
               ))}
             </div>
             {assessment.plannerGuidance.preferredNextActions.length ? (
               <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
-                Next: {assessment.plannerGuidance.preferredNextActions.join(" · ")}
+                {copy("Next", "下一步")}: {assessment.plannerGuidance.preferredNextActions.join(" · ")}
               </div>
             ) : null}
           </article>
@@ -781,7 +784,7 @@ export function RuntimeControlView({
 
   const renderReplanCards = (replans: RuntimePlanReplanResult[]): JSX.Element => (
     !replans.length ? (
-      <div style={{ color: theme.colors.muted }}>No replans recorded yet. Generate a revision from the current scene assessment.</div>
+      <div style={{ color: theme.colors.muted }}>{copy("No replans recorded yet. Generate a revision from the current scene assessment.", "尚未记录重规划结果。请基于当前场景评估生成一次修订。")}</div>
     ) : (
     <div style={{ display: "grid", gap: "14px" }}>
       {replans.map((replan) => (
@@ -802,12 +805,12 @@ export function RuntimeControlView({
               <div style={{ color: theme.colors.muted, fontSize: "13px", marginTop: "6px", lineHeight: 1.6 }}>{replan.summary}</div>
             </div>
             <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-              <StatusBadge tone={toneFromRuntimeStatus(replan.status)}>{replan.status}</StatusBadge>
+              <StatusBadge tone={toneFromRuntimeStatus(replan.status)}>{translateUiToken(replan.status, copy)}</StatusBadge>
               <StatusBadge tone="neutral">{replan.trigger}</StatusBadge>
             </div>
           </div>
           <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-            <StatusBadge tone="neutral">{replan.executionPlan.planBody.steps.length} steps</StatusBadge>
+            <StatusBadge tone="neutral">{copy(`${replan.executionPlan.planBody.steps.length} steps`, `${replan.executionPlan.planBody.steps.length} 步`)}</StatusBadge>
             {replan.recommendedCapabilityKeys.map((capability) => (
               <StatusBadge key={`${replan.id}-${capability}`} tone="neutral">
                 {capability}
@@ -815,17 +818,17 @@ export function RuntimeControlView({
             ))}
           </div>
           <div style={{ color: theme.colors.muted, fontSize: "13px" }}>
-            Created {formatCompactDate(replan.createdAt)}
-            {replan.environmentAssessment ? ` · Scene ${replan.environmentAssessment.sceneType}` : ""}
+            {copy(`Created ${formatCompactDate(replan.createdAt)}`, `创建于 ${formatCompactDate(replan.createdAt)}`)}
+            {replan.environmentAssessment ? copy(` · Scene ${replan.environmentAssessment.sceneType}`, ` · 场景 ${replan.environmentAssessment.sceneType}`) : ""}
           </div>
           {replan.compilerNotes.length ? (
             <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
-              Compiler notes: {replan.compilerNotes.join(" · ")}
+              {copy("Compiler notes", "编译说明")}: {replan.compilerNotes.join(" · ")}
             </div>
           ) : null}
           {replan.auditMetadata && compactRecordEntries(replan.auditMetadata, 4).length ? (
             <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
-              Audit:{" "}
+              {copy("Audit", "审计")}:{" "}
               {compactRecordEntries(replan.auditMetadata, 4)
                 .map(([key, value]) => `${key}=${typeof value === "string" ? value : summarizeJson(value)}`)
                 .join(" · ")}
@@ -844,29 +847,29 @@ export function RuntimeControlView({
   if (mode === "trials") {
     return (
       <div style={{ display: "grid", gap: "18px" }}>
-        <Panel title="Trial Runs" eyebrow="Supervised Execution" description="Create, execute, inspect, and confirm trials before a workflow becomes reusable.">
+        <Panel title={copy("Trial Runs", "试跑运行")} eyebrow={copy("Supervised Execution", "受监督执行")} description={copy("Create, execute, inspect, and confirm trials before a workflow becomes reusable.", "在工作流变为可复用之前，先创建、执行、检查并确认试跑。")}>
           {renderEpisodeCards(data.episodes)}
         </Panel>
         <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.1fr) minmax(320px, 0.9fr)", gap: "18px", alignItems: "start" }}>
-          <Panel title="Selected Replay Diagnostics" eyebrow="Episode Replay" description="The currently selected trial run with snapshots, timeline, and derived artifacts.">
+          <Panel title={copy("Selected Replay Diagnostics", "已选回放诊断")} eyebrow={copy("Episode Replay", "Episode 回放")} description={copy("The currently selected trial run with snapshots, timeline, and derived artifacts.", "当前选中的试跑结果，包含快照、时间线和衍生产物。")}>
             {replay ? (
               <div style={{ display: "grid", gap: "14px" }}>
                 <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-                  <StatusBadge tone={replay.episode.divergenceDetected ? "critical" : "positive"}>{replay.episode.status}</StatusBadge>
-                  {replay.template ? <StatusBadge tone="positive">template candidate</StatusBadge> : null}
-                  {replay.patch ? <StatusBadge tone="warning">patch candidate</StatusBadge> : null}
-                  {replay.approval ? <StatusBadge tone="warning">approval pending</StatusBadge> : null}
+                  <StatusBadge tone={replay.episode.divergenceDetected ? "critical" : "positive"}>{translateUiToken(replay.episode.status, copy)}</StatusBadge>
+                  {replay.template ? <StatusBadge tone="positive">{copy("template candidate", "模板候选")}</StatusBadge> : null}
+                  {replay.patch ? <StatusBadge tone="warning">{copy("patch candidate", "patch 候选")}</StatusBadge> : null}
+                  {replay.approval ? <StatusBadge tone="warning">{copy("approval pending", "审批待处理")}</StatusBadge> : null}
                 </div>
                 <div style={{ color: theme.colors.muted, lineHeight: 1.6 }}>
-                  {replay.episode.resultSummary ?? "No replay summary available."}
+                  {replay.episode.resultSummary ?? copy("No replay summary available.", "暂无回放摘要。")}
                 </div>
                 <Timeline events={replay.diagnostics} />
               </div>
             ) : (
-              <div style={{ color: theme.colors.muted }}>Select a trial run to inspect diagnostics.</div>
+              <div style={{ color: theme.colors.muted }}>{copy("Select a trial run to inspect diagnostics.", "选择一个试跑以查看诊断。")}</div>
             )}
           </Panel>
-          <Panel title="Replay Context" eyebrow="Snapshots and Notes" description="Observed environment state and machine-readable artifacts recorded for the selected replay.">
+          <Panel title={copy("Replay Context", "回放上下文")} eyebrow={copy("Snapshots and Notes", "快照与备注")} description={copy("Observed environment state and machine-readable artifacts recorded for the selected replay.", "为所选回放记录的环境状态与机器可读产物。")}>
             {replay ? (
               <div style={{ display: "grid", gap: "14px" }}>
                 <div style={{ display: "grid", gap: "8px" }}>
@@ -879,7 +882,7 @@ export function RuntimeControlView({
                         <strong>{snapshot.title ?? snapshot.environmentKey ?? snapshot.id}</strong>
                         <StatusBadge tone="neutral">{snapshot.pageType ?? snapshot.source}</StatusBadge>
                       </div>
-                      <div style={{ color: theme.colors.muted, fontSize: "13px", marginTop: "8px" }}>{snapshot.url ?? "No URL captured."}</div>
+                      <div style={{ color: theme.colors.muted, fontSize: "13px", marginTop: "8px" }}>{snapshot.url ?? copy("No URL captured.", "未捕获 URL。")}</div>
                     </article>
                   ))}
                 </div>
@@ -913,7 +916,7 @@ export function RuntimeControlView({
                 </pre>
               </div>
             ) : (
-              <div style={{ color: theme.colors.muted }}>Replay context will appear after selecting a trial run.</div>
+              <div style={{ color: theme.colors.muted }}>{copy("Replay context will appear after selecting a trial run.", "选择试跑后，这里会显示回放上下文。")}</div>
             )}
           </Panel>
         </div>
@@ -924,7 +927,7 @@ export function RuntimeControlView({
   if (mode === "templates") {
     return (
       <div style={{ display: "grid", gap: "18px" }}>
-        <Panel title="Workflow Templates" eyebrow="Reuse and Governance" description="Validated execution plans that are ready to be reused or promoted into production packs.">
+        <Panel title={copy("Workflow Templates", "工作流模板")} eyebrow={copy("Reuse and Governance", "复用与治理")} description={copy("Validated execution plans that are ready to be reused or promoted into production packs.", "已验证的执行计划，可复用或提升到生产能力包。")}>
           {renderTemplateCards(data.templates)}
         </Panel>
       </div>
@@ -934,7 +937,7 @@ export function RuntimeControlView({
   if (mode === "patches") {
     return (
       <div style={{ display: "grid", gap: "18px" }}>
-        <Panel title="Workflow Patches" eyebrow="Runtime Drift" description="Execution divergence proposals generated from trial runs.">
+        <Panel title={copy("Workflow Patches", "工作流补丁")} eyebrow={copy("Runtime Drift", "运行时漂移")} description={copy("Execution divergence proposals generated from trial runs.", "从试跑中生成的执行偏差修正建议。")}>
           {renderPatchCards(data.patches)}
         </Panel>
       </div>
@@ -944,7 +947,7 @@ export function RuntimeControlView({
   if (mode === "domains") {
     return (
       <div style={{ display: "grid", gap: "18px" }}>
-        <Panel title="Domain Packs" eyebrow="Reusable Capability Packs" description="Recruiting is only one pack. These seeds tell the runtime what to prefer when compiling new tasks.">
+        <Panel title={copy("Domain Packs", "领域包")} eyebrow={copy("Reusable Capability Packs", "可复用能力包")} description={copy("Recruiting is only one pack. These seeds tell the runtime what to prefer when compiling new tasks.", "招聘只是其中一个领域包。这些种子会告诉运行时在编译新任务时应优先采用什么。")}>
           {renderDomainCards(data.domainPacks)}
         </Panel>
       </div>
@@ -954,9 +957,9 @@ export function RuntimeControlView({
   return (
     <div style={{ display: "grid", gap: "18px" }}>
       <Panel
-        title="Dynamic Task Compiler"
-        eyebrow="Natural Language Entry"
-        description="Describe a task in plain language. The runtime will infer the domain pack, compile a TaskSpec, and seed a trial plan."
+        title={copy("Dynamic Task Compiler", "动态任务编译器")}
+        eyebrow={copy("Natural Language Entry", "自然语言输入")}
+        description={copy("Describe a task in plain language. The runtime will infer the domain pack, compile a TaskSpec, and seed a trial plan.", "用自然语言描述任务。运行时会推断领域包、编译 TaskSpec，并生成试跑计划。")}
         actions={
           <button
             type="button"
@@ -969,7 +972,7 @@ export function RuntimeControlView({
             disabled={busy || instruction.trim().length < 8}
             style={actionButtonStyle}
           >
-            {busy ? "Compiling..." : "Compile task"}
+            {busy ? copy("Compiling...", "编译中...") : copy("Compile task", "编译任务")}
           </button>
         }
       >
@@ -983,7 +986,7 @@ export function RuntimeControlView({
           <input
             value={domainHint}
             onChange={(event) => setDomainHint(event.target.value)}
-            placeholder="Optional domain hint, e.g. recruiting / market_news"
+            placeholder={copy("Optional domain hint, e.g. recruiting / market_news", "可选领域提示，例如 recruiting / market_news")}
             style={inputShell}
           />
           {data.compilerContract ? (
@@ -1000,27 +1003,27 @@ export function RuntimeControlView({
               <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
                 <StatusBadge tone="neutral">{data.compilerContract.contractVersion}</StatusBadge>
                 <StatusBadge tone="positive">{data.compilerContract.strategy}</StatusBadge>
-                <StatusBadge tone="warning">fallback: {data.compilerContract.fallbackStrategy}</StatusBadge>
+                <StatusBadge tone="warning">{copy(`fallback: ${data.compilerContract.fallbackStrategy}`, `降级策略：${data.compilerContract.fallbackStrategy}`)}</StatusBadge>
                 <StatusBadge tone="neutral">{data.compilerContract.promptAsset}</StatusBadge>
               </div>
               <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
-                Required fields: {data.compilerContract.requiredFields.join(", ")}
+                {copy("Required fields", "必填字段")}: {data.compilerContract.requiredFields.join(", ")}
               </div>
               {data.compilerContract.qualityGates.length ? (
                 <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
-                  Quality gates: {data.compilerContract.qualityGates.join(" · ")}
+                  {copy("Quality gates", "质量门槛")}: {data.compilerContract.qualityGates.join(" · ")}
                 </div>
               ) : null}
               {compactRecordEntries(data.compilerContract.repairPolicy, 4).length ? (
                 <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
-                  Repair policy:{" "}
+                  {copy("Repair policy", "修复策略")}:{" "}
                   {compactRecordEntries(data.compilerContract.repairPolicy, 4)
                     .map(([key, value]) => `${key}=${typeof value === "string" ? value : summarizeJson(value)}`)
                     .join(" · ")}
                 </div>
               ) : null}
               <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
-                Invariants: {data.compilerContract.invariants.join(" ")}
+                {copy("Invariants", "不变式")}: {data.compilerContract.invariants.join(" ")}
               </div>
             </div>
           ) : null}
@@ -1028,37 +1031,37 @@ export function RuntimeControlView({
       </Panel>
 
       {lastOutcome ? (
-        <Panel title="Latest Trial Outcome" eyebrow="Learning Loop" description="The most recent trial execution outcome, including derived templates or patches.">
+        <Panel title={copy("Latest Trial Outcome", "最近试跑结果")} eyebrow={copy("Learning Loop", "学习闭环")} description={copy("The most recent trial execution outcome, including derived templates or patches.", "最近一次试跑的执行结果，包括衍生模板或 patch。")}>
           <div style={{ display: "grid", gap: "12px" }}>
             <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
               <StatusBadge tone={lastOutcome.episode.divergenceDetected ? "critical" : "positive"}>
-                {lastOutcome.episode.status}
+                {translateUiToken(lastOutcome.episode.status, copy)}
               </StatusBadge>
-              {lastOutcome.template ? <StatusBadge tone="positive">template derived</StatusBadge> : null}
+              {lastOutcome.template ? <StatusBadge tone="positive">{copy("template derived", "已生成模板")}</StatusBadge> : null}
               {lastOutcome.templateApproval ? (
                 <StatusBadge tone={lastOutcome.templateApproval.status === "approved" ? "positive" : "warning"}>
-                  template approval {lastOutcome.templateApproval.status}
+                  {copy(`template approval ${lastOutcome.templateApproval.status}`, `模板审批 ${lastOutcome.templateApproval.status}`)}
                 </StatusBadge>
               ) : null}
-              {lastOutcome.patch ? <StatusBadge tone="warning">patch proposed</StatusBadge> : null}
-              {lastOutcome.approval ? <StatusBadge tone="warning">approval created</StatusBadge> : null}
+              {lastOutcome.patch ? <StatusBadge tone="warning">{copy("patch proposed", "patch 已提出")}</StatusBadge> : null}
+              {lastOutcome.approval ? <StatusBadge tone="warning">{copy("approval created", "已创建审批")}</StatusBadge> : null}
             </div>
             <div style={{ color: theme.colors.muted, lineHeight: 1.6 }}>
-              {lastOutcome.episode.resultSummary ?? "No outcome summary available."}
+              {lastOutcome.episode.resultSummary ?? copy("No outcome summary available.", "暂无结果摘要。")}
             </div>
             {lastOutcome.templateApproval?.notes ? (
               <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
-                Template review note: {lastOutcome.templateApproval.notes}
+                {copy("Template review note", "模板审查说明")}: {lastOutcome.templateApproval.notes}
               </div>
             ) : null}
             {lastOutcome.skillHealth ? (
               <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
-                Skill health: {String(lastOutcome.skillHealth.health ?? lastOutcome.skillHealth.status ?? "unknown")}
+                {copy("Skill health", "Skill health")}: {String(lastOutcome.skillHealth.health ?? lastOutcome.skillHealth.status ?? "unknown")}
               </div>
             ) : null}
             {lastOutcome.learningDraft?.tags?.length ? (
               <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
-                Learning tags: {lastOutcome.learningDraft.tags.join(" · ")}
+                {copy("Learning tags", "学习标签")}: {lastOutcome.learningDraft.tags.join(" · ")}
               </div>
             ) : null}
           </div>
@@ -1066,13 +1069,13 @@ export function RuntimeControlView({
       ) : null}
 
       <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.1fr) minmax(320px, 0.9fr)", gap: "18px", alignItems: "start" }}>
-        <Panel title="Compiled Tasks" eyebrow="Task Specs" description="Runtime-generated task definitions with inferred capabilities and approval policy.">
+        <Panel title={copy("Compiled Tasks", "已编译任务")} eyebrow={copy("Task Specs", "任务规格")} description={copy("Runtime-generated task definitions with inferred capabilities and approval policy.", "由运行时生成的任务定义，包含推断出的能力和审批策略。")}>
           {renderTaskCards()}
         </Panel>
         <Panel
-          title="Plan Inventory"
-          eyebrow="Execution Plans"
-          description="Plans are runtime proposals. Select one to inspect scene fitness and prepare a supervised replan."
+          title={copy("Plan Inventory", "计划清单")}
+          eyebrow={copy("Execution Plans", "执行计划")}
+          description={copy("Plans are runtime proposals. Select one to inspect scene fitness and prepare a supervised replan.", "计划是运行时提出的执行方案。选择一个计划，检查场景适配性并准备受监督重规划。")}
         >
           {renderPlanCards()}
         </Panel>
@@ -1080,16 +1083,16 @@ export function RuntimeControlView({
 
       <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(320px, 1fr)", gap: "18px", alignItems: "start" }}>
         <Panel
-          title="Capability Driver Catalog"
-          eyebrow="Driver Surface"
-          description="Drivers are reusable runtime primitives. Highlighted entries are currently inferred from the selected plan or scene assessment."
+          title={copy("Capability Driver Catalog", "能力驱动目录")}
+          eyebrow={copy("Driver Surface", "驱动面")}
+          description={copy("Drivers are reusable runtime primitives. Highlighted entries are currently inferred from the selected plan or scene assessment.", "驱动是可复用的运行时原语。高亮项表示当前从所选计划或场景评估中推断出的驱动。")}
         >
           {renderCapabilityDrivers(data.capabilityDrivers)}
         </Panel>
         <Panel
-          title="Environment and Scene Assessments"
-          eyebrow="Live Context"
-          description="Scene assessments tell the runtime whether the current environment still matches the compiled execution model."
+          title={copy("Environment and Scene Assessments", "环境与场景评估")}
+          eyebrow={copy("Live Context", "实时上下文")}
+          description={copy("Scene assessments tell the runtime whether the current environment still matches the compiled execution model.", "场景评估会告诉运行时，当前环境是否仍然匹配已编译的执行模型。")}
           actions={
             selectedPlan ? (
               <button
@@ -1098,7 +1101,7 @@ export function RuntimeControlView({
                 disabled={busy || busyPlanId === selectedPlan.id}
                 style={actionButtonStyle}
               >
-                {busyPlanId === selectedPlan.id ? "Assessing..." : "Refresh assessment"}
+                {busyPlanId === selectedPlan.id ? copy("Assessing...", "评估中...") : copy("Refresh assessment", "刷新评估")}
               </button>
             ) : undefined
           }
@@ -1109,9 +1112,9 @@ export function RuntimeControlView({
 
       <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 0.95fr) minmax(0, 1.05fr)", gap: "18px", alignItems: "start" }}>
         <Panel
-          title="Plan Replanning"
-          eyebrow="Control Loop"
-          description="Use the current scene assessment and selected drivers to propose a safer next execution plan before promoting it."
+          title={copy("Plan Replanning", "计划重规划")}
+          eyebrow={copy("Control Loop", "控制环")}
+          description={copy("Use the current scene assessment and selected drivers to propose a safer next execution plan before promoting it.", "基于当前场景评估和选定驱动，提出更安全的下一版执行计划，然后再决定是否提升。")}
           actions={
             <button
               type="button"
@@ -1128,13 +1131,13 @@ export function RuntimeControlView({
               disabled={busy || !selectedPlan || busyPlanId === selectedPlan?.id}
               style={actionButtonStyle}
             >
-              {busyPlanId === selectedPlan?.id ? "Replanning..." : "Generate replan"}
+              {busyPlanId === selectedPlan?.id ? copy("Replanning...", "重规划中...") : copy("Generate replan", "生成重规划")}
             </button>
           }
         >
           <div style={{ display: "grid", gap: "14px" }}>
             <label style={{ display: "grid", gap: "8px" }}>
-              <span style={{ color: theme.colors.muted, fontSize: "13px" }}>Execution plan</span>
+              <span style={{ color: theme.colors.muted, fontSize: "13px" }}>{copy("Execution plan", "执行计划")}</span>
               <select value={selectedPlan?.id ?? ""} onChange={(event) => setReplanPlanId(event.target.value)} style={inputShell}>
                 {data.plans.map((plan) => (
                   <option key={plan.id} value={plan.id}>
@@ -1144,26 +1147,26 @@ export function RuntimeControlView({
               </select>
             </label>
             <label style={{ display: "grid", gap: "8px" }}>
-              <span style={{ color: theme.colors.muted, fontSize: "13px" }}>Replan trigger</span>
+              <span style={{ color: theme.colors.muted, fontSize: "13px" }}>{copy("Replan trigger", "重规划触发器")}</span>
               <select value={replanTrigger} onChange={(event) => setReplanTrigger(event.target.value)} style={inputShell}>
-                <option value="scene_drift">Scene drift</option>
-                <option value="driver_degradation">Driver degradation</option>
-                <option value="operator_feedback">Operator feedback</option>
-                <option value="output_gap">Output gap</option>
+                <option value="scene_drift">{copy("Scene drift", "场景漂移")}</option>
+                <option value="driver_degradation">{copy("Driver degradation", "驱动退化")}</option>
+                <option value="operator_feedback">{copy("Operator feedback", "操作员反馈")}</option>
+                <option value="output_gap">{copy("Output gap", "输出缺口")}</option>
               </select>
             </label>
             <label style={{ display: "grid", gap: "8px" }}>
-              <span style={{ color: theme.colors.muted, fontSize: "13px" }}>Operator notes</span>
+              <span style={{ color: theme.colors.muted, fontSize: "13px" }}>{copy("Operator notes", "操作员备注")}</span>
               <textarea
                 value={replanNotes}
                 onChange={(event) => setReplanNotes(event.target.value)}
                 rows={4}
-                placeholder="Optional notes for the replanner, e.g. preserve the current output contract but add a scene assessment checkpoint."
+                placeholder={copy("Optional notes for the replanner, e.g. preserve the current output contract but add a scene assessment checkpoint.", "给重规划器的可选备注，例如保留当前输出契约，但补一个场景评估检查点。")}
                 style={{ ...inputShell, resize: "vertical" }}
               />
             </label>
             <div style={{ display: "grid", gap: "8px" }}>
-              <div style={{ color: theme.colors.muted, fontSize: "13px" }}>Preferred capability drivers</div>
+              <div style={{ color: theme.colors.muted, fontSize: "13px" }}>{copy("Preferred capability drivers", "优先能力驱动")}</div>
               <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
                 {data.capabilityDrivers.map((driver) => {
                   const selected = selectedCapabilityKeys.includes(driver.key);
@@ -1203,9 +1206,9 @@ export function RuntimeControlView({
           </div>
         </Panel>
         <Panel
-          title="Replanning Results"
-          eyebrow="Latest Proposals"
-          description="Review recent replans, linked scene assessments, and any approval-gated patch output before trial execution resumes."
+          title={copy("Replanning Results", "重规划结果")}
+          eyebrow={copy("Latest Proposals", "最近提案")}
+          description={copy("Review recent replans, linked scene assessments, and any approval-gated patch output before trial execution resumes.", "在恢复试跑执行之前，先审查近期重规划、关联场景评估，以及任何受审批控制的 patch 输出。")}
         >
           {combinedReplans.length ? (
             <div style={{ display: "grid", gap: "14px" }}>
@@ -1228,13 +1231,13 @@ export function RuntimeControlView({
                       </div>
                     </div>
                     <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-                      <StatusBadge tone={toneFromRuntimeStatus(lastReplan.status)}>{lastReplan.status}</StatusBadge>
-                      {lastReplan.patch ? <StatusBadge tone="warning">patch output</StatusBadge> : null}
+                      <StatusBadge tone={toneFromRuntimeStatus(lastReplan.status)}>{translateUiToken(lastReplan.status, copy)}</StatusBadge>
+                      {lastReplan.patch ? <StatusBadge tone="warning">{copy("patch output", "patch 输出")}</StatusBadge> : null}
                     </div>
                   </div>
                   <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
                     <StatusBadge tone="neutral">{lastReplan.trigger}</StatusBadge>
-                    <StatusBadge tone="neutral">{lastReplan.executionPlan.planBody.steps.length} steps</StatusBadge>
+                    <StatusBadge tone="neutral">{copy(`${lastReplan.executionPlan.planBody.steps.length} steps`, `${lastReplan.executionPlan.planBody.steps.length} 步`)}</StatusBadge>
                     {lastReplan.environmentAssessment ? (
                       <StatusBadge tone={toneFromRuntimeStatus(lastReplan.environmentAssessment.status)}>
                         {lastReplan.environmentAssessment.sceneType}
@@ -1266,12 +1269,12 @@ export function RuntimeControlView({
               {renderReplanCards(lastReplan ? combinedReplans.slice(1, 4) : combinedReplans.slice(0, 4))}
             </div>
           ) : (
-            <div style={{ color: theme.colors.muted }}>No replans recorded yet. Select a plan and generate the next proposal.</div>
+            <div style={{ color: theme.colors.muted }}>{copy("No replans recorded yet. Select a plan and generate the next proposal.", "尚未记录重规划。请选择一个计划并生成下一版提案。")}</div>
           )}
         </Panel>
       </div>
 
-      <Panel title="Seed Domain Packs" eyebrow="Compilation Hints" description="The runtime uses these packs to infer structure without hard-coding platform-specific workflows.">
+      <Panel title={copy("Seed Domain Packs", "领域包种子")} eyebrow={copy("Compilation Hints", "编译提示")} description={copy("The runtime uses these packs to infer structure without hard-coding platform-specific workflows.", "运行时会使用这些领域包来推断结构，而不是硬编码平台特定工作流。")}>
         {renderDomainCards(data.domainPacks.slice(0, 4))}
       </Panel>
     </div>

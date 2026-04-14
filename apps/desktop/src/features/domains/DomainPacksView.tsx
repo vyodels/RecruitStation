@@ -1,5 +1,6 @@
 import React from "react";
 import { Panel, StatusBadge } from "../../components";
+import { useI18n } from "../../lib/i18n";
 import { theme } from "../../lib/theme";
 import type { DomainPackRecord } from "../../lib/types";
 
@@ -8,6 +9,8 @@ interface DomainPacksViewProps {
 }
 
 export function DomainPacksView({ domainPacks }: DomainPacksViewProps): JSX.Element {
+  const { copy } = useI18n();
+
   return (
     <div style={{ display: "grid", gap: "18px", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))" }}>
       {domainPacks.map((pack) => (
@@ -18,7 +21,7 @@ export function DomainPacksView({ domainPacks }: DomainPacksViewProps): JSX.Elem
           description={pack.description}
           actions={
             <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-              <StatusBadge tone="neutral">{pack.templateKeys.length} templates</StatusBadge>
+              <StatusBadge tone="neutral">{copy(`${pack.templateKeys.length} templates`, `${pack.templateKeys.length} 个模板`)}</StatusBadge>
               <StatusBadge tone={pack.maturity === "beta" ? "positive" : "warning"}>{pack.maturity}</StatusBadge>
               <StatusBadge tone="neutral">v{pack.version}</StatusBadge>
             </div>
@@ -26,9 +29,9 @@ export function DomainPacksView({ domainPacks }: DomainPacksViewProps): JSX.Elem
         >
           <div style={{ display: "grid", gap: "12px" }}>
             <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-              <StatusBadge tone="neutral">{pack.runtimeOnly ? "runtime only" : "packaged"}</StatusBadge>
+              <StatusBadge tone="neutral">{pack.runtimeOnly ? copy("runtime only", "仅运行时") : copy("packaged", "已打包")}</StatusBadge>
               <StatusBadge tone="neutral">
-                {pack.activeTemplateCount}/{pack.templateCount || pack.templateKeys.length} active templates
+                {copy(`${pack.activeTemplateCount}/${pack.templateCount || pack.templateKeys.length} active templates`, `${pack.activeTemplateCount}/${pack.templateCount || pack.templateKeys.length} 个活动模板`)}
               </StatusBadge>
               {pack.defaultCapabilities.map((capability) => (
                 <StatusBadge key={capability} tone="neutral">
@@ -38,21 +41,21 @@ export function DomainPacksView({ domainPacks }: DomainPacksViewProps): JSX.Elem
             </div>
             {pack.compilerHints.length ? (
               <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
-                Compiler hints: {pack.compilerHints.join(" · ")}
+                {copy("Compiler hints", "编译提示")}: {pack.compilerHints.join(" · ")}
               </div>
             ) : null}
             {pack.sceneExpectations.length ? (
               <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
-                Scene expectations: {pack.sceneExpectations.join(" · ")}
+                {copy("Scene expectations", "场景预期")}: {pack.sceneExpectations.join(" · ")}
               </div>
             ) : null}
             {Object.keys(pack.qualityGates).length ? (
               <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
-                Quality gates: {Object.entries(pack.qualityGates).map(([key, value]) => `${key}=${String(value)}`).join(" · ")}
+                {copy("Quality gates", "质量门槛")}: {Object.entries(pack.qualityGates).map(([key, value]) => `${key}=${String(value)}`).join(" · ")}
               </div>
             ) : null}
             <div>
-              <div style={{ color: theme.colors.muted, fontSize: "12px", textTransform: "uppercase", letterSpacing: "0.14em" }}>Sample tasks</div>
+              <div style={{ color: theme.colors.muted, fontSize: "12px", textTransform: "uppercase", letterSpacing: "0.14em" }}>{copy("Sample tasks", "示例任务")}</div>
               <div style={{ display: "grid", gap: "8px", marginTop: "10px" }}>
                 {pack.sampleTasks.map((task) => (
                   <div key={task} style={{ color: "rgba(233,239,255,0.76)", fontSize: "13px", lineHeight: 1.5 }}>

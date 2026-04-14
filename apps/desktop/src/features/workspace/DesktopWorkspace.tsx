@@ -1,6 +1,7 @@
 import React, { startTransition, useEffect, useMemo, useState } from "react";
 import { Panel, Sidebar, TopBar } from "../../components";
 import { apiClient } from "../../lib/api";
+import { useI18n } from "../../lib/i18n";
 import { desktopAgentQueueMock, desktopMockSnapshot, desktopReplayMockByEpisode, desktopRuntimeMock, desktopSyncBacklogMock, desktopSyncStatusMock } from "../../lib/mockData";
 import { theme } from "../../lib/theme";
 import type {
@@ -65,12 +66,13 @@ function mergeRuntimeWorkspaceData(
 }
 
 export function DesktopWorkspace(): JSX.Element {
+  const { copy } = useI18n();
   const [tab, setTab] = useState<WorkspaceTab>("dashboard");
   const [summary, setSummary] = useState<DashboardSummary>(desktopMockSnapshot);
   const [runtimeData, setRuntimeData] = useState<RuntimeWorkspaceData>(desktopRuntimeMock);
   const [events, setEvents] = useState<AgentEvent[]>([
-    { id: "stream-001", level: "info", source: "bootstrap", message: "Workspace loaded from mock snapshot.", at: "now" },
-    { id: "stream-002", level: "warning", source: "runtime", message: "New workflows default into supervised trial mode.", at: "now" },
+    { id: "stream-001", level: "info", source: "bootstrap", message: copy("Workspace loaded from mock snapshot.", "工作区已从本地 mock 快照加载。"), at: "now" },
+    { id: "stream-002", level: "warning", source: "runtime", message: copy("New workflows default into supervised trial mode.", "新工作流默认进入受监督试跑模式。"), at: "now" },
   ]);
   const [refreshing, setRefreshing] = useState(false);
   const [settingsSaving, setSettingsSaving] = useState(false);
@@ -582,16 +584,16 @@ export function DesktopWorkspace(): JSX.Element {
         return (
           <div style={{ display: "grid", gap: "18px" }}>
             <Panel
-              title="Candidates"
-              eyebrow="Recruiting Domain Pack"
-              description="Candidate pipeline and profile summaries remain available as a domain-specific operator view."
+              title={copy("Candidates", "候选人")}
+              eyebrow={copy("Recruiting Domain Pack", "招聘领域包")}
+              description={copy("Candidate pipeline and profile summaries remain available as a domain-specific operator view.", "候选人流水线和档案摘要仍作为领域化操作视图保留。")}
             >
               <CandidatesView candidates={summary.candidates} />
             </Panel>
             <Panel
-              title="Workflows"
-              eyebrow="Recruiting Templates"
-              description="Existing recruiting workflows remain available while the core product moves to dynamic runtime planning."
+              title={copy("Workflows", "工作流")}
+              eyebrow={copy("Recruiting Templates", "招聘模板")}
+              description={copy("Existing recruiting workflows remain available while the core product moves to dynamic runtime planning.", "在核心产品转向动态运行时规划的同时，现有招聘工作流仍可继续使用。")}
             >
               <WorkflowsView workflows={summary.workflows} />
             </Panel>

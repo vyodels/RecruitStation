@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Panel, StatusBadge } from "../../components";
 import { apiClient } from "../../lib/api";
 import { formatCompactDate } from "../../lib/format";
+import { useI18n } from "../../lib/i18n";
 import { desktopAgentQueueMock, desktopMockSnapshot, desktopReplayMockByEpisode, desktopRuntimeMock, desktopSyncBacklogMock, desktopSyncStatusMock } from "../../lib/mockData";
 import type { AgentEvent, AgentQueueItem, RuntimeEpisode, RuntimeEpisodeReplay, SyncBacklogItem, SyncStatusSnapshot } from "../../lib/types";
 import { AgentMonitorView } from "../agent-monitor/AgentMonitorView";
@@ -20,6 +21,7 @@ function toAgentEventLevel(tone: "positive" | "neutral" | "warning" | "critical"
 }
 
 export function AgentMonitorPage() {
+  const { copy } = useI18n();
   const [agent, setAgent] = useState<Awaited<ReturnType<typeof apiClient.getAgentSnapshot>> | null>(null);
   const [events, setEvents] = useState<AgentEvent[]>([]);
   const [loading, setLoading] = useState(true);
@@ -93,7 +95,7 @@ export function AgentMonitorPage() {
           at: event.at,
         })),
       ]);
-      setError(loadError instanceof Error ? loadError.message : "Failed to load agent monitor.");
+      setError(loadError instanceof Error ? loadError.message : copy("Failed to load agent monitor.", "加载 Agent 监控失败。"));
     } finally {
       setLoading(false);
     }
@@ -129,8 +131,8 @@ export function AgentMonitorPage() {
 
   if (loading && agent === null) {
     return (
-      <Panel title="Agent runtime" eyebrow="Monitor" description="Loading agent state from the local backend...">
-        <div style={{ color: "rgba(233,239,255,0.72)", fontSize: "14px" }}>Synchronizing runtime state.</div>
+      <Panel title={copy("Agent runtime", "Agent 运行态")} eyebrow={copy("Monitor", "监控")} description={copy("Loading agent state from the local backend...", "正在从本地后端加载 Agent 状态...")}>
+        <div style={{ color: "rgba(233,239,255,0.72)", fontSize: "14px" }}>{copy("Synchronizing runtime state.", "正在同步运行时状态。")}</div>
       </Panel>
     );
   }
@@ -139,9 +141,9 @@ export function AgentMonitorPage() {
     <div style={{ display: "grid", gap: "16px" }}>
       {error ? (
         <Panel
-          title="Agent runtime"
-          eyebrow="Monitor"
-          description="The desktop client could not refresh the agent monitor from the backend."
+          title={copy("Agent runtime", "Agent 运行态")}
+          eyebrow={copy("Monitor", "监控")}
+          description={copy("The desktop client could not refresh the agent monitor from the backend.", "桌面客户端无法从后端刷新 Agent 监控数据。")}
           actions={<StatusBadge tone="critical">error</StatusBadge>}
         >
           <div style={{ display: "grid", gap: "12px" }}>
@@ -160,7 +162,7 @@ export function AgentMonitorPage() {
                 fontWeight: 700,
               }}
             >
-              Retry
+              {copy("Retry", "重试")}
             </button>
           </div>
         </Panel>
@@ -169,10 +171,10 @@ export function AgentMonitorPage() {
       <div style={{ display: "flex", justifyContent: "space-between", gap: "12px", alignItems: "center" }}>
         <div style={{ color: "rgba(233,239,255,0.72)", fontSize: "13px" }}>
           {loading
-            ? "Refreshing agent monitor..."
+            ? copy("Refreshing agent monitor...", "正在刷新 Agent 监控...")
             : lastRefreshedAt
-              ? `Last refreshed ${formatCompactDate(lastRefreshedAt)}`
-              : "Agent monitor is loaded from the backend."}
+              ? copy(`Last refreshed ${formatCompactDate(lastRefreshedAt)}`, `最近刷新于 ${formatCompactDate(lastRefreshedAt)}`)
+              : copy("Agent monitor is loaded from the backend.", "Agent 监控已从后端加载。")}
         </div>
         <button
           type="button"
@@ -188,7 +190,7 @@ export function AgentMonitorPage() {
             fontWeight: 700,
           }}
         >
-          {loading ? "Refreshing..." : "Refresh"}
+          {loading ? copy("Refreshing...", "刷新中...") : copy("Refresh", "刷新")}
         </button>
       </div>
 

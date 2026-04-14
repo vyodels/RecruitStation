@@ -21,7 +21,7 @@ from scene_pilot.services.agent import AgentControlService
 from scene_pilot.services.dashboard import DashboardService
 from scene_pilot.services.events import EventStreamService
 from scene_pilot.services.feature_flags import FeatureFlagService
-from scene_pilot.repositories import SkillRepository
+from scene_pilot.repositories import SettingsRepository, SkillRepository
 from scene_pilot.services.runtime import PersistedRuntimeService
 from scene_pilot.services.skills import SkillHealthSweepService, SkillLifecycleService, SkillSafetyService
 from scene_pilot.services.sync import SyncService
@@ -419,6 +419,9 @@ class AppContainer:
         engine = create_engine_from_settings(resolved_settings)
         initialize_database(engine)
         session_factory = create_session_factory(engine)
+        with session_factory() as session:
+            persisted_settings = SettingsRepository(session).load(resolved_settings)
+        resolved_settings = AppSettings.model_validate(persisted_settings.model_dump())
 
         flags = FeatureFlagService(
             {
