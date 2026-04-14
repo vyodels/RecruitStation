@@ -223,7 +223,7 @@ Recruiting 是首个 domain pack。
 
 本次不做：
 
-- Boss 真实线上接入
+- 开发期固定网站接入或固定平台流程实现
 - 所有旧 recruiting 页面改名/迁移
 - 完整 task compiler 与 browser capability 实战能力
 

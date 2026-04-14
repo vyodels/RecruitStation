@@ -134,7 +134,7 @@ function normalizeSettings(raw: unknown): SettingsSnapshot {
       timeoutSeconds: Number(intranetSync.timeoutSeconds ?? intranetSync.timeout_seconds ?? 15),
     },
     platform: {
-      name: String(platform.name ?? "Boss直聘"),
+      name: String(platform.name ?? "Recruiting site"),
       account: String(platform.account ?? "recruiter-01"),
       cooldownDays: Number(platform.cooldownDays ?? platform.cooldown_days ?? 30),
       allowOutboundMessaging: Boolean(platform.allowOutboundMessaging ?? platform.allow_outbound_messaging ?? false),

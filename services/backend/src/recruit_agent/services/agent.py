@@ -25,6 +25,7 @@ from recruit_agent.runtime.models import AgentResult
 from recruit_agent.runtime.result_semantics import extract_business_status
 from recruit_agent.scheduler.queue import TaskEnvelope
 from recruit_agent.scheduler.scheduler import ScheduledOutcome, SerialScheduler
+from recruit_agent.platforms import PlatformAdapter
 from recruit_agent.services.events import EventStreamService
 from recruit_agent.services.feature_flags import FeatureFlagService
 from recruit_agent.services.skills import SkillHealthCheckService
@@ -40,7 +41,7 @@ class AgentControlService:
     agent_loop: AgentLoop | None = None
     events: EventStreamService = field(default_factory=EventStreamService)
     flags: FeatureFlagService = field(default_factory=FeatureFlagService)
-    platform_adapter: Any | None = None
+    platform_adapter: PlatformAdapter | None = None
     sync_service: SyncService | None = None
     session_factory: sessionmaker[Session] | None = None
 
@@ -132,7 +133,7 @@ class AgentControlService:
                 result = AgentResult(
                     success=True,
                     status="completed",
-                    content=f"Discovered {len(discovered)} Boss candidates.",
+                    content=f"Discovered {len(discovered)} candidates in the recruiting-site environment.",
                     data={
                         "status": "pass",
                         "discovered_count": len(discovered),
@@ -157,7 +158,7 @@ class AgentControlService:
                 result = AgentResult(
                     success=True,
                     status="completed",
-                    content="Resume request submitted on Boss platform.",
+                    content="Resume request submitted in the recruiting-site environment.",
                     data={"status": "pass", "platform_result": platform_result},
                     metadata={"platform_action": "request_resume"},
                 )
@@ -186,7 +187,7 @@ class AgentControlService:
                 result = AgentResult(
                     success=True,
                     status="completed",
-                    content="Outbound communication submitted on Boss platform.",
+                    content="Outbound communication submitted in the recruiting-site environment.",
                     data={"status": "pass", "platform_result": platform_result},
                     metadata={"platform_action": "send_message"},
                 )
@@ -210,7 +211,7 @@ class AgentControlService:
                 result = AgentResult(
                     success=True,
                     status="completed",
-                    content="Candidate archived on Boss platform.",
+                    content="Candidate archived in the recruiting-site environment.",
                     data={"status": "pass", "platform_result": platform_result},
                     metadata={"platform_action": "archive_candidate"},
                 )

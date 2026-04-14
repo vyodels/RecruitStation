@@ -89,6 +89,7 @@ def _candidate_store_from_source(source: Any) -> dict[str, dict[str, Any]]:
 
 @dataclass(slots=True)
 class BossPlatformAdapter:
+    """Legacy recruiting-site adapter kept as a compatibility seed for runtime environment handling."""
     base_url: str = "https://www.zhipin.com"
     browser_context: dict[str, Any] = field(default_factory=dict)
     candidate_store: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -284,7 +285,7 @@ class BossPlatformAdapter:
             if stored_candidate.get("platform_candidate_id") == candidate_id or stored_candidate.get("candidate_id") == candidate_id:
                 return stored_candidate
 
-        raise KeyError(f"Unknown Boss candidate: {candidate_id}")
+        raise KeyError(f"Unknown recruiting-site candidate: {candidate_id}")
 
     def _snapshot(self, candidate_id: str, candidate: dict[str, Any]) -> CandidateSnapshot:
         raw = _copy_record(candidate)

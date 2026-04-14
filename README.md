@@ -19,7 +19,7 @@ Examples of supported domains include:
 - web research tasks such as tool discovery and comparison
 - GitHub trend collection and structured reporting
 
-Website integrations such as Boss are runtime capabilities and environment states. They are not the product's fixed business flow.
+Website integrations such as Boss are runtime capabilities and environment states. They are not the product's fixed business flow or a hardcoded development deliverable.
 
 ## Current Repository Layout
 

@@ -47,7 +47,7 @@ def _to_desktop_settings(settings: AppSettings) -> SettingsSnapshotRead:
                 "timeoutSeconds": settings.intranet_sync.timeout_seconds,
             },
             "platform": {
-                "name": "Boss直聘",
+                "name": "Recruiting site",
                 "account": settings.provider_config.get("boss_account", "recruiter-01"),
                 "cooldownDays": settings.provider_config.get("cooldown_days", 30),
                 "allowOutboundMessaging": settings.feature_flags.enable_outbound_messaging,

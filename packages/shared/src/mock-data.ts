@@ -57,7 +57,7 @@ export const mockSkills: SkillRecord[] = [
   {
     id: "skill_screening_boss",
     skillId: "boss_initial_screening",
-    name: "Boss Screening",
+    name: "Recruiting Site Screening",
     version: "1.2.0",
     status: "active",
     platform: "boss",
@@ -68,7 +68,7 @@ export const mockSkills: SkillRecord[] = [
   {
     id: "skill_followup_draft",
     skillId: "boss_followup_sequence",
-    name: "Boss Follow-up",
+    name: "Recruiting Site Follow-up",
     version: "0.3.0",
     status: "pending_review",
     platform: "boss",
@@ -131,4 +131,3 @@ export const mockSettings: SettingsRecord = {
   enableOutboundMessaging: false,
   enableSystemCommands: false,
 };
-

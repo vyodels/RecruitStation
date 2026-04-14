@@ -291,7 +291,7 @@ class DashboardService:
                     "timeoutSeconds": _sync_setting(settings, "timeout_seconds", 10),
                 },
                 "platform": {
-                    "name": "Boss直聘",
+                    "name": "Recruiting site",
                     "account": settings.provider_config.get("boss_account", "recruiter-01"),
                     "cooldownDays": settings.provider_config.get("cooldown_days", 30),
                     "allowOutboundMessaging": settings.feature_flags.enable_outbound_messaging,

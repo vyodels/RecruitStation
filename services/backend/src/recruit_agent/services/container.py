@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from recruit_agent.core.settings import AppSettings, load_settings
 from recruit_agent.db.session import create_engine_from_settings, create_session_factory, initialize_database
 from recruit_agent.models import ApprovalItem, Candidate, Skill, Workflow
-from recruit_agent.platforms import BossPlatformAdapter
+from recruit_agent.platforms import BossPlatformAdapter, PlatformAdapter
 from recruit_agent.runtime.agent_loop import AgentLoop
 from recruit_agent.runtime.models import LLMResponse, Message
 from recruit_agent.runtime.prompts import PromptBuilder
@@ -120,10 +120,10 @@ def _resolve_candidate(session: Session, candidate_id: str) -> Candidate:
     candidate = session.query(Candidate).filter(Candidate.platform_candidate_id == candidate_id).first()
     if candidate is not None:
         return candidate
-    raise KeyError(f"Unknown Boss candidate: {candidate_id}")
+    raise KeyError(f"Unknown recruiting-site candidate: {candidate_id}")
 
 
-def _build_boss_adapter(session_factory: sessionmaker[Session], settings: AppSettings) -> BossPlatformAdapter:
+def _build_recruiting_site_adapter(session_factory: sessionmaker[Session], settings: AppSettings) -> PlatformAdapter:
     cooldown_days = settings.provider_runtime_settings().cooldown_days
 
     def _discover(query: dict[str, Any]) -> list[dict[str, Any]]:
@@ -224,11 +224,11 @@ def _build_boss_adapter(session_factory: sessionmaker[Session], settings: AppSet
     )
 
 
-def _register_boss_tools(tools: ToolRegistry, adapter: BossPlatformAdapter) -> None:
+def _register_recruiting_site_tools(tools: ToolRegistry, adapter: PlatformAdapter) -> None:
     tools.register(
         ToolDefinition(
             name="boss_discover_candidates",
-            description="Discover Boss candidates matching the provided query.",
+            description="Compatibility tool: discover candidates in the current recruiting-site environment.",
             parameters={
                 "type": "object",
                 "properties": {},
@@ -240,7 +240,7 @@ def _register_boss_tools(tools: ToolRegistry, adapter: BossPlatformAdapter) -> N
     tools.register(
         ToolDefinition(
             name="boss_inspect_candidate",
-            description="Inspect a Boss candidate profile by candidate id.",
+            description="Compatibility tool: inspect a candidate profile in the current recruiting-site environment.",
             parameters={
                 "type": "object",
                 "properties": {"candidate_id": {"type": "string"}},
@@ -252,7 +252,7 @@ def _register_boss_tools(tools: ToolRegistry, adapter: BossPlatformAdapter) -> N
     tools.register(
         ToolDefinition(
             name="boss_send_message",
-            description="Send a message to a Boss candidate.",
+            description="Compatibility tool: send a message to a candidate in the current recruiting-site environment.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -267,7 +267,7 @@ def _register_boss_tools(tools: ToolRegistry, adapter: BossPlatformAdapter) -> N
     tools.register(
         ToolDefinition(
             name="boss_request_resume",
-            description="Request a resume from a Boss candidate.",
+            description="Compatibility tool: request a resume from a candidate in the current recruiting-site environment.",
             parameters={
                 "type": "object",
                 "properties": {"candidate_id": {"type": "string"}},
@@ -279,7 +279,7 @@ def _register_boss_tools(tools: ToolRegistry, adapter: BossPlatformAdapter) -> N
     tools.register(
         ToolDefinition(
             name="boss_score_candidate",
-            description="Record structured scoring for a Boss candidate.",
+            description="Compatibility tool: record structured scoring for a candidate in the current recruiting-site environment.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -294,7 +294,7 @@ def _register_boss_tools(tools: ToolRegistry, adapter: BossPlatformAdapter) -> N
     tools.register(
         ToolDefinition(
             name="boss_archive_candidate",
-            description="Archive a Boss candidate with a reason.",
+            description="Compatibility tool: archive a candidate in the current recruiting-site environment with a reason.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -325,7 +325,7 @@ class AppContainer:
     skill_safety: SkillSafetyService
     system_commands: SystemCommandService
 
-    def _build_runtime_tools(self, settings: AppSettings) -> tuple[ToolRegistry, BossPlatformAdapter]:
+    def _build_runtime_tools(self, settings: AppSettings) -> tuple[ToolRegistry, PlatformAdapter]:
         tools = ToolRegistry()
         tools.register(tools.build_result_submission_tool())
         tools.register(
@@ -342,9 +342,9 @@ class AppContainer:
         )
         tools.register(tools.build_system_command_tool(self.system_commands.request_tool_command))
 
-        boss_adapter = _build_boss_adapter(self.session_factory, settings)
-        _register_boss_tools(tools, boss_adapter)
-        return tools, boss_adapter
+        site_adapter = _build_recruiting_site_adapter(self.session_factory, settings)
+        _register_recruiting_site_tools(tools, site_adapter)
+        return tools, site_adapter
 
     def reload_settings(self, settings: AppSettings) -> None:
         self.settings = settings
@@ -363,9 +363,9 @@ class AppContainer:
         providers, runtime_provider = _build_provider_registry(settings)
         self.providers = providers
 
-        tools, boss_adapter = self._build_runtime_tools(settings)
+        tools, site_adapter = self._build_runtime_tools(settings)
         self.tools = tools
-        self.agent_control.platform_adapter = boss_adapter
+        self.agent_control.platform_adapter = site_adapter
 
         if self.agent_control.agent_loop is not None:
             self.agent_control.agent_loop.provider = runtime_provider
@@ -410,8 +410,8 @@ class AppContainer:
         )
         tools.register(tools.build_system_command_tool(system_commands.request_tool_command))
         workflow_engine = WorkflowEngine(session_factory=session_factory)
-        boss_adapter = _build_boss_adapter(session_factory, resolved_settings)
-        _register_boss_tools(tools, boss_adapter)
+        site_adapter = _build_recruiting_site_adapter(session_factory, resolved_settings)
+        _register_recruiting_site_tools(tools, site_adapter)
         agent_loop = AgentLoop(provider=runtime_provider, tools=tools, prompt_builder=PromptBuilder())
         scheduler = SerialScheduler(queue=SqlAlchemyQueue(session_factory), follow_up_factory=workflow_engine.build_follow_up_factory())
         sync = SyncService(
@@ -425,7 +425,7 @@ class AppContainer:
             agent_loop=agent_loop,
             events=events,
             flags=flags,
-            platform_adapter=boss_adapter,
+            platform_adapter=site_adapter,
             sync_service=sync,
             session_factory=session_factory,
         )
@@ -549,7 +549,7 @@ class AppContainer:
                 [
                     Candidate(
                         name="Mia Chen",
-                        platform="Boss直聘",
+                        platform="Recruiting site",
                         platform_candidate_id="boss_001",
                         status="screening",
                         current_workflow_node="initial_screening",
@@ -568,7 +568,7 @@ class AppContainer:
                     ),
                     Candidate(
                         name="Jason Li",
-                        platform="Boss直聘",
+                        platform="Recruiting site",
                         platform_candidate_id="boss_002",
                         status="pending_communication",
                         current_workflow_node="initiate_communication",
@@ -585,7 +585,7 @@ class AppContainer:
                     ),
                     Candidate(
                         name="Luna Wang",
-                        platform="Boss直聘",
+                        platform="Recruiting site",
                         platform_candidate_id="boss_003",
                         status="cooldown",
                         current_workflow_node="cooldown",
@@ -641,11 +641,11 @@ class AppContainer:
                     ),
                     Skill(
                         skill_id="boss_outreach_drafting",
-                        name="Boss Outreach Drafting",
+                        name="Recruiting Site Outreach Drafting",
                         version=1,
                         status="active",
                         bound_to_workflow_node="initiate_communication",
-                        platform="Boss直聘",
+                        platform="Recruiting site",
                         strategy={"summary": "Produces short, respectful outreach with role-specific context."},
                         last_health_status="healthy",
                         last_health_check=_utcnow(),
@@ -656,7 +656,7 @@ class AppContainer:
                         version=1,
                         status="pending_review",
                         bound_to_workflow_node="initial_screening",
-                        platform="Boss直聘",
+                        platform="Recruiting site",
                         strategy={"summary": "Drafted from recent candidate examples and pending approval."},
                         last_health_status="warning",
                         last_health_check=_utcnow(),

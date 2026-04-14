@@ -13,7 +13,7 @@ export function CandidatesView({ candidates }: CandidatesViewProps): JSX.Element
 
   return (
     <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.2fr) minmax(320px, 0.8fr)", gap: "18px", alignItems: "start" }}>
-      <Panel title="Candidate pipeline" eyebrow="Boss直聘" description="The current working set ordered by screening readiness.">
+      <Panel title="Candidate pipeline" eyebrow="Recruiting site" description="The current working set ordered by screening readiness across the active recruiting environment.">
         <div style={{ display: "grid", gap: "10px" }}>
           {candidates.map((candidate) => (
             <button
@@ -84,4 +84,3 @@ export function CandidatesView({ candidates }: CandidatesViewProps): JSX.Element
     </div>
   );
 }
-
