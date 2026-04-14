@@ -12,6 +12,7 @@ from recruit_agent.schemas import (
     ExecutionEpisodeCreate,
     ExecutionEpisodeRead,
     ExecutionPlanRead,
+    RuntimeEpisodeReplayRead,
     RuntimeLearningOutcomeRead,
     TaskCompileRequest,
     TaskCompileResponse,
@@ -127,6 +128,30 @@ def get_execution_episode(
 ) -> ExecutionEpisodeRead:
     try:
         return service.get_episode(episode_id)
+    except ValueError as exc:
+        _raise_runtime_http_error(exc)
+
+
+@router.get("/episodes/{episode_id}/replay", response_model=RuntimeEpisodeReplayRead)
+@router.get("/trial-runs/{episode_id}/replay", response_model=RuntimeEpisodeReplayRead)
+def get_execution_episode_replay(
+    episode_id: str,
+    service: PersistedRuntimeService = Depends(get_runtime_service),
+) -> RuntimeEpisodeReplayRead:
+    try:
+        return service.get_episode_replay(episode_id)
+    except ValueError as exc:
+        _raise_runtime_http_error(exc)
+
+
+@router.get("/trial-runs/{episode_id}/replay", response_model=RuntimeEpisodeReplayRead)
+@router.get("/episodes/{episode_id}/replay", response_model=RuntimeEpisodeReplayRead)
+def get_execution_episode_replay(
+    episode_id: str,
+    service: PersistedRuntimeService = Depends(get_runtime_service),
+) -> RuntimeEpisodeReplayRead:
+    try:
+        return service.get_episode_replay(episode_id)
     except ValueError as exc:
         _raise_runtime_http_error(exc)
 

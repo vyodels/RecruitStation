@@ -8,5 +8,6 @@ __all__ = [
     "runtime",
     "settings",
     "skills",
+    "sync",
     "workflows",
 ]

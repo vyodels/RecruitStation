@@ -1,14 +1,17 @@
 import React, { startTransition, useEffect, useMemo, useState } from "react";
 import { Panel, Sidebar, TopBar } from "../../components";
 import { apiClient } from "../../lib/api";
-import { desktopMockSnapshot, desktopRuntimeMock } from "../../lib/mockData";
+import { desktopMockSnapshot, desktopReplayMockByEpisode, desktopRuntimeMock, desktopSyncBacklogMock, desktopSyncStatusMock } from "../../lib/mockData";
 import { theme } from "../../lib/theme";
 import type {
   AgentEvent,
   CompileTaskRequest,
   DashboardSummary,
+  RuntimeEpisodeReplay,
   RuntimeLearningOutcome,
   RuntimeWorkspaceData,
+  SyncBacklogItem,
+  SyncStatusSnapshot,
   WorkspaceTab,
 } from "../../lib/types";
 import { AgentMonitorView } from "../agent-monitor/AgentMonitorView";
@@ -35,6 +38,11 @@ export function DesktopWorkspace(): JSX.Element {
   const [trialTaskId, setTrialTaskId] = useState<string>();
   const [busyEpisodeId, setBusyEpisodeId] = useState<string>();
   const [busyPatchId, setBusyPatchId] = useState<string>();
+  const [selectedEpisodeId, setSelectedEpisodeId] = useState<string>();
+  const [selectedReplay, setSelectedReplay] = useState<RuntimeEpisodeReplay | null>(desktopReplayMockByEpisode["episode-001"]);
+  const [syncStatus, setSyncStatus] = useState<SyncStatusSnapshot>(desktopSyncStatusMock);
+  const [syncBacklog, setSyncBacklog] = useState<SyncBacklogItem[]>(desktopSyncBacklogMock);
+  const [syncingBacklog, setSyncingBacklog] = useState(false);
   const [transport, setTransport] = useState(apiClient.describe().transport);
   const [errorMessage, setErrorMessage] = useState<string>();
   const [lastOutcome, setLastOutcome] = useState<RuntimeLearningOutcome | null>(null);
@@ -46,15 +54,20 @@ export function DesktopWorkspace(): JSX.Element {
   const loadWorkspace = async (reason?: string) => {
     setRefreshing(true);
     try {
-      const [nextSummary, nextRuntime, nextAgent] = await Promise.all([
+      const [nextSummary, nextRuntime, nextAgent, nextSyncStatus, nextSyncBacklog] = await Promise.all([
         apiClient.getDashboardSummary(),
         apiClient.getRuntimeWorkspaceData(),
         apiClient.getAgentSnapshot(),
+        apiClient.getSyncStatus(),
+        apiClient.listSyncBacklog(),
       ]);
       startTransition(() => {
         setSummary({ ...nextSummary, agent: nextAgent });
         setRuntimeData(nextRuntime);
+        setSyncStatus(nextSyncStatus);
+        setSyncBacklog(nextSyncBacklog);
       });
+      setSelectedEpisodeId((current) => current ?? nextRuntime.episodes[0]?.id);
       setTransport("http");
       setErrorMessage(undefined);
       if (reason) {
@@ -70,6 +83,9 @@ export function DesktopWorkspace(): JSX.Element {
       setTransport("mock");
       setSummary(desktopMockSnapshot);
       setRuntimeData(desktopRuntimeMock);
+      setSyncStatus(desktopSyncStatusMock);
+      setSyncBacklog(desktopSyncBacklogMock);
+      setSelectedReplay(desktopReplayMockByEpisode[selectedEpisodeId ?? "episode-001"] ?? desktopReplayMockByEpisode["episode-001"]);
       setErrorMessage(error instanceof Error ? error.message : "Failed to refresh workspace.");
       appendEvent({
         id: `local-error-${Date.now()}`,
@@ -87,16 +103,21 @@ export function DesktopWorkspace(): JSX.Element {
     let alive = true;
     void (async () => {
       try {
-        const [nextSummary, nextRuntime, nextAgent] = await Promise.all([
+        const [nextSummary, nextRuntime, nextAgent, nextSyncStatus, nextSyncBacklog] = await Promise.all([
           apiClient.getDashboardSummary(),
           apiClient.getRuntimeWorkspaceData(),
           apiClient.getAgentSnapshot(),
+          apiClient.getSyncStatus(),
+          apiClient.listSyncBacklog(),
         ]);
         if (!alive) {
           return;
         }
         setSummary({ ...nextSummary, agent: nextAgent });
         setRuntimeData(nextRuntime);
+        setSyncStatus(nextSyncStatus);
+        setSyncBacklog(nextSyncBacklog);
+        setSelectedEpisodeId((current) => current ?? nextRuntime.episodes[0]?.id);
         setTransport("http");
         setEvents((current) => [
           ...current,
@@ -140,6 +161,32 @@ export function DesktopWorkspace(): JSX.Element {
     });
     return unsubscribe;
   }, []);
+
+  useEffect(() => {
+    const episodeId = selectedEpisodeId ?? runtimeData.episodes[0]?.id;
+    if (!episodeId) {
+      setSelectedReplay(null);
+      return;
+    }
+
+    let active = true;
+    void (async () => {
+      try {
+        const replay = await apiClient.getRuntimeReplay(episodeId);
+        if (active) {
+          setSelectedReplay(replay);
+        }
+      } catch {
+        if (active) {
+          setSelectedReplay(desktopReplayMockByEpisode[episodeId] ?? desktopReplayMockByEpisode["episode-001"] ?? null);
+        }
+      }
+    })();
+
+    return () => {
+      active = false;
+    };
+  }, [runtimeData.episodes, selectedEpisodeId]);
 
   const counts = useMemo(
     () =>
@@ -245,6 +292,7 @@ export function DesktopWorkspace(): JSX.Element {
         message: `Created supervised trial ${episode.id}.`,
         at: new Date().toISOString(),
       });
+      setSelectedEpisodeId(episode.id);
       await loadWorkspace(`Created trial run ${episode.id}.`);
     } finally {
       setTrialTaskId(undefined);
@@ -304,6 +352,27 @@ export function DesktopWorkspace(): JSX.Element {
     }
   };
 
+  const handleInspectEpisode = (episodeId: string) => {
+    setSelectedEpisodeId(episodeId);
+    appendEvent({
+      id: `replay-${episodeId}-${Date.now()}`,
+      level: "info",
+      source: "replay",
+      message: `Loaded replay diagnostics for ${episodeId}.`,
+      at: new Date().toISOString(),
+    });
+  };
+
+  const handleFlushSync = async () => {
+    setSyncingBacklog(true);
+    try {
+      const result = await apiClient.flushSyncBacklog();
+      await loadWorkspace(result.message);
+    } finally {
+      setSyncingBacklog(false);
+    }
+  };
+
   const content = (() => {
     switch (tab) {
       case "dashboard":
@@ -318,11 +387,17 @@ export function DesktopWorkspace(): JSX.Element {
             mode={tab}
             data={runtimeData}
             busy={runtimeActionBusy}
+            busyEpisodeId={busyEpisodeId}
+            selectedEpisodeId={selectedEpisodeId}
             actionPatchId={busyPatchId}
+            replay={selectedReplay}
             lastOutcome={lastOutcome}
             onCompileTask={handleCompile}
             onCreateTrialRun={handleCreateTrial}
             onExecuteTrialRun={handleExecuteTrial}
+            onRefreshLearning={handleLearnTrial}
+            onConfirmTrial={handleConfirmTrial}
+            onInspectEpisode={handleInspectEpisode}
             onApprovePatch={handleApprovePatch}
             onRejectPatch={handleRejectPatch}
           />
@@ -362,9 +437,17 @@ export function DesktopWorkspace(): JSX.Element {
           <AgentMonitorView
             agent={summary.agent}
             events={events}
+            episodes={runtimeData.episodes}
+            selectedEpisodeId={selectedEpisodeId}
+            replay={selectedReplay}
+            syncStatus={syncStatus}
+            syncBacklog={syncBacklog}
             runningAction={runtimeActionBusy}
+            syncingAction={syncingBacklog}
             onRunOnce={handleRunOnce}
             onQueueScreeningTask={handleQueueScreeningTask}
+            onFlushSync={handleFlushSync}
+            onSelectEpisode={handleInspectEpisode}
           />
         );
       case "settings":

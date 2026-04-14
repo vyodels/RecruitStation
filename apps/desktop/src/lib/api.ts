@@ -1,4 +1,4 @@
-import { desktopMockSnapshot, desktopRuntimeMock } from "./mockData";
+import { desktopMockSnapshot, desktopReplayMockByEpisode, desktopRuntimeMock, desktopSyncBacklogMock, desktopSyncStatusMock } from "./mockData";
 import type {
   ApprovalItem,
   AgentEvent,
@@ -12,6 +12,7 @@ import type {
   DashboardSummary,
   DomainPackRecord,
   RuntimeEpisode,
+  RuntimeEpisodeReplay,
   RuntimeLearningOutcome,
   RuntimePatch,
   RuntimeSnapshot,
@@ -20,6 +21,9 @@ import type {
   RuntimeWorkspaceData,
   SettingsSnapshot,
   SkillRecord,
+  SyncBacklogItem,
+  SyncFlushResult,
+  SyncStatusSnapshot,
   WorkflowDefinition,
 } from "./types";
 
@@ -35,11 +39,15 @@ export interface DesktopApiClient {
   executeTrialRun(episodeId: string, notes?: string): Promise<RuntimeLearningOutcome>;
   refreshRuntimeLearning(episodeId: string): Promise<RuntimeLearningOutcome>;
   confirmTrialRun(episodeId: string, reason?: string): Promise<RuntimeLearningOutcome>;
+  getRuntimeReplay(episodeId: string): Promise<RuntimeEpisodeReplay>;
   listRuntimeSnapshots(): Promise<RuntimeSnapshot[]>;
   listRuntimeTemplates(): Promise<RuntimeTemplate[]>;
   listRuntimePatches(): Promise<RuntimePatch[]>;
   approveRuntimePatch(id: string, reason?: string): Promise<RuntimePatch>;
   rejectRuntimePatch(id: string, reason?: string): Promise<RuntimePatch>;
+  getSyncStatus(): Promise<SyncStatusSnapshot>;
+  listSyncBacklog(): Promise<SyncBacklogItem[]>;
+  flushSyncBacklog(): Promise<SyncFlushResult>;
   listCandidates(): Promise<CandidateRecord[]>;
   listWorkflows(): Promise<WorkflowDefinition[]>;
   listSkills(): Promise<SkillRecord[]>;
@@ -362,6 +370,193 @@ function normalizeRuntimeLearningOutcome(raw: unknown): RuntimeLearningOutcome {
   };
 }
 
+function toneFromStatus(value: string): "positive" | "neutral" | "warning" | "critical" {
+  if (/(error|failed|diverg|drift|critical)/i.test(value)) {
+    return "critical";
+  }
+  if (/(pending|review|await|warning)/i.test(value)) {
+    return "warning";
+  }
+  if (/(active|ready|success|completed|confirmed|applied)/i.test(value)) {
+    return "positive";
+  }
+  return "neutral";
+}
+
+function normalizeTimelineEvent(raw: unknown, fallbackId: string): AgentEvent & { tone: "positive" | "neutral" | "warning" | "critical" } {
+  const record = asRecord(raw);
+  const tone = String(record.tone ?? "");
+  const level = String(record.level ?? "");
+  const resolvedTone =
+    tone === "positive" || tone === "warning" || tone === "critical" || tone === "neutral"
+      ? tone
+      : level === "success"
+        ? "positive"
+        : level === "warning"
+          ? "warning"
+          : level === "error"
+            ? "critical"
+            : "neutral";
+  return {
+    id: String(record.id ?? fallbackId),
+    source: String(record.source ?? "runtime"),
+    message: String(record.detail ?? record.message ?? record.label ?? "Runtime event"),
+    at: String(record.at ?? new Date().toISOString()),
+    level:
+      resolvedTone === "critical"
+        ? "error"
+        : resolvedTone === "warning"
+          ? "warning"
+          : resolvedTone === "positive"
+            ? "success"
+            : "info",
+    tone: resolvedTone,
+  };
+}
+
+function normalizeRuntimeReplay(raw: unknown): RuntimeEpisodeReplay {
+  const record = asRecord(raw);
+  const replayRecord = asRecord(record.replay);
+  const payload = Object.keys(replayRecord).length ? replayRecord : record;
+  const approvals = asArray(payload.approvals)
+    .map((approval) => normalizeRuntimeLearningOutcome({ episode: payload.episode ?? {}, approval }).approval)
+    .filter((approval): approval is NonNullable<RuntimeEpisodeReplay["approval"]> => Boolean(approval));
+  const timelineSource = asArray(payload.timeline).length ? asArray(payload.timeline) : asArray(payload.diagnostics);
+  const diagnostics = timelineSource.map((event, index) => {
+    const entry = asRecord(event);
+    const toneValue = String(entry.tone ?? "");
+    const tone =
+      toneValue === "positive" || toneValue === "warning" || toneValue === "critical" || toneValue === "neutral"
+        ? toneValue
+        : toneFromStatus(String(entry.status ?? entry.kind ?? entry.detail ?? entry.title ?? entry.label ?? "runtime"));
+    return {
+      id: String(entry.id ?? entry.sequence ?? `diagnostic-${index}`),
+      label: String(entry.label ?? entry.title ?? entry.kind ?? `Event ${index + 1}`),
+      detail: String(entry.detail ?? entry.message ?? entry.status ?? "Runtime replay event."),
+      at: String(entry.at ?? entry.occurred_at ?? new Date().toISOString()),
+      tone,
+    };
+  });
+  const diagnosticsRecord = asRecord(payload.diagnostics);
+  const notes = asArray<string>(payload.notes);
+  if (!notes.length && Object.keys(diagnosticsRecord).length) {
+    const summaryParts = [
+      diagnosticsRecord.domain ? `Domain ${String(diagnosticsRecord.domain)}` : null,
+      diagnosticsRecord.status ? `status ${String(diagnosticsRecord.status)}` : null,
+      diagnosticsRecord.snapshot_count !== undefined ? `${Number(diagnosticsRecord.snapshot_count)} snapshots` : null,
+      diagnosticsRecord.action_count !== undefined ? `${Number(diagnosticsRecord.action_count)} actions` : null,
+    ].filter((value): value is string => Boolean(value));
+    if (summaryParts.length) {
+      notes.push(summaryParts.join(" · "));
+    }
+    if (diagnosticsRecord.latest_error) {
+      notes.push(`Latest error: ${String(diagnosticsRecord.latest_error)}`);
+    }
+    if (Number(diagnosticsRecord.pending_approval_count ?? 0) > 0) {
+      notes.push(`${Number(diagnosticsRecord.pending_approval_count)} approvals are still pending review.`);
+    }
+  }
+  return {
+    episode: normalizeRuntimeEpisode(payload.episode ?? payload.executionEpisode ?? payload.execution_episode),
+    taskSpec: payload.taskSpec ?? payload.task_spec ? normalizeRuntimeTask(payload.taskSpec ?? payload.task_spec) : null,
+    executionPlan:
+      payload.executionPlan ?? payload.execution_plan
+        ? normalizeRuntimePlan(payload.executionPlan ?? payload.execution_plan)
+        : null,
+    snapshots: asArray(payload.snapshots).map(normalizeRuntimeSnapshot),
+    patch: payload.patch ? normalizeRuntimePatch(payload.patch) : null,
+    template: payload.template ? normalizeRuntimeTemplate(payload.template) : null,
+    approval:
+      approvals.find((approval) => approval.status === "pending") ??
+      approvals[0] ??
+      (payload.approval ? normalizeRuntimeLearningOutcome({ episode: payload.episode ?? {}, approval: payload.approval }).approval : null),
+    diagnostics,
+    notes,
+  };
+}
+
+function normalizeSyncBacklogItem(raw: unknown): SyncBacklogItem {
+  const record = asRecord(raw);
+  const payload = asRecord(record.payload);
+  const delivery = asRecord(payload.delivery);
+  const body = asRecord(payload.body);
+  const entityType = String(record.entityType ?? record.entity_type ?? record.item_type ?? record.kind ?? "sync_item");
+  const entityId = record.entityId
+    ? String(record.entityId)
+    : record.entity_id
+      ? String(record.entity_id)
+      : record.item_id
+        ? String(record.item_id)
+        : null;
+  return {
+    id: String(record.id ?? ""),
+    target: String(record.target ?? record.destination ?? asRecord(payload.target).kind ?? "intranet"),
+    entityType,
+    entityId,
+    status: String(record.status ?? "pending"),
+    attemptCount: Number(record.attemptCount ?? record.attempt_count ?? 0),
+    payloadSummary: record.payloadSummary
+      ? String(record.payloadSummary)
+      : record.payload_summary
+        ? String(record.payload_summary)
+        : record.summary
+          ? String(record.summary)
+          : body.summary
+            ? String(body.summary)
+            : body.status
+              ? `${entityType} ${entityId ?? ""}`.trim() + ` · ${String(body.status)}`
+              : entityId
+                ? `${entityType} ${entityId}`
+                : entityType,
+    lastError: record.lastError
+      ? String(record.lastError)
+      : record.last_error
+        ? String(record.last_error)
+        : delivery.last_error
+          ? String(delivery.last_error)
+          : null,
+    updatedAt: String(record.updatedAt ?? record.updated_at ?? new Date().toISOString()),
+  };
+}
+
+function normalizeSyncStatus(raw: unknown): SyncStatusSnapshot {
+  const record = asRecord(raw);
+  const remoteAvailable = Boolean(record.remoteAvailable ?? record.remote_available ?? false);
+  const enabled = Boolean(record.enabled ?? record.sync_enabled ?? false);
+  const modeValue = String(record.mode ?? (enabled ? (remoteAvailable ? "remote_ready" : "remote_unavailable") : "local_only"));
+  const recentErrors = asArray<string>(record.recentErrors ?? record.recent_errors);
+  if (!recentErrors.length && record.latest_error) {
+    recentErrors.push(String(record.latest_error));
+  }
+  return {
+    enabled,
+    mode:
+      modeValue === "remote_ready" || modeValue === "remote_unavailable" || modeValue === "local_only"
+        ? modeValue
+        : enabled
+          ? remoteAvailable
+            ? "remote_ready"
+            : "remote_unavailable"
+          : "local_only",
+    remoteAvailable,
+    pendingCount: Number(record.pendingCount ?? record.pending_count ?? 0),
+    lastAttemptAt: record.lastAttemptAt ? String(record.lastAttemptAt) : record.last_attempt_at ? String(record.last_attempt_at) : null,
+    lastSuccessAt: record.lastSuccessAt ? String(record.lastSuccessAt) : record.last_success_at ? String(record.last_success_at) : null,
+    recentErrors,
+  };
+}
+
+function normalizeSyncFlushResult(raw: unknown): SyncFlushResult {
+  const record = asRecord(raw);
+  return {
+    attempted: Number(record.attempted ?? record.total_attempted ?? 0),
+    synced: Number(record.synced ?? record.succeeded ?? record.flushed ?? 0),
+    failed: Number(record.failed ?? 0),
+    remoteAvailable: Boolean(record.remoteAvailable ?? record.remote_available ?? false),
+    message: String(record.message ?? "Sync flush finished."),
+  };
+}
+
 function normalizeCompileTaskResponse(raw: unknown): CompileTaskResponse {
   const record = asRecord(raw);
   return {
@@ -378,6 +573,17 @@ function resolveWebSocketUrl(baseUrl: string): string {
   url.pathname = "/ws/agent-stream";
   url.search = "";
   return url.toString();
+}
+
+async function requestRuntimeReplay(baseUrl: string, episodeId: string): Promise<RuntimeEpisodeReplay> {
+  try {
+    return normalizeRuntimeReplay(await requestJson<unknown>(baseUrl, `/api/runtime/trial-runs/${episodeId}/replay`));
+  } catch (error) {
+    if (error instanceof Error && /404/.test(error.message)) {
+      return normalizeRuntimeReplay(await requestJson<unknown>(baseUrl, `/api/runtime/episodes/${episodeId}/replay`));
+    }
+    throw error;
+  }
 }
 
 function createFetchClient(baseUrl: string): DesktopApiClient {
@@ -462,6 +668,7 @@ function createFetchClient(baseUrl: string): DesktopApiClient {
           }),
         }),
       ),
+    getRuntimeReplay: async (episodeId) => requestRuntimeReplay(baseUrl, episodeId),
     listRuntimeSnapshots: async () => asArray(await requestJson<unknown>(baseUrl, "/api/runtime/environment-snapshots")).map(normalizeRuntimeSnapshot),
     listRuntimeTemplates: async () => asArray(await requestJson<unknown>(baseUrl, "/api/runtime/templates")).map(normalizeRuntimeTemplate),
     listRuntimePatches: async () => asArray(await requestJson<unknown>(baseUrl, "/api/runtime/workflow-patches")).map(normalizeRuntimePatch),
@@ -477,6 +684,15 @@ function createFetchClient(baseUrl: string): DesktopApiClient {
         await requestJson<unknown>(baseUrl, `/api/runtime/workflow-patches/${id}/reject`, {
           method: "POST",
           body: JSON.stringify({ reviewer: "desktop-user", reason }),
+        }),
+      ),
+    getSyncStatus: async () => normalizeSyncStatus(await requestJson<unknown>(baseUrl, "/api/sync/status")),
+    listSyncBacklog: async () => asArray(await requestJson<unknown>(baseUrl, "/api/sync/backlog")).map(normalizeSyncBacklogItem),
+    flushSyncBacklog: async () =>
+      normalizeSyncFlushResult(
+        await requestJson<unknown>(baseUrl, "/api/sync/flush", {
+          method: "POST",
+          body: JSON.stringify({ initiated_by: "desktop-user" }),
         }),
       ),
     listCandidates: async () => normalizeDashboard(await requestJson<unknown>(baseUrl, "/api/dashboard")).candidates,
@@ -605,6 +821,7 @@ function createMockClient(): DesktopApiClient {
       approval: null,
       skillHealth: null,
     }),
+    getRuntimeReplay: async (episodeId) => desktopReplayMockByEpisode[episodeId] ?? desktopReplayMockByEpisode["episode-001"],
     listRuntimeSnapshots: async () => desktopRuntimeMock.snapshots,
     listRuntimeTemplates: async () => desktopRuntimeMock.templates,
     listRuntimePatches: async () => desktopRuntimeMock.patches,
@@ -619,6 +836,15 @@ function createMockClient(): DesktopApiClient {
       id,
       status: "rejected",
       rationale: reason ?? desktopRuntimeMock.patches[0]?.rationale ?? null,
+    }),
+    getSyncStatus: async () => desktopSyncStatusMock,
+    listSyncBacklog: async () => desktopSyncBacklogMock,
+    flushSyncBacklog: async () => ({
+      attempted: desktopSyncBacklogMock.length,
+      synced: 0,
+      failed: desktopSyncBacklogMock.length,
+      remoteAvailable: false,
+      message: "Mock flush kept the backlog locally because intranet sync is disabled.",
     }),
     listCandidates: async () => snapshot.candidates,
     listWorkflows: async () => snapshot.workflows,
@@ -739,6 +965,14 @@ export function createDesktopApiClient(baseUrl?: string): DesktopApiClient {
         throw error;
       });
     },
+    async getRuntimeReplay(episodeId) {
+      return fetchClient.getRuntimeReplay(episodeId).catch(async (error) => {
+        if (isOfflineError(error)) {
+          return createMockClient().getRuntimeReplay(episodeId);
+        }
+        throw error;
+      });
+    },
     async listRuntimeSnapshots() {
       return fetchClient.listRuntimeSnapshots().catch(async (error) => {
         if (isOfflineError(error)) {
@@ -775,6 +1009,30 @@ export function createDesktopApiClient(baseUrl?: string): DesktopApiClient {
       return fetchClient.rejectRuntimePatch(id, reason).catch(async (error) => {
         if (isOfflineError(error)) {
           return createMockClient().rejectRuntimePatch(id, reason);
+        }
+        throw error;
+      });
+    },
+    async getSyncStatus() {
+      return fetchClient.getSyncStatus().catch(async (error) => {
+        if (isOfflineError(error)) {
+          return desktopSyncStatusMock;
+        }
+        throw error;
+      });
+    },
+    async listSyncBacklog() {
+      return fetchClient.listSyncBacklog().catch(async (error) => {
+        if (isOfflineError(error)) {
+          return desktopSyncBacklogMock;
+        }
+        throw error;
+      });
+    },
+    async flushSyncBacklog() {
+      return fetchClient.flushSyncBacklog().catch(async (error) => {
+        if (isOfflineError(error)) {
+          return createMockClient().flushSyncBacklog();
         }
         throw error;
       });

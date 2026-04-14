@@ -57,6 +57,21 @@ class SyncFlushResult:
 
 
 @dataclass(slots=True)
+class SyncStatusSnapshot:
+    enabled: bool
+    remote_available: bool
+    protocol_version: str
+    source: str
+    target: dict[str, Any] = field(default_factory=dict)
+    pending_count: int = 0
+    synced_count: int = 0
+    failed_delivery_count: int = 0
+    backlog_total: int = 0
+    by_status: dict[str, int] = field(default_factory=dict)
+    latest_error: str | None = None
+
+
+@dataclass(slots=True)
 class SyncService:
     intranet_enabled: bool = False
     session_factory: sessionmaker[Session] | None = None
@@ -69,6 +84,7 @@ class SyncService:
     def enqueue(self, item_type: str, item_id: str, payload: dict[str, Any]) -> SyncBacklogItem:
         envelope = self._build_envelope(item_type=item_type, item_id=item_id, body=payload)
         if self.session_factory is None:
+            now = datetime.now(timezone.utc)
             item = SyncBacklogItem(
                 item_id=item_id,
                 item_type=item_type,
@@ -76,6 +92,8 @@ class SyncService:
                 protocol_version=self.protocol_version,
                 target=dict(self.target),
                 body=dict(payload),
+                created_at=now,
+                updated_at=now,
             )
             self.backlog.append(item)
             return item
@@ -85,12 +103,30 @@ class SyncService:
             return SyncBacklogItem.from_record(record)
 
     def pending(self, limit: int = 100, offset: int = 0) -> list[SyncBacklogItem]:
+        return self.list_backlog(status="pending", limit=limit, offset=offset)
+
+    def list_backlog(
+        self,
+        *,
+        status: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[SyncBacklogItem]:
         if self.session_factory is None:
-            pending = [item for item in self.backlog if item.status == "pending"]
-            return pending[offset : offset + limit]
+            items = list(self.backlog)
+            if status is not None:
+                items = [item for item in items if item.status == status]
+            items.sort(
+                key=lambda item: (
+                    item.created_at or datetime.min.replace(tzinfo=timezone.utc),
+                    item.item_id,
+                ),
+                reverse=True,
+            )
+            return items[offset : offset + limit]
 
         with self.session_factory() as session:
-            records = SyncBacklogRepository(session).pending(limit=limit, offset=offset)
+            records = SyncBacklogRepository(session).list(status=status, limit=limit, offset=offset)
             return [SyncBacklogItem.from_record(record) for record in records]
 
     def pending_count(self) -> int:
@@ -100,12 +136,54 @@ class SyncService:
         with self.session_factory() as session:
             return SyncBacklogRepository(session).pending_count()
 
+    def status_snapshot(self) -> SyncStatusSnapshot:
+        if self.session_factory is None:
+            by_status: dict[str, int] = {}
+            latest_error: str | None = None
+            failed_delivery_count = 0
+            for item in self.backlog:
+                by_status[item.status] = by_status.get(item.status, 0) + 1
+                if item.last_error:
+                    failed_delivery_count += 1
+                    latest_error = item.last_error
+            return SyncStatusSnapshot(
+                enabled=bool(self.intranet_enabled),
+                remote_available=self.remote_available(),
+                protocol_version=self.protocol_version,
+                source=self.source,
+                target=dict(self.target),
+                pending_count=by_status.get("pending", 0),
+                synced_count=by_status.get("synced", 0),
+                failed_delivery_count=failed_delivery_count,
+                backlog_total=len(self.backlog),
+                by_status=by_status,
+                latest_error=latest_error,
+            )
+
+        with self.session_factory() as session:
+            repo = SyncBacklogRepository(session)
+            by_status = repo.counts_by_status()
+            return SyncStatusSnapshot(
+                enabled=bool(self.intranet_enabled),
+                remote_available=self.remote_available(),
+                protocol_version=self.protocol_version,
+                source=self.source,
+                target=dict(self.target),
+                pending_count=by_status.get("pending", 0),
+                synced_count=by_status.get("synced", 0),
+                failed_delivery_count=repo.delivery_error_count(),
+                backlog_total=sum(by_status.values()),
+                by_status=by_status,
+                latest_error=repo.latest_delivery_error(),
+            )
+
     def mark_synced(self, item_id: str, item_type: str | None = None) -> SyncBacklogItem | None:
         if self.session_factory is None:
             for item in self.backlog:
                 if item.item_id == item_id and (item_type is None or item.item_type == item_type):
                     item.status = "synced"
                     item.synced_at = datetime.now(timezone.utc)
+                    item.updated_at = item.synced_at
                     return item
             return None
 
@@ -185,6 +263,7 @@ class SyncService:
                     backlog_item.payload = payload
                     backlog_item.attempt_count = attempt_count
                     backlog_item.last_error = error
+                    backlog_item.updated_at = datetime.now(timezone.utc)
                     break
             return
 

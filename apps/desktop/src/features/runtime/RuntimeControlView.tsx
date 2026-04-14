@@ -1,10 +1,12 @@
-import React, { useState } from "react";
-import { Panel, StatusBadge } from "../../components";
+import React, { useMemo, useState } from "react";
+import { Panel, StatusBadge, Timeline } from "../../components";
+import { formatCompactDate } from "../../lib/format";
 import { theme } from "../../lib/theme";
 import type {
   CompileTaskRequest,
   DomainPackRecord,
   RuntimeEpisode,
+  RuntimeEpisodeReplay,
   RuntimeLearningOutcome,
   RuntimePatch,
   RuntimeTaskSpec,
@@ -16,11 +18,17 @@ interface RuntimeControlViewProps {
   mode: "runtime" | "trials" | "templates" | "patches" | "domains";
   data: RuntimeWorkspaceData;
   busy: boolean;
+  busyEpisodeId?: string;
+  selectedEpisodeId?: string;
   actionPatchId?: string;
+  replay?: RuntimeEpisodeReplay | null;
   lastOutcome?: RuntimeLearningOutcome | null;
   onCompileTask(payload: CompileTaskRequest): Promise<void>;
   onCreateTrialRun(taskSpecId: string, executionPlanId: string): Promise<void>;
   onExecuteTrialRun(episodeId: string): Promise<void>;
+  onRefreshLearning(episodeId: string): Promise<void>;
+  onConfirmTrial(episodeId: string): Promise<void>;
+  onInspectEpisode(episodeId: string): void;
   onApprovePatch(id: string): Promise<void>;
   onRejectPatch(id: string): Promise<void>;
 }
@@ -44,23 +52,48 @@ const actionButtonStyle = {
   fontWeight: 700,
 } as const;
 
+function summarizeJson(value: unknown): string {
+  if (value === null || value === undefined) {
+    return "None";
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function metricStepCount(episode: RuntimeEpisode): number {
+  const value = episode.metrics.stepCount ?? episode.metrics.step_count;
+  return typeof value === "number" ? value : episode.actions.length;
+}
+
 export function RuntimeControlView({
   mode,
   data,
   busy,
+  busyEpisodeId,
+  selectedEpisodeId,
   actionPatchId,
+  replay,
   lastOutcome,
   onCompileTask,
   onCreateTrialRun,
   onExecuteTrialRun,
+  onRefreshLearning,
+  onConfirmTrial,
+  onInspectEpisode,
   onApprovePatch,
   onRejectPatch,
 }: RuntimeControlViewProps): JSX.Element {
   const [instruction, setInstruction] = useState("打开网站，给我按照要求找到候选人，拿到简历，上传内网，评分。");
   const [domainHint, setDomainHint] = useState("");
 
-  const taskById = new Map(data.taskSpecs.map((item) => [item.id, item]));
-  const planById = new Map(data.plans.map((item) => [item.id, item]));
+  const taskById = useMemo(() => new Map(data.taskSpecs.map((item) => [item.id, item])), [data.taskSpecs]);
+  const planById = useMemo(() => new Map(data.plans.map((item) => [item.id, item])), [data.plans]);
 
   const renderTaskCards = (): JSX.Element => (
     <div style={{ display: "grid", gap: "14px" }}>
@@ -121,14 +154,15 @@ export function RuntimeControlView({
       {episodes.map((episode) => {
         const plan = planById.get(episode.executionPlanId);
         const task = taskById.get(episode.taskSpecId);
+        const isSelected = selectedEpisodeId === episode.id;
         return (
           <article
             key={episode.id}
             style={{
               padding: "16px",
               borderRadius: "18px",
-              border: "1px solid rgba(255,255,255,0.08)",
-              background: "rgba(255,255,255,0.03)",
+              border: isSelected ? "1px solid rgba(122,167,255,0.42)" : "1px solid rgba(255,255,255,0.08)",
+              background: isSelected ? "rgba(122,167,255,0.08)" : "rgba(255,255,255,0.03)",
               display: "grid",
               gap: "10px",
             }}
@@ -144,30 +178,57 @@ export function RuntimeControlView({
                 <StatusBadge tone={episode.divergenceDetected ? "critical" : "positive"}>
                   {episode.divergenceDetected ? "diverged" : episode.status}
                 </StatusBadge>
-                <StatusBadge tone="neutral">{episode.actions.length} actions</StatusBadge>
+                <StatusBadge tone="neutral">{metricStepCount(episode)} steps</StatusBadge>
               </div>
             </div>
             <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
               {episode.resultSummary ?? "No trial summary recorded yet."}
             </div>
+            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+              <StatusBadge tone="neutral">
+                {episode.requiresConfirmation ? "awaits confirmation" : "confirmed or ungated"}
+              </StatusBadge>
+              {episode.finishedAt ? <StatusBadge tone="neutral">Finished {formatCompactDate(episode.finishedAt)}</StatusBadge> : null}
+            </div>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px", flexWrap: "wrap" }}>
               <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-                <StatusBadge tone="neutral">
-                  {episode.requiresConfirmation ? "awaits confirmation" : "no confirmation gate"}
-                </StatusBadge>
-                <StatusBadge tone="neutral">
-                  {(episode.metrics.stepCount as number | undefined) ?? (episode.metrics.step_count as number | undefined) ?? episode.actions.length}{" "}
-                  steps
-                </StatusBadge>
+                <button
+                  type="button"
+                  onClick={() => onInspectEpisode(episode.id)}
+                  disabled={busy}
+                  style={{ ...actionButtonStyle, background: isSelected ? "rgba(122,167,255,0.24)" : actionButtonStyle.background }}
+                >
+                  {isSelected ? "Diagnostics selected" : "Inspect diagnostics"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void onRefreshLearning(episode.id)}
+                  disabled={busy || busyEpisodeId === episode.id}
+                  style={{ ...actionButtonStyle, background: "rgba(93,216,163,0.12)" }}
+                >
+                  {busyEpisodeId === episode.id ? "Refreshing..." : "Refresh learning"}
+                </button>
+                {episode.status === "pending" ? (
+                  <button
+                    type="button"
+                    onClick={() => void onExecuteTrialRun(episode.id)}
+                    disabled={busy || busyEpisodeId === episode.id}
+                    style={actionButtonStyle}
+                  >
+                    {busyEpisodeId === episode.id ? "Executing..." : "Execute trial"}
+                  </button>
+                ) : null}
+                {episode.requiresConfirmation || episode.status === "awaiting_review" ? (
+                  <button
+                    type="button"
+                    onClick={() => void onConfirmTrial(episode.id)}
+                    disabled={busy || busyEpisodeId === episode.id}
+                    style={{ ...actionButtonStyle, background: "rgba(93,216,163,0.18)" }}
+                  >
+                    {busyEpisodeId === episode.id ? "Confirming..." : "Confirm trial"}
+                  </button>
+                ) : null}
               </div>
-              <button
-                type="button"
-                onClick={() => void onExecuteTrialRun(episode.id)}
-                disabled={busy}
-                style={actionButtonStyle}
-              >
-                Execute trial
-              </button>
             </div>
           </article>
         );
@@ -304,22 +365,79 @@ export function RuntimeControlView({
   if (mode === "trials") {
     return (
       <div style={{ display: "grid", gap: "18px" }}>
-        <Panel title="Trial Runs" eyebrow="Supervised Execution" description="Create, execute, and inspect supervised trial runs before a workflow becomes reusable.">
+        <Panel title="Trial Runs" eyebrow="Supervised Execution" description="Create, execute, inspect, and confirm trials before a workflow becomes reusable.">
           {renderEpisodeCards(data.episodes)}
         </Panel>
-        <Panel title="Environment Snapshots" eyebrow="Runtime Context" description="Latest captured environment states across trial runs.">
-          <div style={{ display: "grid", gap: "12px" }}>
-            {data.snapshots.map((snapshot) => (
-              <article key={snapshot.id} style={{ padding: "14px", borderRadius: "16px", background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", gap: "10px", flexWrap: "wrap" }}>
-                  <strong>{snapshot.title ?? snapshot.environmentKey ?? snapshot.id}</strong>
-                  <StatusBadge tone="neutral">{snapshot.pageType ?? snapshot.source}</StatusBadge>
+        <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.1fr) minmax(320px, 0.9fr)", gap: "18px", alignItems: "start" }}>
+          <Panel title="Selected Replay Diagnostics" eyebrow="Episode Replay" description="The currently selected trial run with snapshots, timeline, and derived artifacts.">
+            {replay ? (
+              <div style={{ display: "grid", gap: "14px" }}>
+                <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                  <StatusBadge tone={replay.episode.divergenceDetected ? "critical" : "positive"}>{replay.episode.status}</StatusBadge>
+                  {replay.template ? <StatusBadge tone="positive">template candidate</StatusBadge> : null}
+                  {replay.patch ? <StatusBadge tone="warning">patch candidate</StatusBadge> : null}
+                  {replay.approval ? <StatusBadge tone="warning">approval pending</StatusBadge> : null}
                 </div>
-                <div style={{ color: theme.colors.muted, fontSize: "13px", marginTop: "8px" }}>{snapshot.url ?? "No URL captured."}</div>
-              </article>
-            ))}
-          </div>
-        </Panel>
+                <div style={{ color: theme.colors.muted, lineHeight: 1.6 }}>
+                  {replay.episode.resultSummary ?? "No replay summary available."}
+                </div>
+                <Timeline events={replay.diagnostics} />
+              </div>
+            ) : (
+              <div style={{ color: theme.colors.muted }}>Select a trial run to inspect diagnostics.</div>
+            )}
+          </Panel>
+          <Panel title="Replay Context" eyebrow="Snapshots and Notes" description="Observed environment state and machine-readable artifacts recorded for the selected replay.">
+            {replay ? (
+              <div style={{ display: "grid", gap: "14px" }}>
+                <div style={{ display: "grid", gap: "8px" }}>
+                  {(replay.snapshots.length ? replay.snapshots : data.snapshots.filter((snapshot) => snapshot.executionEpisodeId === replay.episode.id)).map((snapshot) => (
+                    <article
+                      key={snapshot.id}
+                      style={{ padding: "14px", borderRadius: "16px", background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)" }}
+                    >
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: "10px", flexWrap: "wrap" }}>
+                        <strong>{snapshot.title ?? snapshot.environmentKey ?? snapshot.id}</strong>
+                        <StatusBadge tone="neutral">{snapshot.pageType ?? snapshot.source}</StatusBadge>
+                      </div>
+                      <div style={{ color: theme.colors.muted, fontSize: "13px", marginTop: "8px" }}>{snapshot.url ?? "No URL captured."}</div>
+                    </article>
+                  ))}
+                </div>
+                {replay.notes.length ? (
+                  <div style={{ display: "grid", gap: "8px" }}>
+                    {replay.notes.map((note, index) => (
+                      <div key={`${replay.episode.id}-note-${index}`} style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
+                        {note}
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+                <pre
+                  style={{
+                    margin: 0,
+                    padding: "14px",
+                    borderRadius: "16px",
+                    background: "rgba(255,255,255,0.03)",
+                    border: "1px solid rgba(255,255,255,0.08)",
+                    color: theme.colors.muted,
+                    fontSize: "12px",
+                    overflowX: "auto",
+                  }}
+                >
+                  {summarizeJson({
+                    task: replay.taskSpec?.title ?? replay.episode.taskSpecId,
+                    plan: replay.executionPlan?.name ?? replay.episode.executionPlanId,
+                    patch: replay.patch?.title ?? null,
+                    template: replay.template?.name ?? null,
+                  })}
+                </pre>
+              </div>
+            ) : (
+              <div style={{ color: theme.colors.muted }}>Replay context will appear after selecting a trial run.</div>
+            )}
+          </Panel>
+        </div>
       </div>
     );
   }

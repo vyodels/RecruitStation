@@ -251,6 +251,56 @@ class ApiRuntimeTests(unittest.TestCase):
         self.assertEqual(learn_again.status_code, 200)
         self.assertEqual(learn_again.json()["episode"]["id"], episode_id)
 
+    def test_episode_replay_returns_task_plan_snapshot_and_timeline(self) -> None:
+        compiled_task = self.client.post(
+            "/api/runtime/task-specs/compile",
+            json={
+                "instruction": "Find useful PDF converters, inspect them, and produce a shortlist.",
+                "title": "Replayable PDF research",
+            },
+        )
+        self.assertEqual(compiled_task.status_code, 201)
+        task_spec_id = compiled_task.json()["task_spec"]["id"]
+        plan_id = compiled_task.json()["execution_plan"]["id"]
+
+        created_trial = self.client.post(
+            "/api/runtime/trial-runs",
+            json={
+                "task_spec_id": task_spec_id,
+                "execution_plan_id": plan_id,
+                "requested_by": "desktop-user",
+                "notes": "Capture a replay timeline.",
+            },
+        )
+        self.assertEqual(created_trial.status_code, 201)
+        episode_id = created_trial.json()["id"]
+
+        executed_trial = self.client.post(
+            f"/api/runtime/trial-runs/{episode_id}/execute",
+            json={
+                "source": "browser",
+                "url": "https://example.com/tools",
+                "title": "Example Tools",
+                "page_type": "tool_listing",
+                "observed_entities": [{"kind": "tool_card", "name": "Converter A"}],
+                "affordances": [{"kind": "open_tool", "label": "Open tool detail"}],
+            },
+        )
+        self.assertEqual(executed_trial.status_code, 200)
+
+        replay = self.client.get(f"/api/runtime/trial-runs/{episode_id}/replay")
+        self.assertEqual(replay.status_code, 200)
+        payload = replay.json()
+        self.assertEqual(payload["task_spec"]["id"], task_spec_id)
+        self.assertEqual(payload["execution_plan"]["id"], plan_id)
+        self.assertEqual(payload["episode"]["id"], episode_id)
+        self.assertEqual(payload["diagnostics"]["snapshot_count"], 1)
+        self.assertGreaterEqual(payload["diagnostics"]["action_count"], 1)
+        self.assertGreaterEqual(len(payload["timeline"]), 5)
+        self.assertTrue(any(item["kind"] == "snapshot" for item in payload["timeline"]))
+        self.assertTrue(any(item["kind"] == "learning" for item in payload["timeline"]))
+        self.assertEqual(payload["snapshots"][0]["page_type"], "tool_listing")
+
 
 if __name__ == "__main__":
     unittest.main()

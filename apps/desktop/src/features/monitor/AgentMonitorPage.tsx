@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { Panel, StatusBadge } from "../../components";
 import { apiClient } from "../../lib/api";
 import { formatCompactDate } from "../../lib/format";
-import type { AgentEvent } from "../../lib/types";
+import { desktopMockSnapshot, desktopReplayMockByEpisode, desktopRuntimeMock, desktopSyncBacklogMock, desktopSyncStatusMock } from "../../lib/mockData";
+import type { AgentEvent, RuntimeEpisode, RuntimeEpisodeReplay, SyncBacklogItem, SyncStatusSnapshot } from "../../lib/types";
 import { AgentMonitorView } from "../agent-monitor/AgentMonitorView";
 
 function toAgentEventLevel(tone: "positive" | "neutral" | "warning" | "critical"): AgentEvent["level"] {
@@ -25,12 +26,28 @@ export function AgentMonitorPage() {
   const [error, setError] = useState<string | null>(null);
   const [lastRefreshedAt, setLastRefreshedAt] = useState<string | null>(null);
   const [runningAction, setRunningAction] = useState(false);
+  const [syncingAction, setSyncingAction] = useState(false);
+  const [episodes, setEpisodes] = useState<RuntimeEpisode[]>([]);
+  const [selectedEpisodeId, setSelectedEpisodeId] = useState<string | undefined>();
+  const [replay, setReplay] = useState<RuntimeEpisodeReplay | null>(desktopReplayMockByEpisode["episode-001"]);
+  const [syncStatus, setSyncStatus] = useState<SyncStatusSnapshot>(desktopSyncStatusMock);
+  const [syncBacklog, setSyncBacklog] = useState<SyncBacklogItem[]>(desktopSyncBacklogMock);
 
   const loadMonitor = async () => {
     setLoading(true);
     try {
-      const [nextSummary, nextAgent] = await Promise.all([apiClient.getDashboardSummary(), apiClient.getAgentSnapshot()]);
+      const [nextSummary, nextAgent, nextEpisodes, nextSyncStatus, nextSyncBacklog] = await Promise.all([
+        apiClient.getDashboardSummary(),
+        apiClient.getAgentSnapshot(),
+        apiClient.listRuntimeEpisodes(),
+        apiClient.getSyncStatus(),
+        apiClient.listSyncBacklog(),
+      ]);
       setAgent(nextAgent);
+      setEpisodes(nextEpisodes);
+      setSyncStatus(nextSyncStatus);
+      setSyncBacklog(nextSyncBacklog);
+      setSelectedEpisodeId((current) => current ?? nextEpisodes[0]?.id);
       const nextEvents: AgentEvent[] = [
         ...nextSummary.timeline.map((event) => ({
           id: event.id,
@@ -51,6 +68,27 @@ export function AgentMonitorPage() {
       setError(null);
       setLastRefreshedAt(new Date().toISOString());
     } catch (loadError) {
+      setAgent(desktopMockSnapshot.agent);
+      setEpisodes(desktopRuntimeMock.episodes);
+      setSyncStatus(desktopSyncStatusMock);
+      setSyncBacklog(desktopSyncBacklogMock);
+      setSelectedEpisodeId((current) => current ?? desktopRuntimeMock.episodes[0]?.id);
+      setEvents([
+        ...desktopMockSnapshot.timeline.map((event) => ({
+          id: event.id,
+          level: toAgentEventLevel(event.tone),
+          source: "workflow",
+          message: event.label,
+          at: event.at,
+        })),
+        ...desktopMockSnapshot.alerts.map((event) => ({
+          id: event.id,
+          level: toAgentEventLevel(event.tone),
+          source: "alert",
+          message: event.detail,
+          at: event.at,
+        })),
+      ]);
       setError(loadError instanceof Error ? loadError.message : "Failed to load agent monitor.");
     } finally {
       setLoading(false);
@@ -60,6 +98,30 @@ export function AgentMonitorPage() {
   useEffect(() => {
     void loadMonitor();
   }, []);
+
+  useEffect(() => {
+    const episodeId = selectedEpisodeId ?? episodes[0]?.id;
+    if (!episodeId) {
+      setReplay(null);
+      return;
+    }
+    let active = true;
+    void (async () => {
+      try {
+        const nextReplay = await apiClient.getRuntimeReplay(episodeId);
+        if (active) {
+          setReplay(nextReplay);
+        }
+      } catch {
+        if (active) {
+          setReplay(desktopReplayMockByEpisode[episodeId] ?? desktopReplayMockByEpisode["episode-001"] ?? null);
+        }
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [episodes, selectedEpisodeId]);
 
   if (loading && agent === null) {
     return (
@@ -130,7 +192,13 @@ export function AgentMonitorPage() {
         <AgentMonitorView
           agent={agent}
           events={events}
+          episodes={episodes}
+          selectedEpisodeId={selectedEpisodeId}
+          replay={replay}
+          syncStatus={syncStatus}
+          syncBacklog={syncBacklog}
           runningAction={runningAction}
+          syncingAction={syncingAction}
           onRunOnce={async () => {
             setRunningAction(true);
             try {
@@ -157,6 +225,16 @@ export function AgentMonitorPage() {
               setRunningAction(false);
             }
           }}
+          onFlushSync={async () => {
+            setSyncingAction(true);
+            try {
+              await apiClient.flushSyncBacklog();
+              await loadMonitor();
+            } finally {
+              setSyncingAction(false);
+            }
+          }}
+          onSelectEpisode={setSelectedEpisodeId}
         />
       ) : null}
     </div>

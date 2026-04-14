@@ -362,6 +362,48 @@ export interface RuntimeLearningOutcome {
   skillHealth?: Record<string, unknown> | null;
 }
 
+export interface RuntimeEpisodeReplay {
+  episode: RuntimeEpisode;
+  taskSpec?: RuntimeTaskSpec | null;
+  executionPlan?: RuntimeExecutionPlan | null;
+  snapshots: RuntimeSnapshot[];
+  patch?: RuntimePatch | null;
+  template?: RuntimeTemplate | null;
+  approval?: RuntimeLearningOutcome["approval"] | null;
+  diagnostics: TimelineEvent[];
+  notes: string[];
+}
+
+export interface SyncBacklogItem {
+  id: string;
+  target: string;
+  entityType: string;
+  entityId?: string | null;
+  status: string;
+  attemptCount: number;
+  payloadSummary?: string | null;
+  lastError?: string | null;
+  updatedAt: string;
+}
+
+export interface SyncStatusSnapshot {
+  enabled: boolean;
+  mode: "local_only" | "remote_ready" | "remote_unavailable";
+  remoteAvailable: boolean;
+  pendingCount: number;
+  lastAttemptAt?: string | null;
+  lastSuccessAt?: string | null;
+  recentErrors: string[];
+}
+
+export interface SyncFlushResult {
+  attempted: number;
+  synced: number;
+  failed: number;
+  remoteAvailable: boolean;
+  message: string;
+}
+
 export interface RuntimeWorkspaceData {
   domainPacks: DomainPackRecord[];
   taskSpecs: RuntimeTaskSpec[];

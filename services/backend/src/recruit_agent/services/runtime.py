@@ -33,6 +33,9 @@ from recruit_agent.schemas import (
     ExecutionEpisodeUpdate,
     ExecutionPlanRead,
     LearningDraftRead,
+    RuntimeEpisodeReplayRead,
+    RuntimeReplayDiagnosticsRead,
+    RuntimeReplayEventRead,
     RuntimeLearningOutcomeRead,
     TaskCompileRequest,
     TaskCompileResponse,
@@ -381,6 +384,63 @@ class PersistedRuntimeService:
         if item is None:
             raise ValueError("Execution episode not found")
         return ExecutionEpisodeRead.model_validate(item)
+
+    def get_episode_replay(self, episode_id: str) -> RuntimeEpisodeReplayRead:
+        episode = ExecutionEpisodeRepository(self.session).get(episode_id)
+        if episode is None:
+            raise ValueError("Execution episode not found")
+
+        task_spec = TaskSpecRepository(self.session).get(episode.task_spec_id)
+        if task_spec is None:
+            raise ValueError("Task spec not found")
+        plan = ExecutionPlanRepository(self.session).get(episode.execution_plan_id)
+        if plan is None:
+            raise ValueError("Execution plan not found")
+
+        snapshots = EnvironmentSnapshotRepository(self.session).for_episode(episode.id, limit=500, offset=0)
+        patch = self._get_episode_patch(episode)
+        template = self._get_episode_template(plan=plan, task_spec=task_spec, patch=patch)
+        learning = self._get_episode_learning(task_spec_id=task_spec.id)
+        approvals = self._get_episode_approvals(patch=patch, learning=learning)
+
+        diagnostics = RuntimeReplayDiagnosticsRead(
+            domain=str(task_spec.domain),
+            status=str(episode.status),
+            requires_confirmation=bool(episode.requires_confirmation),
+            divergence_detected=bool(episode.divergence_detected),
+            action_count=len(list(episode.actions or [])),
+            observation_count=len(list(episode.observations or [])),
+            snapshot_count=len(snapshots),
+            approval_count=len(approvals),
+            pending_approval_count=sum(1 for item in approvals if item.status == "pending"),
+            completion_rate=self._safe_float((episode.metrics or {}).get("completion_rate")),
+            latest_snapshot_page_type=(snapshots[-1].page_type if snapshots else None),
+            latest_error=episode.last_error,
+        )
+
+        timeline = self._build_episode_timeline(
+            task_spec=task_spec,
+            plan=plan,
+            episode=episode,
+            snapshots=snapshots,
+            template=template,
+            patch=patch,
+            learning=learning,
+            approvals=approvals,
+        )
+
+        return RuntimeEpisodeReplayRead(
+            task_spec=TaskSpecRead.model_validate(task_spec),
+            execution_plan=ExecutionPlanRead.model_validate(plan),
+            episode=ExecutionEpisodeRead.model_validate(episode),
+            snapshots=[EnvironmentSnapshotRead.model_validate(item) for item in snapshots],
+            template=WorkflowTemplateRead.model_validate(template) if template is not None else None,
+            patch=WorkflowPatchRead.model_validate(patch) if patch is not None else None,
+            learning_draft=LearningDraftRead.model_validate(learning) if learning is not None else None,
+            approvals=[ApprovalRead.model_validate(item) for item in approvals],
+            diagnostics=diagnostics,
+            timeline=timeline,
+        )
 
     def create_episode(self, payload: ExecutionEpisodeCreate) -> ExecutionEpisodeRead:
         if TaskSpecRepository(self.session).get(payload.task_spec_id) is None:
@@ -1119,6 +1179,198 @@ class PersistedRuntimeService:
             "checked_at": result.checked_at.isoformat(),
             "issues": result.issues,
         }
+
+    def _get_episode_template(self, *, plan, task_spec, patch):
+        template_repo = WorkflowTemplateRepository(self.session)
+        template_id = (plan.runtime_metadata or {}).get("workflow_template_id")
+        if isinstance(template_id, str) and template_id:
+            template = template_repo.get(template_id)
+            if template is not None:
+                return template
+        if patch is not None and patch.template_id:
+            template = template_repo.get(patch.template_id)
+            if template is not None:
+                return template
+        stmt = (
+            select(template_repo.model)
+            .where(template_repo.model.source_task_spec_id == task_spec.id)
+            .order_by(template_repo.model.updated_at.desc(), template_repo.model.id.desc())
+        )
+        return self.session.scalars(stmt).first()
+
+    def _get_episode_patch(self, episode):
+        if episode.patch_id:
+            patch = WorkflowPatchRepository(self.session).get(episode.patch_id)
+            if patch is not None:
+                return patch
+        stmt = (
+            select(WorkflowPatch)
+            .where(WorkflowPatch.execution_episode_id == episode.id)
+            .order_by(WorkflowPatch.created_at.desc(), WorkflowPatch.id.desc())
+        )
+        return self.session.scalars(stmt).first()
+
+    def _get_episode_learning(self, *, task_spec_id: str):
+        stmt = (
+            select(AgentLearningRepository.model)
+            .where(AgentLearningRepository.model.source_task_id == task_spec_id)
+            .order_by(AgentLearningRepository.model.created_at.desc(), AgentLearningRepository.model.id.desc())
+        )
+        return self.session.scalars(stmt).first()
+
+    def _get_episode_approvals(self, *, patch, learning) -> list[ApprovalItem]:
+        approvals: list[ApprovalItem] = []
+        if patch is not None:
+            patch_approval = self._get_patch_approval(patch.id)
+            if patch_approval is not None:
+                approvals.append(patch_approval)
+        if learning is not None:
+            stmt = (
+                select(ApprovalItem)
+                .where(
+                    ApprovalItem.target_type == "skill_draft",
+                    ApprovalItem.target_id == learning.id,
+                )
+                .order_by(ApprovalItem.created_at.asc(), ApprovalItem.id.asc())
+            )
+            approvals.extend(list(self.session.scalars(stmt).all()))
+        approvals.sort(key=lambda item: (item.created_at, item.id))
+        return approvals
+
+    def _build_episode_timeline(
+        self,
+        *,
+        task_spec,
+        plan,
+        episode,
+        snapshots,
+        template,
+        patch,
+        learning,
+        approvals,
+    ) -> list[RuntimeReplayEventRead]:
+        timeline: list[RuntimeReplayEventRead] = []
+
+        def add_event(
+            kind: str,
+            title: str,
+            *,
+            detail: str | None = None,
+            occurred_at=None,
+            payload: dict[str, Any] | None = None,
+        ) -> None:
+            timeline.append(
+                RuntimeReplayEventRead(
+                    sequence=len(timeline) + 1,
+                    kind=kind,
+                    title=title,
+                    detail=detail,
+                    occurred_at=occurred_at,
+                    payload=dict(payload or {}),
+                )
+            )
+
+        add_event(
+            "task",
+            task_spec.title,
+            detail=task_spec.goal,
+            occurred_at=task_spec.created_at,
+            payload={"domain": task_spec.domain, "status": task_spec.status},
+        )
+        add_event(
+            "plan",
+            plan.name,
+            detail=f"Mode={plan.mode}, status={plan.status}",
+            occurred_at=plan.created_at,
+            payload={"checkpoints": list(plan.checkpoints or []), "environment_requirements": dict(plan.environment_requirements or {})},
+        )
+        add_event(
+            "episode",
+            f"Episode {episode.id}",
+            detail=f"Mode={episode.mode}, status={episode.status}",
+            occurred_at=episode.created_at,
+            payload={"requested_by": episode.requested_by, "requires_confirmation": episode.requires_confirmation},
+        )
+
+        action_time = episode.started_at or episode.updated_at or episode.created_at
+        for index, action in enumerate(list(episode.actions or []), start=1):
+            add_event(
+                "action",
+                str(action.get("step_id") or f"action_{index}"),
+                detail=str(action.get("summary") or action.get("status") or "Action completed."),
+                occurred_at=action_time,
+                payload=dict(action),
+            )
+        for index, observation in enumerate(list(episode.observations or []), start=1):
+            add_event(
+                "observation",
+                str(observation.get("step_id") or f"observation_{index}"),
+                detail=str(observation.get("summary") or observation.get("evidence") or "Observation recorded."),
+                occurred_at=action_time,
+                payload=dict(observation),
+            )
+        for snapshot in snapshots:
+            add_event(
+                "snapshot",
+                snapshot.title or snapshot.environment_key or snapshot.id,
+                detail=snapshot.page_type or snapshot.status,
+                occurred_at=snapshot.created_at,
+                payload={
+                    "source": snapshot.source,
+                    "url": snapshot.url,
+                    "page_type": snapshot.page_type,
+                    "affordance_count": len(list(snapshot.affordances or [])),
+                    "observed_entity_count": len(list(snapshot.observed_entities or [])),
+                },
+            )
+        if template is not None:
+            add_event(
+                "template",
+                template.name,
+                detail=template.validation_summary,
+                occurred_at=template.updated_at,
+                payload={"status": template.status, "version": template.version, "template_key": template.template_key},
+            )
+        if patch is not None:
+            add_event(
+                "patch",
+                patch.title,
+                detail=patch.divergence_summary or patch.rationale,
+                occurred_at=patch.updated_at,
+                payload={"status": patch.status, "patch_kind": patch.patch_kind},
+            )
+        if learning is not None:
+            add_event(
+                "learning",
+                "Learning draft generated",
+                detail=learning.content.splitlines()[0] if learning.content else None,
+                occurred_at=learning.created_at,
+                payload={"learning_id": learning.id, "tags": list(learning.tags or []), "is_active": learning.is_active},
+            )
+        for approval in approvals:
+            add_event(
+                "approval",
+                approval.title,
+                detail=approval.status,
+                occurred_at=approval.reviewed_at or approval.created_at,
+                payload={"target_type": approval.target_type, "target_id": approval.target_id, "status": approval.status},
+            )
+        add_event(
+            "episode_status",
+            "Episode replay complete",
+            detail=episode.result_summary,
+            occurred_at=episode.finished_at or episode.updated_at,
+            payload={"status": episode.status, "metrics": dict(episode.metrics or {}), "last_error": episode.last_error},
+        )
+        return timeline
+
+    def _safe_float(self, value: Any) -> float | None:
+        try:
+            if value is None:
+                return None
+            return float(value)
+        except (TypeError, ValueError):
+            return None
 
     def _domain_pack_read(self, key: str, config: dict[str, Any]) -> DomainPackRead:
         return DomainPackRead(

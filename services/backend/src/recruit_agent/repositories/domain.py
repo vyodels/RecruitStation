@@ -581,6 +581,17 @@ class SyncBacklogRepository:
     def __init__(self, session: Session) -> None:
         self.session = session
 
+    def list(self, *, status: str | None = None, limit: int = 100, offset: int = 0) -> list[Any]:
+        stmt = select(SyncBacklogEntry)
+        if status is not None:
+            stmt = stmt.where(SyncBacklogEntry.status == status)
+        stmt = (
+            stmt.order_by(SyncBacklogEntry.created_at.desc(), SyncBacklogEntry.id.desc())
+            .offset(offset)
+            .limit(limit)
+        )
+        return list(self.session.scalars(stmt).all())
+
     def enqueue(
         self,
         item_type: str,
@@ -632,6 +643,26 @@ class SyncBacklogRepository:
         return self.session.scalar(
             select(func.count()).select_from(SyncBacklogEntry).where(SyncBacklogEntry.status == "pending")
         ) or 0
+
+    def counts_by_status(self) -> dict[str, int]:
+        rows = self.session.execute(
+            select(SyncBacklogEntry.status, func.count()).group_by(SyncBacklogEntry.status)
+        ).all()
+        return {str(status): int(count) for status, count in rows}
+
+    def delivery_error_count(self) -> int:
+        return self.session.scalar(
+            select(func.count()).select_from(SyncBacklogEntry).where(SyncBacklogEntry.last_error.is_not(None))
+        ) or 0
+
+    def latest_delivery_error(self) -> str | None:
+        stmt = (
+            select(SyncBacklogEntry.last_error)
+            .where(SyncBacklogEntry.last_error.is_not(None))
+            .order_by(SyncBacklogEntry.updated_at.desc(), SyncBacklogEntry.id.desc())
+        )
+        value = self.session.execute(stmt).scalar()
+        return str(value) if value is not None else None
 
     def mark_synced(self, item_id: str, item_type: str | None = None) -> Any | None:
         stmt = select(SyncBacklogEntry).where(SyncBacklogEntry.item_id == item_id)

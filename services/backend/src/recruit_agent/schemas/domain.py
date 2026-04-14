@@ -548,6 +548,84 @@ class RuntimeLearningOutcomeRead(BaseModel):
     skill_health: dict[str, Any] | None = None
 
 
+class RuntimeReplayEventRead(BaseModel):
+    sequence: int
+    kind: str
+    title: str
+    detail: str | None = None
+    occurred_at: datetime | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class RuntimeReplayDiagnosticsRead(BaseModel):
+    domain: str
+    status: str
+    requires_confirmation: bool
+    divergence_detected: bool
+    action_count: int
+    observation_count: int
+    snapshot_count: int
+    approval_count: int
+    pending_approval_count: int
+    completion_rate: float | None = None
+    latest_snapshot_page_type: str | None = None
+    latest_error: str | None = None
+
+
+class RuntimeEpisodeReplayRead(BaseModel):
+    task_spec: TaskSpecRead
+    execution_plan: ExecutionPlanRead
+    episode: ExecutionEpisodeRead
+    snapshots: list[EnvironmentSnapshotRead] = Field(default_factory=list)
+    template: "WorkflowTemplateRead | None" = None
+    patch: "WorkflowPatchRead | None" = None
+    learning_draft: LearningDraftRead | None = None
+    approvals: list["ApprovalRead"] = Field(default_factory=list)
+    diagnostics: RuntimeReplayDiagnosticsRead
+    timeline: list[RuntimeReplayEventRead] = Field(default_factory=list)
+
+
+class SyncBacklogRead(BaseModel):
+    id: str
+    protocol_version: str
+    destination: str
+    item_type: str
+    item_id: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+    status: str
+    attempt_count: int = 0
+    last_attempted_at: datetime | None = None
+    last_error: str | None = None
+    synced_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SyncStatusRead(BaseModel):
+    enabled: bool
+    remote_available: bool
+    protocol_version: str
+    source: str
+    target: dict[str, Any] = Field(default_factory=dict)
+    pending_count: int = 0
+    synced_count: int = 0
+    failed_delivery_count: int = 0
+    backlog_total: int = 0
+    by_status: dict[str, int] = Field(default_factory=dict)
+    latest_error: str | None = None
+
+
+class SyncFlushRead(BaseModel):
+    attempted: int = 0
+    synced: int = 0
+    failed: int = 0
+    pending: int = 0
+    remote_available: bool = False
+    target: dict[str, Any] = Field(default_factory=dict)
+
+
 class ApprovalBase(BaseModel):
     target_type: str
     target_id: str

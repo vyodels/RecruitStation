@@ -6,6 +6,7 @@ import type {
   DomainPackRecord,
   RuntimeExecutionPlan,
   RuntimeEpisode,
+  RuntimeEpisodeReplay,
   RuntimePatch,
   RuntimeSnapshot,
   RuntimeTaskSpec,
@@ -13,6 +14,8 @@ import type {
   RuntimeWorkspaceData,
   SettingsSnapshot,
   SkillRecord,
+  SyncBacklogItem,
+  SyncStatusSnapshot,
   TimelineEvent,
   WorkflowDefinition,
 } from "./types";
@@ -554,4 +557,127 @@ export const desktopRuntimeMock: RuntimeWorkspaceData = {
   snapshots: runtimeSnapshots,
   templates: runtimeTemplates,
   patches: runtimePatches,
+};
+
+export const desktopSyncBacklogMock: SyncBacklogItem[] = [
+  {
+    id: "sync-001",
+    target: "intranet:candidate_bundle",
+    entityType: "candidate_bundle",
+    entityId: "cand-001",
+    status: "pending",
+    attemptCount: 2,
+    payloadSummary: "Candidate bundle for Mia Chen is waiting for intranet availability.",
+    lastError: "Intranet endpoint unavailable during the last replay attempt.",
+    updatedAt: iso(-42),
+  },
+  {
+    id: "sync-002",
+    target: "intranet:runtime_template",
+    entityType: "runtime_template",
+    entityId: "template-001",
+    status: "pending",
+    attemptCount: 1,
+    payloadSummary: "Validated PDF converter template is queued for sync.",
+    updatedAt: iso(-18),
+  },
+];
+
+export const desktopSyncStatusMock: SyncStatusSnapshot = {
+  enabled: false,
+  mode: "local_only",
+  remoteAvailable: false,
+  pendingCount: desktopSyncBacklogMock.length,
+  lastAttemptAt: iso(-18),
+  lastSuccessAt: iso(-320),
+  recentErrors: ["Intranet sync is disabled, so backlog is retained locally."],
+};
+
+export const desktopReplayMockByEpisode: Record<string, RuntimeEpisodeReplay> = {
+  "episode-001": {
+    episode: runtimeEpisodes[0],
+    taskSpec: runtimeTasks[0],
+    executionPlan: runtimePlans[0],
+    snapshots: [runtimeSnapshots[0]],
+    patch: null,
+    template: runtimeTemplates[0],
+    approval: {
+      id: "approval-episode-001",
+      targetType: "workflow_template",
+      targetId: "template-001",
+      title: "Activate PDF converter research template",
+      status: "pending",
+      requestedBy: "runtime",
+    },
+    diagnostics: [
+      {
+        id: "diag-001",
+        label: "Compiler seeded a supervised trial plan",
+        detail: "The runtime selected the Web Research pack and required human review before promotion.",
+        at: iso(-72),
+        tone: "positive",
+      },
+      {
+        id: "diag-002",
+        label: "Browser exploration completed",
+        detail: "The episode captured a tool listing page and extracted shortlist candidates without drift.",
+        at: iso(-66),
+        tone: "positive",
+      },
+      {
+        id: "diag-003",
+        label: "Replay ready for confirmation",
+        detail: "A reusable template draft was derived and is waiting for desktop confirmation.",
+        at: iso(-64),
+        tone: "warning",
+      },
+    ],
+    notes: [
+      "The replay remained within the expected environment model.",
+      "A local-only sync backlog entry was created for the derived template.",
+    ],
+  },
+  "episode-002": {
+    episode: runtimeEpisodes[1],
+    taskSpec: runtimeTasks[1],
+    executionPlan: runtimePlans[1],
+    snapshots: [runtimeSnapshots[1]],
+    patch: runtimePatches[0],
+    template: runtimeTemplates[1],
+    approval: {
+      id: "approval-episode-002",
+      targetType: "workflow_patch",
+      targetId: "patch-001",
+      title: "Review GitHub trending drift patch",
+      status: "pending",
+      requestedBy: "runtime",
+    },
+    diagnostics: [
+      {
+        id: "diag-004",
+        label: "HTTP step succeeded",
+        detail: "Trending repository metadata was collected without issue.",
+        at: iso(-23),
+        tone: "positive",
+      },
+      {
+        id: "diag-005",
+        label: "Repository listing drift detected",
+        detail: "The runtime observed a changed page structure and proposed a checkpoint review patch.",
+        at: iso(-19),
+        tone: "critical",
+      },
+      {
+        id: "diag-006",
+        label: "Patch held for desktop review",
+        detail: "The proposed patch is queued until an operator confirms the revised plan.",
+        at: iso(-18),
+        tone: "warning",
+      },
+    ],
+    notes: [
+      "Environment heuristics should be refreshed before reusing this template.",
+      "The replay indicates the current production template is still usable with supervision.",
+    ],
+  },
 };

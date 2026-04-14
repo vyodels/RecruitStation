@@ -12,6 +12,7 @@ from .routers.metrics import router as metrics_router
 from .routers.runtime import router as runtime_router
 from .routers.settings import router as settings_router
 from .routers.skills import router as skills_router
+from .routers.sync import router as sync_router
 from .routers.workflows import router as workflows_router
 
 ALL_ROUTERS = [
@@ -23,6 +24,7 @@ ALL_ROUTERS = [
     approvals_router,
     metrics_router,
     runtime_router,
+    sync_router,
     dashboard_router,
     agent_router,
 ]
