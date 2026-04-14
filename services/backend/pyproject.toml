@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "recruit-agent-backend"
+version = "0.1.0"
+description = "FastAPI backend foundation for the recruiting agent"
+requires-python = ">=3.14"
+dependencies = [
+  "fastapi>=0.115.0",
+  "pydantic>=2.9.0",
+  "pydantic-settings>=2.6.0",
+  "sqlalchemy>=2.0.30",
+  "uvicorn>=0.30.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "httpx>=0.27.0",
+  "pytest>=8.0.0",
+]
+
+[project.scripts]
+recruit-agent-backend = "recruit_agent.core.app:main"
+recruit-agent-migrate = "recruit_agent.db.migrations:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["recruit_agent*"]
+namespaces = true
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-q"
