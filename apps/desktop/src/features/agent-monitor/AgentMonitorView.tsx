@@ -2,7 +2,7 @@ import React from "react";
 import { Panel, StatusBadge, Timeline } from "../../components";
 import { formatCompactDate } from "../../lib/format";
 import { theme } from "../../lib/theme";
-import type { AgentEvent, AgentSnapshot, RuntimeEpisode, RuntimeEpisodeReplay, SyncBacklogItem, SyncStatusSnapshot } from "../../lib/types";
+import type { AgentEvent, AgentQueueItem, AgentSnapshot, RuntimeEpisode, RuntimeEpisodeReplay, SyncBacklogItem, SyncStatusSnapshot } from "../../lib/types";
 
 interface AgentMonitorViewProps {
   agent: AgentSnapshot;
@@ -12,6 +12,7 @@ interface AgentMonitorViewProps {
   replay?: RuntimeEpisodeReplay | null;
   syncStatus?: SyncStatusSnapshot | null;
   syncBacklog?: SyncBacklogItem[];
+  queueItems?: AgentQueueItem[];
   runningAction?: boolean;
   syncingAction?: boolean;
   onRunOnce(): void;
@@ -43,6 +44,19 @@ function backlogTone(status: string): "positive" | "neutral" | "warning" | "crit
   return "neutral";
 }
 
+function syncModeDescription(syncStatus?: SyncStatusSnapshot | null): string {
+  if (!syncStatus) {
+    return "No sync status available.";
+  }
+  if (!syncStatus.enabled) {
+    return "Remote sync is disabled. Backlog entries stay local until an intranet target is enabled.";
+  }
+  if (!syncStatus.remoteAvailable) {
+    return "Remote sync is enabled, but the target is currently unavailable.";
+  }
+  return "Remote sync is enabled and reachable.";
+}
+
 export function AgentMonitorView({
   agent,
   events,
@@ -51,6 +65,7 @@ export function AgentMonitorView({
   replay,
   syncStatus,
   syncBacklog = [],
+  queueItems = [],
   runningAction,
   syncingAction,
   onRunOnce,
@@ -100,14 +115,27 @@ export function AgentMonitorView({
               <StatusBadge tone={syncStatus?.pendingCount ? "warning" : "positive"}>
                 {syncStatus?.pendingCount ?? syncBacklog.length} pending
               </StatusBadge>
+              {syncStatus?.failedDeliveryCount ? (
+                <StatusBadge tone="warning">{syncStatus.failedDeliveryCount} failed deliveries</StatusBadge>
+              ) : null}
+              {syncStatus?.deferredCount ? <StatusBadge tone="neutral">{syncStatus.deferredCount} deferred</StatusBadge> : null}
             </div>
             <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
-              {syncStatus?.recentErrors[0] ?? "Backlog items remain local until a remote intranet endpoint is available."}
+              {syncStatus?.recentErrors[0] ?? syncStatus?.latestError ?? syncModeDescription(syncStatus)}
             </div>
             <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+              {syncStatus?.protocolVersion ? <StatusBadge tone="neutral">protocol {syncStatus.protocolVersion}</StatusBadge> : null}
+              {syncStatus?.source ? <StatusBadge tone="neutral">source {syncStatus.source}</StatusBadge> : null}
+              {typeof syncStatus?.backlogTotal === "number" ? <StatusBadge tone="neutral">{syncStatus.backlogTotal} total</StatusBadge> : null}
               {syncStatus?.lastAttemptAt ? <StatusBadge tone="neutral">Last attempt {formatCompactDate(syncStatus.lastAttemptAt)}</StatusBadge> : null}
               {syncStatus?.lastSuccessAt ? <StatusBadge tone="neutral">Last success {formatCompactDate(syncStatus.lastSuccessAt)}</StatusBadge> : null}
+              {syncStatus?.nextAttemptAt ? <StatusBadge tone="neutral">Next retry {formatCompactDate(syncStatus.nextAttemptAt)}</StatusBadge> : null}
             </div>
+            {syncStatus?.byStatus && Object.keys(syncStatus.byStatus).length ? (
+              <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
+                Status mix: {Object.entries(syncStatus.byStatus).map(([key, value]) => `${key}=${value}`).join(" · ")}
+              </div>
+            ) : null}
             {onFlushSync ? (
               <button type="button" onClick={onFlushSync} disabled={syncingAction} style={actionButtonStyle}>
                 {syncingAction ? "Flushing..." : "Flush backlog"}
@@ -116,6 +144,51 @@ export function AgentMonitorView({
           </div>
         </Panel>
       </div>
+
+      <Panel title="Queue audit" eyebrow="Persistent queue" description="Recent queued work and lifecycle audit emitted by the serialized scheduler.">
+        <div style={{ display: "grid", gap: "12px" }}>
+          {queueItems.length ? (
+            queueItems.slice(0, 4).map((item) => (
+              <article
+                key={item.taskId}
+                style={{
+                  padding: "12px",
+                  borderRadius: "14px",
+                  border: "1px solid rgba(255,255,255,0.08)",
+                  background: "rgba(255,255,255,0.03)",
+                  display: "grid",
+                  gap: "6px",
+                }}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between", gap: "8px", flexWrap: "wrap" }}>
+                  <strong>{item.taskType}</strong>
+                  <StatusBadge tone={backlogTone(item.status)}>{item.status}</StatusBadge>
+                </div>
+                <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.5 }}>
+                  {item.taskId}
+                  {item.candidateId ? ` · candidate ${item.candidateId}` : ""}
+                  {item.workflowNodeId ? ` · node ${item.workflowNodeId}` : ""}
+                </div>
+                <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                  <StatusBadge tone="neutral">priority {item.priority}</StatusBadge>
+                  <StatusBadge tone="neutral">attempts {item.attempts}</StatusBadge>
+                </div>
+                {item.queueAudit.length ? (
+                  <div style={{ color: theme.colors.muted, fontSize: "12px", lineHeight: 1.6 }}>
+                    Audit:{" "}
+                    {item.queueAudit
+                      .slice(-3)
+                      .map((entry) => `${entry.kind}${entry.error ? ` (${entry.error})` : ""}`)
+                      .join(" → ")}
+                  </div>
+                ) : null}
+              </article>
+            ))
+          ) : (
+            <div style={{ color: theme.colors.muted, fontSize: "13px" }}>Queue audit will appear after the scheduler persists work items.</div>
+          )}
+        </div>
+      </Panel>
 
       <div style={{ display: "grid", gap: "18px", gridTemplateColumns: "minmax(0, 1.1fr) minmax(320px, 0.9fr)" }}>
         <Panel title="Replay diagnostics" eyebrow="Episode Replay" description="Select a supervised episode to inspect divergence, snapshots, and derived learning artifacts.">
@@ -203,7 +276,16 @@ export function AgentMonitorView({
                   <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
                     <StatusBadge tone="neutral">{item.target}</StatusBadge>
                     <StatusBadge tone="neutral">attempts {item.attemptCount}</StatusBadge>
+                    {item.deliveryMode ? <StatusBadge tone="neutral">{item.deliveryMode}</StatusBadge> : null}
+                    {item.protocolVersion ? <StatusBadge tone="neutral">protocol {item.protocolVersion}</StatusBadge> : null}
                   </div>
+                  {(item.lastAttemptedAt || item.nextAttemptAt || item.lastError) ? (
+                    <div style={{ color: theme.colors.muted, fontSize: "12px", lineHeight: 1.6 }}>
+                      {item.lastAttemptedAt ? `Last attempt ${formatCompactDate(item.lastAttemptedAt)} · ` : ""}
+                      {item.nextAttemptAt ? `Next retry ${formatCompactDate(item.nextAttemptAt)} · ` : ""}
+                      {item.lastError ? `Error: ${item.lastError}` : "No delivery error recorded."}
+                    </div>
+                  ) : null}
                 </article>
               ))}
             </div>

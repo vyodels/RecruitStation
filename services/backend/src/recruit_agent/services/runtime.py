@@ -83,6 +83,17 @@ DOMAIN_PACKS: dict[str, dict[str, Any]] = {
         "default_constraints": {"requires_human_supervision": True},
         "default_output_contract": {"kind": "summary", "format": "markdown"},
         "template_keys": ["general_supervised_trial", "patch_review_loop"],
+        "compiler_hints": [
+            "Prefer capability-oriented steps over fixed site flows.",
+            "Assume a supervised trial is required until the runtime proves a reusable pattern.",
+        ],
+        "quality_gates": {
+            "requires_goal_clarity": True,
+            "requires_output_contract": True,
+            "requires_trial": True,
+        },
+        "scene_expectations": ["web_scene", "interactive_surface", "local_runtime"],
+        "trial_expectations": {"requires_supervised_trial": True, "requires_scene_assessment_for_browser": True},
     },
     "recruiting": {
         "name": "Recruiting",
@@ -98,6 +109,17 @@ DOMAIN_PACKS: dict[str, dict[str, Any]] = {
         "default_constraints": {"requires_human_supervision": True, "respect_messaging_approval": True},
         "default_output_contract": {"kind": "candidate_bundle", "fields": ["resume", "score", "notes"]},
         "template_keys": ["recruiting_trial_screening"],
+        "compiler_hints": [
+            "Treat recruiting sites and intranet systems as runtime scenes, not fixed integrations.",
+            "Resume capture, scoring, and downstream write steps must remain approval-aware.",
+        ],
+        "quality_gates": {
+            "requires_candidate_evidence": True,
+            "requires_score": True,
+            "requires_downstream_write_review": True,
+        },
+        "scene_expectations": ["listing_surface", "detail_surface", "submission_scene"],
+        "trial_expectations": {"requires_supervised_trial": True, "requires_scene_assessment_for_browser": True},
     },
     "market_news": {
         "name": "Market News",
@@ -113,6 +135,17 @@ DOMAIN_PACKS: dict[str, dict[str, Any]] = {
         "default_constraints": {"requires_source_links": True},
         "default_output_contract": {"kind": "news_digest", "format": "bullet_summary"},
         "template_keys": ["market_news_digest"],
+        "compiler_hints": [
+            "Preserve links to primary sources and keep the digest focused on current market impact.",
+            "Bias toward source discovery before article synthesis.",
+        ],
+        "quality_gates": {
+            "requires_source_links": True,
+            "minimum_sources": 3,
+            "include_market_impact": True,
+        },
+        "scene_expectations": ["listing_surface", "detail_surface", "news_page"],
+        "trial_expectations": {"minimum_sources": 3, "requires_scene_assessment_for_browser": True},
     },
     "web_research": {
         "name": "Web Research",
@@ -128,6 +161,17 @@ DOMAIN_PACKS: dict[str, dict[str, Any]] = {
         "default_constraints": {"requires_source_links": True},
         "default_output_contract": {"kind": "research_shortlist", "format": "table"},
         "template_keys": ["web_research_shortlist"],
+        "compiler_hints": [
+            "Prefer shortlist-oriented outputs with reasons, links, and tradeoffs.",
+            "Use search plus browser inspection before final synthesis when the scene is exploratory.",
+        ],
+        "quality_gates": {
+            "requires_source_links": True,
+            "minimum_candidates": 3,
+            "requires_comparison": True,
+        },
+        "scene_expectations": ["listing_surface", "detail_surface", "tool_listing"],
+        "trial_expectations": {"minimum_candidates": 3, "requires_scene_assessment_for_browser": True},
     },
     "github_trends": {
         "name": "GitHub Trends",
@@ -143,6 +187,17 @@ DOMAIN_PACKS: dict[str, dict[str, Any]] = {
         "default_constraints": {"requires_source_links": True},
         "default_output_contract": {"kind": "repository_digest", "format": "table"},
         "template_keys": ["github_trends_digest"],
+        "compiler_hints": [
+            "Keep repository links, one-line summaries, and evidence about why the project is notable.",
+            "Use HTTP or search for breadth, then browser inspection for detail verification.",
+        ],
+        "quality_gates": {
+            "requires_source_links": True,
+            "minimum_repositories": 5,
+            "requires_project_summary": True,
+        },
+        "scene_expectations": ["listing_surface", "detail_surface", "repository_listing"],
+        "trial_expectations": {"minimum_repositories": 5, "requires_scene_assessment_for_browser": True},
     },
 }
 
@@ -367,6 +422,7 @@ class PersistedRuntimeService:
 
     def get_task_compiler_contract(self) -> TaskCompilerContractRead:
         return TaskCompilerContractRead(
+            contract_version="runtime-task-compiler-v4",
             strategy="llm_first_structured_semantic_compiler",
             fallback_strategy="heuristic_domain_and_capability_inference",
             prompt_asset="tasks/runtime_task_compiler.md",
@@ -393,6 +449,21 @@ class PersistedRuntimeService:
                 "If LLM compilation fails or produces invalid JSON, the runtime records explicit fallback notes.",
                 "Write-oriented actions must remain approval-aware even when inferred at compile time.",
             ],
+            quality_gates=[
+                "Goal and output contract must be concrete enough to run a supervised trial.",
+                "Write-oriented or outbound actions must remain approval-aware.",
+                "Browser-oriented tasks should declare environment requirements or scene checkpoints.",
+                "Domain-pack quality gates should be reflected in success criteria or output contract.",
+            ],
+            repair_policy={
+                "max_repair_passes": 1,
+                "repair_triggers": [
+                    "invalid_json",
+                    "schema_validation_error",
+                    "critical_quality_gap",
+                ],
+                "fallback_on_failure": "heuristic_domain_and_capability_inference",
+            },
             available_domains=self.list_domain_packs(),
             available_capabilities=self.list_capability_drivers(),
         )
@@ -724,6 +795,7 @@ class PersistedRuntimeService:
             if provider is None:
                 continue
             response = None
+            repair_messages: list[Message] | None = None
             try:
                 compile_messages = self._build_semantic_compile_messages(payload)
                 response = provider.generate(
@@ -737,6 +809,17 @@ class PersistedRuntimeService:
                     temperature=0.1,
                 )
                 draft = self._parse_semantic_compile_response(response)
+                quality_review = self._review_semantic_compile_candidate(payload=payload, draft=draft)
+                if quality_review["critical_issues"]:
+                    repair_messages = self._build_semantic_compile_quality_repair_messages(
+                        payload,
+                        response,
+                        quality_review,
+                    )
+                    raise ValueError(
+                        "Critical semantic compile quality gaps: "
+                        + ", ".join(list(quality_review["critical_issues"]))
+                    )
                 compiler_notes = list(draft.compiler_notes or [])
                 compiler_notes.append(f"Semantic task compiler succeeded via provider: {provider_name}.")
                 return self._materialize_compiled_task_draft(
@@ -745,6 +828,7 @@ class PersistedRuntimeService:
                     compiler_name="llm_structured",
                     compiler_notes=compiler_notes,
                     provider_name=provider_name,
+                    quality_warnings=list(quality_review["warnings"]),
                 )
             except (ValidationError, ValueError, json.JSONDecodeError) as exc:
                 if response is None:
@@ -752,7 +836,7 @@ class PersistedRuntimeService:
                     continue
                 try:
                     repaired_response = provider.generate(
-                        self._build_semantic_compile_repair_messages(payload, response, str(exc)),
+                        repair_messages or self._build_semantic_compile_repair_messages(payload, response, str(exc)),
                         task={
                             "task_type": "semantic_task_compile_repair",
                             "instruction": payload.instruction,
@@ -762,6 +846,12 @@ class PersistedRuntimeService:
                         temperature=0.0,
                     )
                     draft = self._parse_semantic_compile_response(repaired_response)
+                    quality_review = self._review_semantic_compile_candidate(payload=payload, draft=draft)
+                    if quality_review["critical_issues"]:
+                        raise ValueError(
+                            "Critical semantic compile quality gaps remained after repair: "
+                            + ", ".join(list(quality_review["critical_issues"]))
+                        )
                     compiler_notes = list(draft.compiler_notes or [])
                     compiler_notes.append(
                         f"Semantic task compiler succeeded via provider: {provider_name} after one repair pass."
@@ -772,6 +862,8 @@ class PersistedRuntimeService:
                         compiler_name="llm_structured",
                         compiler_notes=compiler_notes,
                         provider_name=provider_name,
+                        quality_warnings=list(quality_review["warnings"]),
+                        repair_count=1,
                     )
                 except (ProviderError, ValidationError, ValueError, json.JSONDecodeError) as repair_exc:
                     errors.append(
@@ -807,6 +899,22 @@ class PersistedRuntimeService:
         )
         output_contract = self._merge_dicts(dict(domain_config.get("default_output_contract") or {}), payload.output_contract)
         compiler_notes.append("Fell back to heuristic task compiler.")
+        quality_audit = self._build_compiler_quality_audit(
+            compiler_name="heuristic",
+            domain_key=domain_key,
+            domain_config=domain_config,
+            instruction=payload.instruction,
+            capabilities=capabilities,
+            success_criteria=success_criteria,
+            approval_policy=approval_policy,
+            output_contract=output_contract,
+            environment_requirements={},
+            checkpoints=[],
+            step_outline=[],
+            compiler_notes=compiler_notes,
+            fallback_used=True,
+            warnings=["Heuristic fallback was used because semantic compilation was unavailable or invalid."],
+        )
         return CompiledTaskDraft(
             task_spec=TaskSpecCreate(
                 title=payload.title or self._derive_title(payload.instruction, domain_config["name"]),
@@ -830,6 +938,7 @@ class PersistedRuntimeService:
                     "domain_pack": domain_key,
                     "keyword_hits": self._keyword_hits(payload.instruction),
                     "requires_trial": True,
+                    "compiler_quality": quality_audit,
                 },
             ),
             domain_key=domain_key,
@@ -845,6 +954,8 @@ class PersistedRuntimeService:
         compiler_name: str,
         compiler_notes: list[str],
         provider_name: str | None,
+        quality_warnings: list[str] | None = None,
+        repair_count: int = 0,
     ) -> CompiledTaskDraft:
         domain_key, domain_config, domain_notes = self._select_compiled_domain(
             compiled_domain=draft.domain,
@@ -880,6 +991,23 @@ class PersistedRuntimeService:
         title = payload.title or draft.title or self._derive_title(payload.instruction, domain_config["name"])
         description = payload.description or draft.description or f"Semantically compiled for {domain_config['name']}."
         goal = draft.goal.strip() if draft.goal.strip() else self._derive_goal(payload.instruction)
+        quality_audit = self._build_compiler_quality_audit(
+            compiler_name=compiler_name,
+            domain_key=domain_key,
+            domain_config=domain_config,
+            instruction=payload.instruction,
+            capabilities=capabilities,
+            success_criteria=success_criteria,
+            approval_policy=approval_policy,
+            output_contract=output_contract,
+            environment_requirements=dict(draft.environment_requirements or {}),
+            checkpoints=list(draft.checkpoints or []),
+            step_outline=list(draft.step_outline or []),
+            compiler_notes=notes,
+            fallback_used=False,
+            warnings=list(quality_warnings or []),
+            repair_count=repair_count,
+        )
 
         return CompiledTaskDraft(
             task_spec=TaskSpecCreate(
@@ -908,6 +1036,7 @@ class PersistedRuntimeService:
                     "environment_requirements": dict(draft.environment_requirements or {}),
                     "checkpoints": list(draft.checkpoints or []),
                     "step_outline": list(draft.step_outline or []),
+                    "compiler_quality": quality_audit,
                 },
             ),
             domain_key=domain_key,
@@ -933,6 +1062,10 @@ class PersistedRuntimeService:
                 "default_capabilities": value["default_capabilities"],
                 "default_constraints": value["default_constraints"],
                 "default_output_contract": value["default_output_contract"],
+                "compiler_hints": value.get("compiler_hints") or [],
+                "quality_gates": value.get("quality_gates") or {},
+                "scene_expectations": value.get("scene_expectations") or [],
+                "trial_expectations": value.get("trial_expectations") or {},
             }
             for key, value in DOMAIN_PACKS.items()
         }
@@ -940,6 +1073,7 @@ class PersistedRuntimeService:
             key: {
                 "description": value["description"],
                 "risk": value["risk"],
+                "signal_labels": value.get("signal_labels", []),
             }
             for key, value in CAPABILITY_DRIVERS.items()
         }
@@ -957,6 +1091,11 @@ class PersistedRuntimeService:
             "preferred_domains": payload.preferred_domains,
             "available_domains": domain_catalog,
             "available_capabilities": capability_catalog,
+            "compiler_contract": {
+                "required_fields": self.get_task_compiler_contract().required_fields,
+                "optional_fields": self.get_task_compiler_contract().optional_fields,
+                "quality_gates": self.get_task_compiler_contract().quality_gates,
+            },
         }
         base_parts = [
             self.prompt_builder.loader.load_text(path).strip()
@@ -973,6 +1112,41 @@ class PersistedRuntimeService:
         return [
             Message(role="system", content=system_prompt),
             Message(role="user", content=user_prompt),
+        ]
+
+    def _build_semantic_compile_quality_repair_messages(
+        self,
+        payload: TaskCompileRequest,
+        response,
+        quality_report: dict[str, Any],
+    ) -> list[Message]:
+        original_messages = self._build_semantic_compile_messages(payload)
+        prior_output = ""
+        if isinstance(response.result_data, dict):
+            prior_output = json.dumps(response.result_data, ensure_ascii=False)
+        elif response.content:
+            prior_output = response.content
+        elif response.raw:
+            prior_output = json.dumps(response.raw, ensure_ascii=False)
+        repair_prompt = json.dumps(
+            {
+                "repair_reason": "critical_quality_gap",
+                "quality_report": quality_report,
+                "instructions": [
+                    "Return corrected JSON only.",
+                    "Preserve the same SemanticTaskCompileDraft schema.",
+                    "Fix the listed quality gaps without introducing site-specific assumptions.",
+                    "If the task implies browser scenes, keep environment requirements and checkpoints explicit.",
+                ],
+                "prior_output": prior_output,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        return [
+            *original_messages,
+            Message(role="assistant", content=prior_output),
+            Message(role="user", content=repair_prompt),
         ]
 
     def _build_semantic_compile_repair_messages(
@@ -996,6 +1170,7 @@ class PersistedRuntimeService:
                     "Return corrected JSON only.",
                     "Keep the same schema as SemanticTaskCompileDraft.",
                     "If a field is unknown, use an empty object, empty list, or the 'general' domain instead of prose.",
+                    "Preserve approval-aware handling for write-oriented or outbound actions.",
                 ],
                 "invalid_output": prior_output,
             },
@@ -1016,6 +1191,185 @@ class PersistedRuntimeService:
         if not content:
             raise ValueError("Compiler returned an empty response")
         return SemanticTaskCompileDraft.model_validate(self._extract_json_object(content))
+
+    def _review_semantic_compile_candidate(
+        self,
+        *,
+        payload: TaskCompileRequest,
+        draft: SemanticTaskCompileDraft,
+    ) -> dict[str, Any]:
+        domain_key, domain_config, _ = self._select_compiled_domain(
+            compiled_domain=draft.domain,
+            domain_hint=payload.domain_hint,
+            instruction=payload.instruction,
+            preferred_domains=payload.preferred_domains,
+        )
+        capabilities = self._select_compiled_capabilities(
+            compiled_capabilities=draft.preferred_capabilities,
+            instruction=payload.instruction,
+            domain_key=domain_key,
+            preferred_capabilities=payload.preferred_capabilities,
+        )
+        critical_issues: list[str] = []
+        warnings: list[str] = []
+
+        if len((draft.goal or "").strip()) < 12:
+            critical_issues.append("goal_too_brief")
+        if not isinstance(draft.success_criteria, dict) or not draft.success_criteria:
+            critical_issues.append("missing_success_criteria")
+        if not isinstance(draft.output_contract, dict) or not draft.output_contract:
+            critical_issues.append("missing_output_contract")
+
+        approval_policy = dict(draft.approval_policy or {})
+        approval_actions = {
+            str(item).strip().lower()
+            for item in list(approval_policy.get("approval_actions") or [])
+            if str(item).strip()
+        }
+        write_or_outbound_requested = any(cap in capabilities for cap in ("api", "command", "filesystem")) or any(
+            token in payload.instruction.lower()
+            for token in ("upload", "sync", "push", "write", "save", "send", "message", "command", "shell")
+        )
+        if write_or_outbound_requested and not approval_actions:
+            critical_issues.append("missing_write_or_outbound_approval")
+
+        browser_or_web_requested = "browser" in capabilities or any(
+            token in payload.instruction.lower()
+            for token in ("website", "web", "browser", "page", "open ")
+        )
+        if browser_or_web_requested and not dict(draft.environment_requirements or {}):
+            warnings.append("missing_browser_environment_requirements")
+        if browser_or_web_requested and not list(draft.checkpoints or []):
+            warnings.append("missing_browser_checkpoints")
+        if not list(draft.step_outline or []):
+            warnings.append("missing_step_outline")
+        if not list(draft.compiler_notes or []):
+            warnings.append("missing_compiler_notes")
+
+        quality_gates = dict(domain_config.get("quality_gates") or {})
+        if quality_gates.get("requires_source_links"):
+            merged_text = json.dumps(
+                {
+                    "constraints": draft.constraints,
+                    "success_criteria": draft.success_criteria,
+                    "output_contract": draft.output_contract,
+                },
+                ensure_ascii=False,
+            ).lower()
+            if "source" not in merged_text and "link" not in merged_text and "citation" not in merged_text:
+                warnings.append("domain_quality_gate_source_links_not_explicit")
+        minimum_sources = quality_gates.get("minimum_sources")
+        if isinstance(minimum_sources, int) and minimum_sources > 0:
+            actual = int(dict(draft.success_criteria or {}).get("minimum_sources") or 0)
+            if actual < minimum_sources:
+                warnings.append("domain_quality_gate_minimum_sources_not_met")
+        minimum_candidates = quality_gates.get("minimum_candidates")
+        if isinstance(minimum_candidates, int) and minimum_candidates > 0:
+            actual = int(dict(draft.success_criteria or {}).get("minimum_candidates") or 0)
+            if actual < minimum_candidates:
+                warnings.append("domain_quality_gate_minimum_candidates_not_met")
+        minimum_repositories = quality_gates.get("minimum_repositories")
+        if isinstance(minimum_repositories, int) and minimum_repositories > 0:
+            actual = int(dict(draft.success_criteria or {}).get("minimum_repositories") or 0)
+            if actual < minimum_repositories:
+                warnings.append("domain_quality_gate_minimum_repositories_not_met")
+
+        return {
+            "domain_key": domain_key,
+            "capabilities": capabilities,
+            "critical_issues": list(dict.fromkeys(critical_issues)),
+            "warnings": list(dict.fromkeys(warnings)),
+        }
+
+    def _build_compiler_quality_audit(
+        self,
+        *,
+        compiler_name: str,
+        domain_key: str,
+        domain_config: dict[str, Any],
+        instruction: str,
+        capabilities: list[str],
+        success_criteria: dict[str, Any],
+        approval_policy: dict[str, Any],
+        output_contract: dict[str, Any],
+        environment_requirements: dict[str, Any],
+        checkpoints: list[dict[str, Any]],
+        step_outline: list[dict[str, Any]],
+        compiler_notes: list[str],
+        fallback_used: bool,
+        warnings: list[str] | None = None,
+        repair_count: int = 0,
+    ) -> dict[str, Any]:
+        quality_gates = dict(domain_config.get("quality_gates") or {})
+        warnings_list = list(dict.fromkeys(warnings or []))
+        satisfied_gates: dict[str, bool] = {
+            "has_success_criteria": bool(success_criteria),
+            "has_output_contract": bool(output_contract),
+            "has_step_outline": bool(step_outline),
+            "has_checkpoints": bool(checkpoints),
+            "has_compiler_notes": bool(compiler_notes),
+        }
+        if "browser" in capabilities or any(token in instruction.lower() for token in ("web", "browser", "website", "page", "open ")):
+            satisfied_gates["has_environment_requirements"] = bool(environment_requirements)
+        approval_actions = {
+            str(item).strip().lower()
+            for item in list(approval_policy.get("approval_actions") or [])
+            if str(item).strip()
+        }
+        if any(cap in capabilities for cap in ("api", "command", "filesystem")):
+            satisfied_gates["write_actions_are_approval_aware"] = bool(approval_actions)
+        if quality_gates.get("requires_source_links"):
+            quality_blob = json.dumps(
+                {
+                    "success_criteria": success_criteria,
+                    "output_contract": output_contract,
+                    "approval_policy": approval_policy,
+                },
+                ensure_ascii=False,
+            ).lower()
+            satisfied_gates["source_links_are_explicit"] = any(
+                token in quality_blob for token in ("source", "link", "citation")
+            )
+        if isinstance(quality_gates.get("minimum_sources"), int):
+            satisfied_gates["minimum_sources_met"] = int(success_criteria.get("minimum_sources") or 0) >= int(
+                quality_gates["minimum_sources"]
+            )
+        if isinstance(quality_gates.get("minimum_candidates"), int):
+            satisfied_gates["minimum_candidates_met"] = int(success_criteria.get("minimum_candidates") or 0) >= int(
+                quality_gates["minimum_candidates"]
+            )
+        if isinstance(quality_gates.get("minimum_repositories"), int):
+            satisfied_gates["minimum_repositories_met"] = int(
+                success_criteria.get("minimum_repositories") or 0
+            ) >= int(quality_gates["minimum_repositories"])
+
+        quality_score = 1.0
+        quality_score -= 0.05 * len([value for value in satisfied_gates.values() if not value])
+        quality_score -= 0.04 * len(warnings_list)
+        if fallback_used:
+            quality_score -= 0.08
+        if repair_count:
+            quality_score -= min(0.08, repair_count * 0.04)
+        quality_score = max(0.25, min(0.99, round(quality_score, 2)))
+
+        quality_status = "accepted"
+        if fallback_used:
+            quality_status = "fallback"
+        if not all(satisfied_gates.values()):
+            quality_status = "guardrailed" if quality_status == "accepted" else quality_status
+
+        return {
+            "contract_version": "runtime-task-compiler-v4",
+            "compiler": compiler_name,
+            "quality_status": quality_status,
+            "quality_score": quality_score,
+            "fallback_used": fallback_used,
+            "repair_count": repair_count,
+            "domain_pack_version": str(domain_config.get("version") or "1.0.0"),
+            "quality_gates": quality_gates,
+            "gates_satisfied": satisfied_gates,
+            "warnings": warnings_list,
+        }
 
     def _extract_json_object(self, content: str) -> dict[str, Any]:
         fenced = re.search(r"```(?:json)?\s*(\{.*\})\s*```", content, flags=re.DOTALL)
@@ -1629,6 +1983,8 @@ class PersistedRuntimeService:
                     "template_key": template.template_key,
                     "template_version": template.version,
                     "summary": template.validation_summary,
+                    "governance": dict((template.activation_strategy or {}).get("governance") or {}),
+                    "version_policy": dict((template.activation_strategy or {}).get("version_policy") or {}),
                 },
             }
         )
@@ -1656,6 +2012,7 @@ class PersistedRuntimeService:
                 "reviewed_at": utcnow().isoformat(),
                 "template_id": getattr(template, "id", None) or dict(approval.payload or {}).get("template_id"),
                 "template_version": getattr(template, "version", None) or dict(approval.payload or {}).get("template_version"),
+                "governance": dict((getattr(template, "activation_strategy", {}) or {}).get("governance") or {}),
             },
         }
         self.session.commit()
@@ -1746,6 +2103,14 @@ class PersistedRuntimeService:
 
         fallback_label = patch.divergence_summary or patch.title
         if task_spec is not None:
+            patch_governance = {
+                "domain_pack_version": str((DOMAIN_PACKS.get(task_spec.domain, DOMAIN_PACKS["general"])).get("version") or "1.0.0"),
+                "domain_pack_maturity": str((DOMAIN_PACKS.get(task_spec.domain, DOMAIN_PACKS["general"])).get("maturity") or "experimental"),
+                "episode_quality_band": str((patch.runtime_metadata or {}).get("episode_quality_band") or "medium"),
+                "quality_gates": dict((DOMAIN_PACKS.get(task_spec.domain, DOMAIN_PACKS["general"])).get("quality_gates") or {}),
+                "patch_id": patch.id,
+                "governance_event": "patch_apply",
+            }
             if template is None:
                 template_key = f"{self._template_key(task_spec)}_patch"
                 template = template_repo.by_template_key(template_key)
@@ -1754,6 +2119,8 @@ class PersistedRuntimeService:
                     "checkpoints": list(current_plan.checkpoints or []) if current_plan is not None else self._default_checkpoints(task_spec, None),
                     "success_criteria": dict(task_spec.success_criteria or {}),
                     "patch_history": [],
+                    "governance": patch_governance,
+                    "governance_history": [{"recorded_at": utcnow().isoformat(), **patch_governance}],
                 }
                 if template is None:
                     template = template_repo.create(
@@ -1770,6 +2137,12 @@ class PersistedRuntimeService:
                                     "source_task_spec_id": task_spec.id,
                                     "created_from_patch_id": patch.id,
                                     "created_from_plan_id": current_plan.id if current_plan is not None else None,
+                                },
+                                "governance": patch_governance,
+                                "version_policy": {
+                                    "strategy": "patch_review_semver",
+                                    "promotion_gate": "patch_approval",
+                                    "history_depth": 1,
                                 },
                             },
                             validation_summary=patch.divergence_summary or patch.rationale or patch.title,
@@ -1799,6 +2172,10 @@ class PersistedRuntimeService:
                     "last_applied_patch_id": patch.id,
                     "last_applied_plan_id": current_plan.id if current_plan is not None else None,
                 }
+                governance_history = self._append_governance_history(
+                    list((template.template_body or {}).get("governance_history") or []),
+                    patch_governance,
+                )
                 template = template_repo.update(
                     template,
                     WorkflowTemplateUpdate(
@@ -1809,11 +2186,23 @@ class PersistedRuntimeService:
                             "steps": patched_steps,
                             "checkpoints": patched_checkpoints,
                             "patch_history": patch_history[-20:],
+                            "governance": patch_governance,
+                            "governance_history": governance_history,
                         },
                         activation_strategy={
                             **dict(template.activation_strategy or {}),
                             "mode": "patch_review",
                             "lineage": lineage,
+                            "governance": self._merge_dicts(
+                                dict((template.activation_strategy or {}).get("governance") or {}),
+                                patch_governance,
+                            ),
+                            "version_policy": {
+                                **dict((template.activation_strategy or {}).get("version_policy") or {}),
+                                "strategy": "patch_review_semver",
+                                "promotion_gate": "patch_approval",
+                                "history_depth": len(governance_history),
+                            },
                         },
                         validation_summary=reason or patch.divergence_summary or template.validation_summary,
                         last_validated_at=utcnow(),
@@ -2563,6 +2952,7 @@ class PersistedRuntimeService:
         return steps
 
     def _default_checkpoints(self, task_spec, template) -> list[dict[str, Any]]:
+        domain_config = DOMAIN_PACKS.get(task_spec.domain) or DOMAIN_PACKS["general"]
         checkpoints = [{"kind": "approval", "label": "Review trial output"}]
         checkpoints.extend(list((task_spec.compiled_payload or {}).get("checkpoints") or []))
         if template is not None:
@@ -2572,6 +2962,10 @@ class PersistedRuntimeService:
         if "browser" in (task_spec.preferred_capabilities or []):
             checkpoints.append({"kind": "snapshot", "label": "Capture environment snapshot"})
             checkpoints.append({"kind": "planner", "label": "Validate runtime scene before proceeding"})
+        if (domain_config.get("quality_gates") or {}).get("requires_source_links"):
+            checkpoints.append({"kind": "quality_gate", "label": "Verify source links before finalizing output"})
+        if (domain_config.get("quality_gates") or {}).get("requires_downstream_write_review"):
+            checkpoints.append({"kind": "approval", "label": "Review downstream write or handoff before release"})
         deduped: list[dict[str, Any]] = []
         seen: set[str] = set()
         for checkpoint in checkpoints:
@@ -2583,10 +2977,13 @@ class PersistedRuntimeService:
         return deduped
 
     def _default_environment_requirements(self, domain: str, capabilities: list[str]) -> dict[str, Any]:
+        domain_config = DOMAIN_PACKS.get(domain) or DOMAIN_PACKS["general"]
         hints = {
             "requires_browser": "browser" in capabilities,
             "requires_network": any(cap in capabilities for cap in ("http", "search", "browser")),
             "scene_assessment_required": "browser" in capabilities,
+            "scene_expectations": list(domain_config.get("scene_expectations") or []),
+            "quality_gates": dict(domain_config.get("quality_gates") or {}),
         }
         if domain == "recruiting":
             hints["requires_approval_gate"] = True
@@ -2752,6 +3149,17 @@ class PersistedRuntimeService:
         repo = WorkflowTemplateRepository(self.session)
         template_key = self._template_key(task_spec)
         template = repo.by_template_key(template_key)
+        domain_config = DOMAIN_PACKS.get(task_spec.domain, DOMAIN_PACKS["general"])
+        template_governance = self._build_episode_governance_snapshot(
+            task_spec=task_spec,
+            plan=plan,
+            episode=episode,
+            domain_config=domain_config,
+        )
+        governance_history = self._append_governance_history(
+            list((template.template_body or {}).get("governance_history") or []) if template is not None else [],
+            template_governance,
+        )
         payload = {
             "template_key": template_key,
             "name": f"{task_spec.title} Template",
@@ -2762,6 +3170,8 @@ class PersistedRuntimeService:
                 "steps": list((plan.plan_body or {}).get("steps") or []),
                 "checkpoints": list(plan.checkpoints or []),
                 "success_criteria": dict(task_spec.success_criteria or {}),
+                "governance": template_governance,
+                "governance_history": governance_history,
             },
             "activation_strategy": {
                 "mode": "supervised_trial_first",
@@ -2770,6 +3180,12 @@ class PersistedRuntimeService:
                     "source_task_spec_id": task_spec.id,
                     "last_materialized_episode_id": episode.id,
                     "last_materialized_plan_id": plan.id,
+                },
+                "governance": template_governance,
+                "version_policy": {
+                    "strategy": "supervised_semver",
+                    "promotion_gate": "trial_confirmation" if episode.requires_confirmation else "trial_validated",
+                    "history_depth": len(governance_history),
                 },
             },
             "validation_summary": episode.result_summary or "Validated during supervised trial execution.",
@@ -2787,6 +3203,14 @@ class PersistedRuntimeService:
                 activation_strategy={
                     **dict(template.activation_strategy or {}),
                     **payload["activation_strategy"],
+                    "governance": self._merge_dicts(
+                        dict((template.activation_strategy or {}).get("governance") or {}),
+                        template_governance,
+                    ),
+                    "version_policy": {
+                        **dict((template.activation_strategy or {}).get("version_policy") or {}),
+                        **payload["activation_strategy"]["version_policy"],
+                    },
                 },
                 validation_summary=payload["validation_summary"],
                 last_validated_at=payload["last_validated_at"],
@@ -2824,7 +3248,12 @@ class PersistedRuntimeService:
                         }
                     ]
                 },
-                runtime_metadata={"generated_from_episode": episode.id},
+                runtime_metadata={
+                    "generated_from_episode": episode.id,
+                    "domain_pack_version": str((DOMAIN_PACKS.get(task_spec.domain, DOMAIN_PACKS["general"])).get("version") or "1.0.0"),
+                    "plan_version": int(plan.version),
+                    "episode_quality_band": self._learning_quality_band(episode),
+                },
             )
         )
         self._ensure_patch_approval(patch)
@@ -2863,6 +3292,8 @@ class PersistedRuntimeService:
                     capability,
                     "trial" if episode.mode == "trial" else episode.mode,
                     f"episode:{episode.id}",
+                    f"quality:{self._learning_quality_band(episode)}",
+                    f"domain_version:{str((DOMAIN_PACKS.get(task_spec.domain, DOMAIN_PACKS['general'])).get('version') or '1.0.0')}",
                 ],
                 "source_task_id": task_spec.id,
                 "consolidated_at": episode.finished_at or utcnow(),
@@ -2894,6 +3325,17 @@ class PersistedRuntimeService:
             return existing
 
         skill_name = f"{task_spec.domain.replace('_', ' ').title()} {capability.title()} Skill"
+        version_governance = self._build_episode_governance_snapshot(
+            task_spec=task_spec,
+            plan=plan,
+            episode=episode,
+            domain_config=DOMAIN_PACKS.get(task_spec.domain, DOMAIN_PACKS["general"]),
+            extra={
+                "capability": capability,
+                "learning_id": learning.id,
+                "governance_event": "skill_draft",
+            },
+        )
         approval = approval_repo.create(
             {
                 "target_type": "skill_draft",
@@ -2919,16 +3361,20 @@ class PersistedRuntimeService:
                             "instruction": task_spec.goal,
                             "capability": capability,
                             "steps": list((plan.plan_body or {}).get("steps") or []),
+                            "version_governance": version_governance,
                         },
                         "execution_hints": {
                             "domain": task_spec.domain,
                             "preferred_capabilities": list(task_spec.preferred_capabilities or []),
+                            "version_governance": version_governance,
                         },
                         "health_check_config": {
                             "expected_result_status": "pass",
                             "minimum_overall_score": 0.5,
                             "failure_severity": "warning",
+                            "governance_window": "supervised_trial",
                         },
+                        "version_governance": version_governance,
                     },
                 },
             }
@@ -3223,7 +3669,56 @@ class PersistedRuntimeService:
         except (TypeError, ValueError):
             return None
 
+    def _learning_quality_band(self, episode) -> str:
+        completion_rate = self._safe_float((episode.metrics or {}).get("completion_rate"))
+        if completion_rate is None:
+            completion_rate = 0.0
+        if bool(episode.divergence_detected):
+            return "low"
+        if completion_rate >= 0.95:
+            return "high"
+        if completion_rate >= 0.7:
+            return "medium"
+        return "low"
+
+    def _build_episode_governance_snapshot(
+        self,
+        *,
+        task_spec,
+        plan,
+        episode,
+        domain_config: dict[str, Any] | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        resolved_domain = domain_config or DOMAIN_PACKS.get(task_spec.domain, DOMAIN_PACKS["general"])
+        snapshot = {
+            "domain_pack_version": str(resolved_domain.get("version") or "1.0.0"),
+            "domain_pack_maturity": str(resolved_domain.get("maturity") or "experimental"),
+            "quality_gates": dict(resolved_domain.get("quality_gates") or {}),
+            "trial_expectations": dict(resolved_domain.get("trial_expectations") or {}),
+            "episode_quality_band": self._learning_quality_band(episode),
+            "last_episode_id": getattr(episode, "id", None),
+            "last_plan_id": getattr(plan, "id", None),
+            "last_plan_version": int(getattr(plan, "version", 1) or 1),
+        }
+        if extra:
+            snapshot.update(dict(extra))
+        return snapshot
+
+    def _append_governance_history(
+        self,
+        existing_history: list[dict[str, Any]],
+        snapshot: dict[str, Any],
+        *,
+        limit: int = 12,
+    ) -> list[dict[str, Any]]:
+        normalized = [dict(item) for item in existing_history if isinstance(item, dict)]
+        normalized.append({"recorded_at": utcnow().isoformat(), **dict(snapshot)})
+        return normalized[-limit:]
+
     def _domain_pack_read(self, key: str, config: dict[str, Any]) -> DomainPackRead:
+        template_repo = WorkflowTemplateRepository(self.session)
+        templates = [item for item in template_repo.list(limit=500, offset=0) if item.domain == key]
         return DomainPackRead(
             key=key,
             name=str(config["name"]),
@@ -3236,6 +3731,12 @@ class PersistedRuntimeService:
             default_constraints=dict(config.get("default_constraints") or {}),
             default_output_contract=dict(config.get("default_output_contract") or {}),
             template_keys=list(config.get("template_keys") or []),
+            compiler_hints=list(config.get("compiler_hints") or []),
+            quality_gates=dict(config.get("quality_gates") or {}),
+            scene_expectations=list(config.get("scene_expectations") or []),
+            trial_expectations=dict(config.get("trial_expectations") or {}),
+            template_count=len(templates),
+            active_template_count=sum(1 for item in templates if str(item.status) == "active"),
         )
 
     def _normalize_domain(self, value: str | None) -> str:

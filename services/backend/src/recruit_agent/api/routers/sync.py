@@ -38,7 +38,9 @@ def list_sync_backlog(
             status=item.status,
             attempt_count=item.attempt_count,
             last_attempted_at=_last_attempted_at(item),
+            next_attempt_at=item.next_attempt_at,
             last_error=item.last_error,
+            delivery_mode=item.delivery_mode,
             synced_at=item.synced_at,
             created_at=item.created_at or item.updated_at or item.synced_at,
             updated_at=item.updated_at or item.created_at or item.synced_at,
@@ -57,9 +59,11 @@ def flush_sync_backlog(
         attempted=result.attempted,
         synced=result.synced,
         failed=result.failed,
+        deferred=result.deferred,
         pending=result.pending,
         remote_available=container.sync.remote_available(),
         target=dict(container.sync.target),
+        next_attempt_at=result.next_attempt_at,
     )
 
 

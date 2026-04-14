@@ -2,11 +2,20 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from recruit_agent.api.deps import get_container
-from recruit_agent.schemas.domain import AgentRunRead, AgentStatusRead, AgentTaskCreate, AgentTaskEnqueueRead, ApprovalRead
+from recruit_agent.repositories.domain import TaskQueueRepository
+from recruit_agent.schemas.domain import (
+    AgentQueueItemRead,
+    AgentQueueRecoveryRead,
+    AgentRunRead,
+    AgentStatusRead,
+    AgentTaskCreate,
+    AgentTaskEnqueueRead,
+    ApprovalRead,
+)
 from recruit_agent.services.container import AppContainer
 from recruit_agent.services.system_commands import SystemCommandApprovalError, SystemCommandDisabledError, SystemCommandPolicyError
 
@@ -64,6 +73,58 @@ def run_once(container: AppContainer = Depends(get_container)) -> AgentRunRead:
     )
 
 
+@router.get("/queue", response_model=list[AgentQueueItemRead])
+def list_agent_queue(
+    status: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    container: AppContainer = Depends(get_container),
+) -> list[AgentQueueItemRead]:
+    with container.session_factory() as session:
+        items = TaskQueueRepository(session).list(status=status, limit=limit, offset=offset)
+        return [
+            AgentQueueItemRead(
+                task_id=item.id,
+                task_type=item.task_type,
+                priority=int(item.priority or 0),
+                status=item.status,
+                attempts=int(item.attempts or 0),
+                scheduled_for=item.scheduled_for,
+                locked_at=item.locked_at,
+                locked_by=item.locked_by,
+                candidate_id=_payload_value(item.payload, "candidate_id"),
+                workflow_id=_payload_value(item.payload, "workflow_id"),
+                workflow_node_id=_payload_value(item.payload, "workflow_node_id"),
+                payload=dict(item.payload or {}),
+                queue_audit=[
+                    {
+                        "kind": str(event.get("kind") or "unknown"),
+                        "at": str(event.get("at") or ""),
+                        "status": str(event.get("status")) if event.get("status") is not None else None,
+                        "priority": int(event["priority"]) if event.get("priority") is not None else None,
+                        "attempts": int(event["attempts"]) if event.get("attempts") is not None else None,
+                        "locked_by": str(event.get("locked_by")) if event.get("locked_by") is not None else None,
+                        "error": str(event.get("error")) if event.get("error") is not None else None,
+                    }
+                    for event in list((item.payload or {}).get("queue_audit", {}).get("history") or [])
+                    if isinstance(event, dict)
+                ],
+                created_at=item.created_at,
+                updated_at=item.updated_at,
+            )
+            for item in items
+        ]
+
+
+@router.post("/queue/recover", response_model=AgentQueueRecoveryRead)
+def recover_agent_queue(container: AppContainer = Depends(get_container)) -> AgentQueueRecoveryRead:
+    recover_stale = getattr(container.scheduler.queue, "recover_stale", None)
+    recovered = int(recover_stale()) if callable(recover_stale) else 0
+    with container.session_factory() as session:
+        counts = TaskQueueRepository(session).counts_by_status()
+    return AgentQueueRecoveryRead(recovered_count=recovered, by_status=counts)
+
+
 @router.get("/system-commands/policy")
 def get_system_command_policy(container: AppContainer = Depends(get_container)) -> dict[str, Any]:
     return container.system_commands.policy_snapshot()
@@ -103,3 +164,12 @@ def execute_system_command(
     except SystemCommandApprovalError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return ApprovalRead.model_validate(approval)
+
+
+def _payload_value(payload: dict[str, Any] | None, key: str) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get(key)
+    if value is None:
+        return None
+    return str(value)

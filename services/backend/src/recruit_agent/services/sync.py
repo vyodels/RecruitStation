@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy.orm import Session, sessionmaker
@@ -26,6 +26,8 @@ class SyncBacklogItem:
     target: dict[str, Any] = field(default_factory=dict)
     body: dict[str, Any] = field(default_factory=dict)
     attempt_count: int = 0
+    next_attempt_at: datetime | None = None
+    delivery_mode: str = "local_first"
     last_error: str | None = None
 
     @classmethod
@@ -44,6 +46,8 @@ class SyncBacklogItem:
             target=dict(envelope.get("target") or {}),
             body=dict(envelope.get("body") or {}),
             attempt_count=int(delivery.get("attempt_count", 0) or 0),
+            next_attempt_at=_parse_iso_datetime(delivery.get("next_attempt_at")),
+            delivery_mode=str(delivery.get("mode") or "local_first"),
             last_error=str(delivery.get("last_error")) if delivery.get("last_error") is not None else None,
         )
 
@@ -53,7 +57,9 @@ class SyncFlushResult:
     attempted: int = 0
     synced: int = 0
     failed: int = 0
+    deferred: int = 0
     pending: int = 0
+    next_attempt_at: datetime | None = None
 
 
 @dataclass(slots=True)
@@ -66,9 +72,11 @@ class SyncStatusSnapshot:
     pending_count: int = 0
     synced_count: int = 0
     failed_delivery_count: int = 0
+    deferred_count: int = 0
     backlog_total: int = 0
     by_status: dict[str, int] = field(default_factory=dict)
     latest_error: str | None = None
+    next_attempt_at: datetime | None = None
 
 
 @dataclass(slots=True)
@@ -80,6 +88,8 @@ class SyncService:
     transport: SyncTransport | None = None
     protocol_version: str = "2026-04-14"
     source: str = "desktop_app"
+    max_attempts: int = 5
+    retry_backoff_seconds: int = 30
 
     def enqueue(self, item_type: str, item_id: str, payload: dict[str, Any]) -> SyncBacklogItem:
         envelope = self._build_envelope(item_type=item_type, item_id=item_id, body=payload)
@@ -141,11 +151,17 @@ class SyncService:
             by_status: dict[str, int] = {}
             latest_error: str | None = None
             failed_delivery_count = 0
+            deferred_count = 0
+            next_attempt_at: datetime | None = None
             for item in self.backlog:
                 by_status[item.status] = by_status.get(item.status, 0) + 1
                 if item.last_error:
                     failed_delivery_count += 1
                     latest_error = item.last_error
+                if item.status == "pending" and item.next_attempt_at and item.next_attempt_at > datetime.now(timezone.utc):
+                    deferred_count += 1
+                    if next_attempt_at is None or item.next_attempt_at < next_attempt_at:
+                        next_attempt_at = item.next_attempt_at
             return SyncStatusSnapshot(
                 enabled=bool(self.intranet_enabled),
                 remote_available=self.remote_available(),
@@ -155,14 +171,19 @@ class SyncService:
                 pending_count=by_status.get("pending", 0),
                 synced_count=by_status.get("synced", 0),
                 failed_delivery_count=failed_delivery_count,
+                deferred_count=deferred_count,
                 backlog_total=len(self.backlog),
                 by_status=by_status,
                 latest_error=latest_error,
+                next_attempt_at=next_attempt_at,
             )
 
         with self.session_factory() as session:
             repo = SyncBacklogRepository(session)
             by_status = repo.counts_by_status()
+            pending_items = [SyncBacklogItem.from_record(record) for record in repo.pending(limit=1000, offset=0)]
+            deferred_items = [item for item in pending_items if not self._is_due_for_delivery(item)]
+            next_attempt_at = min((item.next_attempt_at for item in deferred_items if item.next_attempt_at is not None), default=None)
             return SyncStatusSnapshot(
                 enabled=bool(self.intranet_enabled),
                 remote_available=self.remote_available(),
@@ -172,18 +193,25 @@ class SyncService:
                 pending_count=by_status.get("pending", 0),
                 synced_count=by_status.get("synced", 0),
                 failed_delivery_count=repo.delivery_error_count(),
+                deferred_count=len(deferred_items),
                 backlog_total=sum(by_status.values()),
                 by_status=by_status,
                 latest_error=repo.latest_delivery_error(),
+                next_attempt_at=next_attempt_at,
             )
 
     def mark_synced(self, item_id: str, item_type: str | None = None) -> SyncBacklogItem | None:
         if self.session_factory is None:
             for item in self.backlog:
                 if item.item_id == item_id and (item_type is None or item.item_type == item_type):
+                    delivery = item.payload.get("delivery") if isinstance(item.payload.get("delivery"), dict) else {}
+                    delivery.update({"last_error": None, "next_attempt_at": None})
+                    item.payload["delivery"] = delivery
                     item.status = "synced"
                     item.synced_at = datetime.now(timezone.utc)
                     item.updated_at = item.synced_at
+                    item.last_error = None
+                    item.next_attempt_at = None
                     return item
             return None
 
@@ -196,16 +224,21 @@ class SyncService:
 
     def flush_pending(self, limit: int = 100) -> SyncFlushResult:
         pending_items = self.pending(limit=limit)
+        due_items = [item for item in pending_items if self._is_due_for_delivery(item)]
+        deferred_items = [item for item in pending_items if not self._is_due_for_delivery(item)]
         if not self.remote_available():
             return SyncFlushResult(
                 attempted=0,
                 synced=0,
                 failed=0,
+                deferred=len(deferred_items),
                 pending=len(pending_items),
+                next_attempt_at=min((item.next_attempt_at for item in deferred_items if item.next_attempt_at is not None), default=None),
             )
 
         result = SyncFlushResult()
-        for item in pending_items:
+        result.deferred = len(deferred_items)
+        for item in due_items:
             result.attempted += 1
             try:
                 response = self.transport(item) if self.transport is not None else False
@@ -221,6 +254,8 @@ class SyncService:
             result.failed += 1
 
         result.pending = self.pending_count()
+        backlog = self.pending(limit=limit)
+        result.next_attempt_at = min((item.next_attempt_at for item in backlog if item.next_attempt_at is not None), default=None)
         return result
 
     def _build_envelope(self, *, item_type: str, item_id: str, body: dict[str, Any]) -> dict[str, Any]:
@@ -236,23 +271,35 @@ class SyncService:
             "body": dict(body),
             "delivery": {
                 "mode": "local_first",
+                "strategy": "exponential_backoff",
+                "max_attempts": self.max_attempts,
                 "attempt_count": 0,
                 "last_error": None,
                 "queued_at": queued_at,
                 "last_attempt_at": None,
+                "next_attempt_at": None,
             },
         }
 
     def _mark_delivery_failure(self, item: SyncBacklogItem, error: str | None) -> None:
         attempt_count = item.attempt_count + 1
+        now = datetime.now(timezone.utc)
+        next_attempt_at = None
+        status = "failed" if attempt_count >= self.max_attempts else "pending"
+        if status == "pending":
+            backoff_seconds = max(0, int(self.retry_backoff_seconds)) * max(1, 2 ** max(0, attempt_count - 1))
+            next_attempt_at = now + timedelta(seconds=backoff_seconds)
         payload = dict(item.payload)
         delivery = payload.get("delivery") if isinstance(payload.get("delivery"), dict) else {}
         delivery.update(
             {
                 "mode": "local_first",
+                "strategy": "exponential_backoff",
+                "max_attempts": self.max_attempts,
                 "attempt_count": attempt_count,
                 "last_error": error,
-                "last_attempt_at": datetime.now(timezone.utc).isoformat(),
+                "last_attempt_at": now.isoformat(),
+                "next_attempt_at": next_attempt_at.isoformat() if next_attempt_at is not None else None,
             }
         )
         payload["delivery"] = delivery
@@ -262,13 +309,27 @@ class SyncService:
                 if backlog_item.item_id == item.item_id and backlog_item.item_type == item.item_type:
                     backlog_item.payload = payload
                     backlog_item.attempt_count = attempt_count
+                    backlog_item.next_attempt_at = next_attempt_at
+                    backlog_item.delivery_mode = str(delivery.get("mode") or "local_first")
                     backlog_item.last_error = error
-                    backlog_item.updated_at = datetime.now(timezone.utc)
+                    backlog_item.status = status
+                    backlog_item.updated_at = now
                     break
             return
 
         with self.session_factory() as session:
-            SyncBacklogRepository(session).update_payload(item.item_id, item.item_type, payload)
+            SyncBacklogRepository(session).mark_attempt(
+                item.item_id,
+                item_type=item.item_type,
+                error=error,
+                status=status,
+                payload=payload,
+            )
+
+    def _is_due_for_delivery(self, item: SyncBacklogItem) -> bool:
+        if item.next_attempt_at is None:
+            return True
+        return item.next_attempt_at <= datetime.now(timezone.utc)
 
     def _is_successful_response(self, response: bool | dict[str, Any]) -> bool:
         if isinstance(response, bool):
@@ -287,3 +348,12 @@ class SyncService:
                 if isinstance(value, str) and value.strip():
                     return value.strip()
         return "Remote sync did not acknowledge the payload."
+
+
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None

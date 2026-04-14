@@ -5,6 +5,7 @@ from typing import Any, Generic, TypeVar
 from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 from recruit_agent.core.settings import AppSettings
 from recruit_agent.db.base import utcnow
@@ -421,6 +422,23 @@ class TaskQueueRepository:
     def __init__(self, session: Session) -> None:
         self.session = session
 
+    def _append_audit_event(self, record: TaskQueueItem, kind: str, **extra: Any) -> None:
+        payload = dict(record.payload or {})
+        audit = payload.get("queue_audit") if isinstance(payload.get("queue_audit"), dict) else {}
+        history = list(audit.get("history") or [])
+        event = {"kind": kind, "at": utcnow().isoformat(), **extra}
+        history.append(event)
+        audit.update(
+            {
+                "last_event": kind,
+                "last_event_at": event["at"],
+                "history": history[-20:],
+            }
+        )
+        payload["queue_audit"] = audit
+        record.payload = payload
+        flag_modified(record, "payload")
+
     def enqueue(
         self,
         *,
@@ -445,6 +463,7 @@ class TaskQueueRepository:
                 attempts=attempts,
             )
             self.session.add(record)
+            self._append_audit_event(record, "enqueued", status=status, priority=priority)
         else:
             record.task_type = task_type
             record.priority = priority
@@ -454,6 +473,7 @@ class TaskQueueRepository:
             record.attempts = attempts
             record.locked_at = None
             record.locked_by = None
+            self._append_audit_event(record, "requeued", status=status, priority=priority, attempts=attempts)
         self.session.commit()
         self.session.refresh(record)
         return record
@@ -468,10 +488,29 @@ class TaskQueueRepository:
         )
         return list(self.session.scalars(stmt).all())
 
+    def list(self, *, status: str | None = None, limit: int = 100, offset: int = 0) -> list[TaskQueueItem]:
+        stmt = select(TaskQueueItem)
+        if status is not None:
+            stmt = stmt.where(TaskQueueItem.status == status)
+        stmt = (
+            stmt.order_by(
+                TaskQueueItem.priority.desc(),
+                TaskQueueItem.created_at.asc(),
+                TaskQueueItem.id.asc(),
+            )
+            .offset(offset)
+            .limit(limit)
+        )
+        return list(self.session.scalars(stmt).all())
+
     def pending_count(self) -> int:
         return self.session.scalar(
             select(func.count()).select_from(TaskQueueItem).where(TaskQueueItem.status == "pending")
         ) or 0
+
+    def counts_by_status(self) -> dict[str, int]:
+        stmt = select(TaskQueueItem.status, func.count()).group_by(TaskQueueItem.status)
+        return {str(status): int(count or 0) for status, count in self.session.execute(stmt).all()}
 
     def claim_next(self, *, locked_by: str = "scheduler") -> TaskQueueItem | None:
         now = utcnow()
@@ -489,11 +528,12 @@ class TaskQueueRepository:
         record.status = "running"
         record.locked_at = utcnow()
         record.locked_by = locked_by
+        self._append_audit_event(record, "claimed", locked_by=locked_by, attempts=record.attempts)
         self.session.commit()
         self.session.refresh(record)
         return record
 
-    def mark_pending(self, task_id: str, *, attempts: int | None = None) -> TaskQueueItem | None:
+    def mark_pending(self, task_id: str, *, attempts: int | None = None, error: str | None = None) -> TaskQueueItem | None:
         record = self.session.get(TaskQueueItem, task_id)
         if record is None:
             return None
@@ -502,6 +542,7 @@ class TaskQueueRepository:
         record.locked_by = None
         if attempts is not None:
             record.attempts = attempts
+        self._append_audit_event(record, "returned_to_queue", attempts=record.attempts, error=error)
         self.session.commit()
         self.session.refresh(record)
         return record
@@ -513,17 +554,19 @@ class TaskQueueRepository:
         record.status = "completed"
         record.locked_at = None
         record.locked_by = None
+        self._append_audit_event(record, "completed", attempts=record.attempts)
         self.session.commit()
         self.session.refresh(record)
         return record
 
-    def mark_failed(self, task_id: str) -> TaskQueueItem | None:
+    def mark_failed(self, task_id: str, *, error: str | None = None) -> TaskQueueItem | None:
         record = self.session.get(TaskQueueItem, task_id)
         if record is None:
             return None
         record.status = "failed"
         record.locked_at = None
         record.locked_by = None
+        self._append_audit_event(record, "failed", attempts=record.attempts, error=error)
         self.session.commit()
         self.session.refresh(record)
         return record
@@ -543,6 +586,7 @@ class TaskQueueRepository:
             record.status = "pending"
             record.locked_at = None
             record.locked_by = None
+            self._append_audit_event(record, "recovered_stale", attempts=record.attempts)
             recovered += 1
 
         if recovered:
@@ -671,13 +715,33 @@ class SyncBacklogRepository:
         record = self.session.scalars(stmt).first()
         if record is None:
             return None
+        payload = dict(record.payload or {})
+        delivery = payload.get("delivery") if isinstance(payload.get("delivery"), dict) else {}
+        delivery.update(
+            {
+                "last_error": None,
+                "next_attempt_at": None,
+            }
+        )
+        payload["delivery"] = delivery
+        record.payload = payload
+        flag_modified(record, "payload")
         record.status = "synced"
+        record.last_error = None
         record.synced_at = utcnow()
         self.session.commit()
         self.session.refresh(record)
         return record
 
-    def mark_attempt(self, item_id: str, *, item_type: str | None = None, error: str | None = None) -> Any | None:
+    def mark_attempt(
+        self,
+        item_id: str,
+        *,
+        item_type: str | None = None,
+        error: str | None = None,
+        status: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> Any | None:
         stmt = select(SyncBacklogEntry).where(SyncBacklogEntry.item_id == item_id)
         if item_type is not None:
             stmt = stmt.where(SyncBacklogEntry.item_type == item_type)
@@ -687,7 +751,10 @@ class SyncBacklogRepository:
         record.attempt_count = int(record.attempt_count or 0) + 1
         record.last_attempted_at = utcnow()
         record.last_error = error
-        record.status = "failed" if error else "pending"
+        record.status = status or ("failed" if error else "pending")
+        if payload is not None:
+            record.payload = dict(payload)
+            flag_modified(record, "payload")
         self.session.commit()
         self.session.refresh(record)
         return record
@@ -701,6 +768,7 @@ class SyncBacklogRepository:
         if record is None:
             return None
         record.payload = dict(payload)
+        flag_modified(record, "payload")
         self.session.commit()
         self.session.refresh(record)
         return record

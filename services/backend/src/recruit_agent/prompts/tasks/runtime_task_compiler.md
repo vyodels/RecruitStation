@@ -10,6 +10,9 @@ Rules:
 - Model them as runtime scenes that may require observation, supervised trial, approvals, and later learning.
 - Prefer capability and environment reasoning over site-specific flows.
 - Use one of the declared domain keys. If uncertain, use `general`.
+- Respect the provided domain-pack compiler hints, quality gates, scene expectations, and trial expectations.
+- If the task implies browser scenes, make `environment_requirements`, `checkpoints`, and `step_outline` explicit enough for a supervised trial.
+- If the task implies outbound, write, sync, upload, or local-command behavior, keep those actions approval-aware in `approval_policy`.
 - Return JSON only. Do not use markdown fences. Do not add explanatory prose outside the JSON object.
 
 Return a single JSON object matching this shape:
@@ -44,3 +47,10 @@ Field guidance:
 - `checkpoints`: define review points that should appear in the plan.
 - `step_outline`: provide a lightweight first-pass plan using capability-oriented steps.
 - `compiler_notes`: short factual notes about how the task was interpreted.
+
+Quality bar:
+
+- Prefer concrete goals over short generic summaries.
+- `success_criteria` and `output_contract` must be concrete enough to evaluate the first supervised trial.
+- `step_outline` should usually have at least 3 meaningful steps for non-trivial tasks.
+- Do not leave browser-oriented tasks without scene checkpoints unless the request is clearly non-interactive.

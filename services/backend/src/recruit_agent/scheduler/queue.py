@@ -169,17 +169,17 @@ class SqlAlchemyQueue:
         with self.session_factory() as session:
             TaskQueueRepository(session).mark_complete(task_id)
 
-    def mark_pending(self, task: TaskEnvelope) -> None:
+    def mark_pending(self, task: TaskEnvelope, *, error: str | None = None) -> None:
         from recruit_agent.repositories.domain import TaskQueueRepository
 
         with self.session_factory() as session:
-            TaskQueueRepository(session).mark_pending(task.task_id, attempts=task.attempts)
+            TaskQueueRepository(session).mark_pending(task.task_id, attempts=task.attempts, error=error)
 
-    def mark_failed(self, task_id: str) -> None:
+    def mark_failed(self, task_id: str, *, error: str | None = None) -> None:
         from recruit_agent.repositories.domain import TaskQueueRepository
 
         with self.session_factory() as session:
-            TaskQueueRepository(session).mark_failed(task_id)
+            TaskQueueRepository(session).mark_failed(task_id, error=error)
 
     def recover_stale(self, *, stale_after: timedelta | None = None) -> int:
         from recruit_agent.db.base import utcnow

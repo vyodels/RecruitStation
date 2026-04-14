@@ -1,7 +1,8 @@
-import { desktopMockSnapshot, desktopReplayMockByEpisode, desktopRuntimeMock, desktopSyncBacklogMock, desktopSyncStatusMock } from "./mockData";
+import { desktopAgentQueueMock, desktopMockSnapshot, desktopReplayMockByEpisode, desktopRuntimeMock, desktopSyncBacklogMock, desktopSyncStatusMock } from "./mockData";
 import type {
   ApprovalItem,
   AgentEvent,
+  AgentQueueItem,
   AgentSnapshot,
   AgentRunResult,
   AgentTaskEnqueueResult,
@@ -66,6 +67,7 @@ export interface DesktopApiClient {
   listApprovals(): Promise<ApprovalItem[]>;
   getSettings(): Promise<SettingsSnapshot>;
   getAgentSnapshot(): Promise<AgentSnapshot>;
+  listAgentQueue(): Promise<AgentQueueItem[]>;
   approveItem(id: string): Promise<void>;
   rejectItem(id: string, reason?: string): Promise<void>;
   updateSettings(settings: Partial<SettingsSnapshot>): Promise<SettingsSnapshot>;
@@ -148,6 +150,38 @@ function normalizeAgentSnapshot(raw: unknown): AgentSnapshot {
     queueDepth: Number(record.queueDepth ?? record.queue_depth ?? 0),
     tokenBudgetUsed: Number(record.tokenBudgetUsed ?? record.token_budget_used ?? 0),
     health: String(record.health ?? "warning") as AgentSnapshot["health"],
+  };
+}
+
+function normalizeAgentQueueItem(raw: unknown): AgentQueueItem {
+  const record = asRecord(raw);
+  return {
+    taskId: String(record.taskId ?? record.task_id ?? ""),
+    taskType: String(record.taskType ?? record.task_type ?? ""),
+    priority: Number(record.priority ?? 0),
+    status: String(record.status ?? "pending"),
+    attempts: Number(record.attempts ?? 0),
+    scheduledFor: record.scheduledFor ? String(record.scheduledFor) : record.scheduled_for ? String(record.scheduled_for) : null,
+    lockedAt: record.lockedAt ? String(record.lockedAt) : record.locked_at ? String(record.locked_at) : null,
+    lockedBy: record.lockedBy ? String(record.lockedBy) : record.locked_by ? String(record.locked_by) : null,
+    candidateId: record.candidateId ? String(record.candidateId) : record.candidate_id ? String(record.candidate_id) : null,
+    workflowId: record.workflowId ? String(record.workflowId) : record.workflow_id ? String(record.workflow_id) : null,
+    workflowNodeId: record.workflowNodeId ? String(record.workflowNodeId) : record.workflow_node_id ? String(record.workflow_node_id) : null,
+    payload: asRecord(record.payload),
+    queueAudit: asArray(record.queueAudit ?? record.queue_audit).map((entry) => {
+      const audit = asRecord(entry);
+      return {
+        kind: String(audit.kind ?? "unknown"),
+        at: String(audit.at ?? new Date().toISOString()),
+        status: audit.status ? String(audit.status) : null,
+        priority: audit.priority != null ? Number(audit.priority) : null,
+        attempts: audit.attempts != null ? Number(audit.attempts) : null,
+        lockedBy: audit.lockedBy ? String(audit.lockedBy) : audit.locked_by ? String(audit.locked_by) : null,
+        error: audit.error ? String(audit.error) : null,
+      };
+    }),
+    createdAt: String(record.createdAt ?? record.created_at ?? new Date().toISOString()),
+    updatedAt: String(record.updatedAt ?? record.updated_at ?? new Date().toISOString()),
   };
 }
 
@@ -244,18 +278,27 @@ function normalizeDomainPack(raw: unknown): DomainPackRecord {
     defaultConstraints: asRecord(record.defaultConstraints ?? record.default_constraints),
     defaultOutputContract: asRecord(record.defaultOutputContract ?? record.default_output_contract),
     templateKeys: asArray<string>(record.templateKeys ?? record.template_keys),
+    compilerHints: asArray<string>(record.compilerHints ?? record.compiler_hints),
+    qualityGates: asRecord(record.qualityGates ?? record.quality_gates),
+    sceneExpectations: asArray<string>(record.sceneExpectations ?? record.scene_expectations),
+    trialExpectations: asRecord(record.trialExpectations ?? record.trial_expectations),
+    templateCount: Number(record.templateCount ?? record.template_count ?? asArray(record.templateKeys ?? record.template_keys).length),
+    activeTemplateCount: Number(record.activeTemplateCount ?? record.active_template_count ?? 0),
   };
 }
 
 function normalizeRuntimeCompilerContract(raw: unknown): RuntimeCompilerContract {
   const record = asRecord(raw);
   return {
+    contractVersion: String(record.contractVersion ?? record.contract_version ?? "runtime-task-compiler-v3"),
     strategy: String(record.strategy ?? "llm_first_structured_semantic_compiler"),
     fallbackStrategy: String(record.fallbackStrategy ?? record.fallback_strategy ?? "heuristic"),
     promptAsset: String(record.promptAsset ?? record.prompt_asset ?? "tasks/runtime_task_compiler.md"),
     requiredFields: asArray<string>(record.requiredFields ?? record.required_fields),
     optionalFields: asArray<string>(record.optionalFields ?? record.optional_fields),
     invariants: asArray<string>(record.invariants),
+    qualityGates: asArray<string>(record.qualityGates ?? record.quality_gates),
+    repairPolicy: asRecord(record.repairPolicy ?? record.repair_policy),
     availableDomains: asArray(record.availableDomains ?? record.available_domains).map(normalizeDomainPack),
     availableCapabilities: asArray(record.availableCapabilities ?? record.available_capabilities).map(normalizeRuntimeCapabilityDriver),
   };
@@ -787,6 +830,34 @@ function normalizeSyncBacklogItem(raw: unknown): SyncBacklogItem {
     entityId,
     status: String(record.status ?? "pending"),
     attemptCount: Number(record.attemptCount ?? record.attempt_count ?? 0),
+    protocolVersion: record.protocolVersion
+      ? String(record.protocolVersion)
+      : record.protocol_version
+        ? String(record.protocol_version)
+        : payload.protocol_version
+          ? String(payload.protocol_version)
+          : null,
+    deliveryMode: record.deliveryMode
+      ? String(record.deliveryMode)
+      : record.delivery_mode
+        ? String(record.delivery_mode)
+        : delivery.mode
+          ? String(delivery.mode)
+          : null,
+    lastAttemptedAt: record.lastAttemptedAt
+      ? String(record.lastAttemptedAt)
+      : record.last_attempted_at
+        ? String(record.last_attempted_at)
+        : delivery.last_attempt_at
+          ? String(delivery.last_attempt_at)
+          : null,
+    nextAttemptAt: record.nextAttemptAt
+      ? String(record.nextAttemptAt)
+      : record.next_attempt_at
+        ? String(record.next_attempt_at)
+        : delivery.next_attempt_at
+          ? String(delivery.next_attempt_at)
+          : null,
     payloadSummary: record.payloadSummary
       ? String(record.payloadSummary)
       : record.payload_summary
@@ -807,6 +878,8 @@ function normalizeSyncBacklogItem(raw: unknown): SyncBacklogItem {
         : delivery.last_error
           ? String(delivery.last_error)
           : null,
+    payload,
+    targetMetadata: asRecord(payload.target),
     updatedAt: String(record.updatedAt ?? record.updated_at ?? new Date().toISOString()),
   };
 }
@@ -831,9 +904,21 @@ function normalizeSyncStatus(raw: unknown): SyncStatusSnapshot {
             : "remote_unavailable"
           : "local_only",
     remoteAvailable,
+    protocolVersion: record.protocolVersion ? String(record.protocolVersion) : record.protocol_version ? String(record.protocol_version) : null,
+    source: record.source ? String(record.source) : null,
+    target: asRecord(record.target),
     pendingCount: Number(record.pendingCount ?? record.pending_count ?? 0),
+    syncedCount: Number(record.syncedCount ?? record.synced_count ?? 0),
+    failedDeliveryCount: Number(record.failedDeliveryCount ?? record.failed_delivery_count ?? 0),
+    deferredCount: Number(record.deferredCount ?? record.deferred_count ?? 0),
+    backlogTotal: Number(record.backlogTotal ?? record.backlog_total ?? 0),
     lastAttemptAt: record.lastAttemptAt ? String(record.lastAttemptAt) : record.last_attempt_at ? String(record.last_attempt_at) : null,
     lastSuccessAt: record.lastSuccessAt ? String(record.lastSuccessAt) : record.last_success_at ? String(record.last_success_at) : null,
+    latestError: record.latestError ? String(record.latestError) : record.latest_error ? String(record.latest_error) : null,
+    nextAttemptAt: record.nextAttemptAt ? String(record.nextAttemptAt) : record.next_attempt_at ? String(record.next_attempt_at) : null,
+    byStatus: Object.fromEntries(
+      Object.entries(asRecord(record.byStatus ?? record.by_status)).map(([key, value]) => [key, Number(value ?? 0)]),
+    ),
     recentErrors,
   };
 }
@@ -1079,6 +1164,7 @@ function createFetchClient(baseUrl: string): DesktopApiClient {
     listApprovals: async () => normalizeDashboard(await requestJson<unknown>(baseUrl, "/api/dashboard")).approvals,
     getSettings: async () => normalizeSettings(await requestJson<unknown>(baseUrl, "/api/settings")),
     getAgentSnapshot: async () => normalizeAgentSnapshot(await requestJson<unknown>(baseUrl, "/api/agent")),
+    listAgentQueue: async () => asArray(await requestJson<unknown>(baseUrl, "/api/agent/queue")).map(normalizeAgentQueueItem),
     approveItem: async (id) => {
       await requestJson<unknown>(baseUrl, `/api/approvals/${id}/approve`, {
         method: "POST",
@@ -1318,6 +1404,7 @@ function createMockClient(): DesktopApiClient {
     listApprovals: async () => snapshot.approvals,
     getSettings: async () => snapshot.settings,
     getAgentSnapshot: async () => snapshot.agent,
+    listAgentQueue: async () => desktopAgentQueueMock,
     approveItem: async () => undefined,
     rejectItem: async () => undefined,
     updateSettings: async (settings) => ({ ...snapshot.settings, ...settings }),
@@ -1597,6 +1684,14 @@ export function createDesktopApiClient(baseUrl?: string): DesktopApiClient {
       return fetchClient.getAgentSnapshot().catch(async (error) => {
         if (isOfflineError(error)) {
           return desktopMockSnapshot.agent;
+        }
+        throw error;
+      });
+    },
+    async listAgentQueue() {
+      return fetchClient.listAgentQueue().catch(async (error) => {
+        if (isOfflineError(error) || isMissingEndpointError(error)) {
+          return desktopAgentQueueMock;
         }
         throw error;
       });

@@ -2,8 +2,8 @@ import { useEffect, useState } from "react";
 import { Panel, StatusBadge } from "../../components";
 import { apiClient } from "../../lib/api";
 import { formatCompactDate } from "../../lib/format";
-import { desktopMockSnapshot, desktopReplayMockByEpisode, desktopRuntimeMock, desktopSyncBacklogMock, desktopSyncStatusMock } from "../../lib/mockData";
-import type { AgentEvent, RuntimeEpisode, RuntimeEpisodeReplay, SyncBacklogItem, SyncStatusSnapshot } from "../../lib/types";
+import { desktopAgentQueueMock, desktopMockSnapshot, desktopReplayMockByEpisode, desktopRuntimeMock, desktopSyncBacklogMock, desktopSyncStatusMock } from "../../lib/mockData";
+import type { AgentEvent, AgentQueueItem, RuntimeEpisode, RuntimeEpisodeReplay, SyncBacklogItem, SyncStatusSnapshot } from "../../lib/types";
 import { AgentMonitorView } from "../agent-monitor/AgentMonitorView";
 
 function toAgentEventLevel(tone: "positive" | "neutral" | "warning" | "critical"): AgentEvent["level"] {
@@ -32,21 +32,24 @@ export function AgentMonitorPage() {
   const [replay, setReplay] = useState<RuntimeEpisodeReplay | null>(desktopReplayMockByEpisode["episode-001"]);
   const [syncStatus, setSyncStatus] = useState<SyncStatusSnapshot>(desktopSyncStatusMock);
   const [syncBacklog, setSyncBacklog] = useState<SyncBacklogItem[]>(desktopSyncBacklogMock);
+  const [queueItems, setQueueItems] = useState<AgentQueueItem[]>(desktopAgentQueueMock);
 
   const loadMonitor = async () => {
     setLoading(true);
     try {
-      const [nextSummary, nextAgent, nextEpisodes, nextSyncStatus, nextSyncBacklog] = await Promise.all([
+      const [nextSummary, nextAgent, nextEpisodes, nextSyncStatus, nextSyncBacklog, nextQueueItems] = await Promise.all([
         apiClient.getDashboardSummary(),
         apiClient.getAgentSnapshot(),
         apiClient.listRuntimeEpisodes(),
         apiClient.getSyncStatus(),
         apiClient.listSyncBacklog(),
+        apiClient.listAgentQueue(),
       ]);
       setAgent(nextAgent);
       setEpisodes(nextEpisodes);
       setSyncStatus(nextSyncStatus);
       setSyncBacklog(nextSyncBacklog);
+      setQueueItems(nextQueueItems);
       setSelectedEpisodeId((current) => current ?? nextEpisodes[0]?.id);
       const nextEvents: AgentEvent[] = [
         ...nextSummary.timeline.map((event) => ({
@@ -72,6 +75,7 @@ export function AgentMonitorPage() {
       setEpisodes(desktopRuntimeMock.episodes);
       setSyncStatus(desktopSyncStatusMock);
       setSyncBacklog(desktopSyncBacklogMock);
+      setQueueItems(desktopAgentQueueMock);
       setSelectedEpisodeId((current) => current ?? desktopRuntimeMock.episodes[0]?.id);
       setEvents([
         ...desktopMockSnapshot.timeline.map((event) => ({
@@ -197,6 +201,7 @@ export function AgentMonitorPage() {
           replay={replay}
           syncStatus={syncStatus}
           syncBacklog={syncBacklog}
+          queueItems={queueItems}
           runningAction={runningAction}
           syncingAction={syncingAction}
           onRunOnce={async () => {

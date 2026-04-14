@@ -26,12 +26,31 @@ export function DomainPacksView({ domainPacks }: DomainPacksViewProps): JSX.Elem
         >
           <div style={{ display: "grid", gap: "12px" }}>
             <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+              <StatusBadge tone="neutral">{pack.runtimeOnly ? "runtime only" : "packaged"}</StatusBadge>
+              <StatusBadge tone="neutral">
+                {pack.activeTemplateCount}/{pack.templateCount || pack.templateKeys.length} active templates
+              </StatusBadge>
               {pack.defaultCapabilities.map((capability) => (
                 <StatusBadge key={capability} tone="neutral">
                   {capability}
                 </StatusBadge>
               ))}
             </div>
+            {pack.compilerHints.length ? (
+              <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
+                Compiler hints: {pack.compilerHints.join(" · ")}
+              </div>
+            ) : null}
+            {pack.sceneExpectations.length ? (
+              <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
+                Scene expectations: {pack.sceneExpectations.join(" · ")}
+              </div>
+            ) : null}
+            {Object.keys(pack.qualityGates).length ? (
+              <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
+                Quality gates: {Object.entries(pack.qualityGates).map(([key, value]) => `${key}=${String(value)}`).join(" · ")}
+              </div>
+            ) : null}
             <div>
               <div style={{ color: theme.colors.muted, fontSize: "12px", textTransform: "uppercase", letterSpacing: "0.14em" }}>Sample tasks</div>
               <div style={{ display: "grid", gap: "8px", marginTop: "10px" }}>

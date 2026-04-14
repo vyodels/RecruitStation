@@ -186,15 +186,24 @@ class DomainPackRead(BaseModel):
     default_constraints: dict[str, Any] = Field(default_factory=dict)
     default_output_contract: dict[str, Any] = Field(default_factory=dict)
     template_keys: list[str] = Field(default_factory=list)
+    compiler_hints: list[str] = Field(default_factory=list)
+    quality_gates: dict[str, Any] = Field(default_factory=dict)
+    scene_expectations: list[str] = Field(default_factory=list)
+    trial_expectations: dict[str, Any] = Field(default_factory=dict)
+    template_count: int = 0
+    active_template_count: int = 0
 
 
 class TaskCompilerContractRead(BaseModel):
+    contract_version: str = "runtime-task-compiler-v3"
     strategy: str
     fallback_strategy: str
     prompt_asset: str
     required_fields: list[str] = Field(default_factory=list)
     optional_fields: list[str] = Field(default_factory=list)
     invariants: list[str] = Field(default_factory=list)
+    quality_gates: list[str] = Field(default_factory=list)
+    repair_policy: dict[str, Any] = Field(default_factory=dict)
     available_domains: list[DomainPackRead] = Field(default_factory=list)
     available_capabilities: list["CapabilityDriverRead"] = Field(default_factory=list)
 
@@ -763,7 +772,9 @@ class SyncBacklogRead(BaseModel):
     status: str
     attempt_count: int = 0
     last_attempted_at: datetime | None = None
+    next_attempt_at: datetime | None = None
     last_error: str | None = None
+    delivery_mode: str | None = None
     synced_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
@@ -780,18 +791,22 @@ class SyncStatusRead(BaseModel):
     pending_count: int = 0
     synced_count: int = 0
     failed_delivery_count: int = 0
+    deferred_count: int = 0
     backlog_total: int = 0
     by_status: dict[str, int] = Field(default_factory=dict)
     latest_error: str | None = None
+    next_attempt_at: datetime | None = None
 
 
 class SyncFlushRead(BaseModel):
     attempted: int = 0
     synced: int = 0
     failed: int = 0
+    deferred: int = 0
     pending: int = 0
     remote_available: bool = False
     target: dict[str, Any] = Field(default_factory=dict)
+    next_attempt_at: datetime | None = None
 
 
 class ApprovalBase(BaseModel):
@@ -1058,6 +1073,39 @@ class AgentRunRead(BaseModel):
     task_id: str | None = None
     enqueued_follow_ups: int = 0
     error: str | None = None
+
+
+class AgentQueueAuditEventRead(BaseModel):
+    kind: str
+    at: str
+    status: str | None = None
+    priority: int | None = None
+    attempts: int | None = None
+    locked_by: str | None = None
+    error: str | None = None
+
+
+class AgentQueueItemRead(BaseModel):
+    task_id: str
+    task_type: str
+    priority: int
+    status: str
+    attempts: int
+    scheduled_for: datetime | None = None
+    locked_at: datetime | None = None
+    locked_by: str | None = None
+    candidate_id: str | None = None
+    workflow_id: str | None = None
+    workflow_node_id: str | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+    queue_audit: list[AgentQueueAuditEventRead] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+
+
+class AgentQueueRecoveryRead(BaseModel):
+    recovered_count: int
+    by_status: dict[str, int] = Field(default_factory=dict)
 
 
 class TrialRunRequest(BaseModel):

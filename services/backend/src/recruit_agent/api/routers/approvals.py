@@ -242,6 +242,10 @@ def _promote_skill_draft(
     if not isinstance(execution_hints, dict):
         execution_hints = {}
 
+    version_governance = draft.get("version_governance")
+    if not isinstance(version_governance, dict):
+        version_governance = {}
+
     health_check_config = draft.get("health_check_config")
     if not isinstance(health_check_config, dict):
         health_check_config = {}
@@ -255,21 +259,46 @@ def _promote_skill_draft(
         or str(execution_hints.get("domain") or "").strip()
         or "runtime-scene"
     )
+    existing = repo.by_skill_id(skill_key)
+    next_version = int(existing.version) + 1 if existing is not None else 1
     defaults = {
         "skill_id": skill_key,
         "name": skill_name,
+        "version": next_version,
         "status": status,
         "platform": platform,
         "bound_to_workflow_node": draft.get("bound_to_workflow_node") or payload.get("workflow_node_id"),
-        "strategy": strategy,
-        "execution_hints": execution_hints,
-        "health_check_config": health_check_config,
+        "strategy": {
+            **strategy,
+            "version_governance": {
+                **dict(strategy.get("version_governance") or {}),
+                **version_governance,
+                "approved_by": reviewer,
+                "approved_reason": reason,
+                "approved_at": utcnow().isoformat(),
+            },
+        },
+        "execution_hints": {
+            **execution_hints,
+            "version_governance": {
+                **dict(execution_hints.get("version_governance") or {}),
+                **version_governance,
+                "skill_version": next_version,
+            },
+        },
+        "health_check_config": {
+            **health_check_config,
+            "version_governance": {
+                **dict(health_check_config.get("version_governance") or {}),
+                **version_governance,
+                "skill_version": next_version,
+            },
+        },
         "confirmed_by": reviewer,
         "confirmed_at": utcnow(),
         "last_health_status": reason or ("healthy" if status == "active" else "approved"),
     }
 
-    existing = repo.by_skill_id(skill_key)
     skill = repo.update(existing, defaults) if existing is not None else repo.create(defaults)
     if learning is not None:
         learning.consolidated_at = utcnow()

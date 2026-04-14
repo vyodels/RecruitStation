@@ -131,6 +131,34 @@ export interface AgentSnapshot {
   health: HealthStatus;
 }
 
+export interface AgentQueueAuditEvent {
+  kind: string;
+  at: string;
+  status?: string | null;
+  priority?: number | null;
+  attempts?: number | null;
+  lockedBy?: string | null;
+  error?: string | null;
+}
+
+export interface AgentQueueItem {
+  taskId: string;
+  taskType: string;
+  priority: number;
+  status: string;
+  attempts: number;
+  scheduledFor?: string | null;
+  lockedAt?: string | null;
+  lockedBy?: string | null;
+  candidateId?: string | null;
+  workflowId?: string | null;
+  workflowNodeId?: string | null;
+  payload: Record<string, unknown>;
+  queueAudit: AgentQueueAuditEvent[];
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface ProviderConfig {
   kind: ProviderKind;
   name: string;
@@ -211,15 +239,24 @@ export interface DomainPackRecord {
   defaultConstraints: Record<string, unknown>;
   defaultOutputContract: Record<string, unknown>;
   templateKeys: string[];
+  compilerHints: string[];
+  qualityGates: Record<string, unknown>;
+  sceneExpectations: string[];
+  trialExpectations: Record<string, unknown>;
+  templateCount: number;
+  activeTemplateCount: number;
 }
 
 export interface RuntimeCompilerContract {
+  contractVersion: string;
   strategy: string;
   fallbackStrategy: string;
   promptAsset: string;
   requiredFields: string[];
   optionalFields: string[];
   invariants: string[];
+  qualityGates: string[];
+  repairPolicy: Record<string, unknown>;
   availableDomains: DomainPackRecord[];
   availableCapabilities: RuntimeCapabilityDriver[];
 }
@@ -538,8 +575,14 @@ export interface SyncBacklogItem {
   entityId?: string | null;
   status: string;
   attemptCount: number;
+  protocolVersion?: string | null;
+  deliveryMode?: string | null;
+  lastAttemptedAt?: string | null;
+  nextAttemptAt?: string | null;
   payloadSummary?: string | null;
   lastError?: string | null;
+  payload?: Record<string, unknown>;
+  targetMetadata?: Record<string, unknown>;
   updatedAt: string;
 }
 
@@ -547,9 +590,19 @@ export interface SyncStatusSnapshot {
   enabled: boolean;
   mode: "local_only" | "remote_ready" | "remote_unavailable";
   remoteAvailable: boolean;
+  protocolVersion?: string | null;
+  source?: string | null;
+  target?: Record<string, unknown>;
   pendingCount: number;
+  syncedCount?: number;
+  failedDeliveryCount?: number;
+  deferredCount?: number;
+  backlogTotal?: number;
   lastAttemptAt?: string | null;
   lastSuccessAt?: string | null;
+  latestError?: string | null;
+  nextAttemptAt?: string | null;
+  byStatus?: Record<string, number>;
   recentErrors: string[];
 }
 

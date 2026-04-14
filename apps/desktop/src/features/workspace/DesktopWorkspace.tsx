@@ -1,10 +1,11 @@
 import React, { startTransition, useEffect, useMemo, useState } from "react";
 import { Panel, Sidebar, TopBar } from "../../components";
 import { apiClient } from "../../lib/api";
-import { desktopMockSnapshot, desktopReplayMockByEpisode, desktopRuntimeMock, desktopSyncBacklogMock, desktopSyncStatusMock } from "../../lib/mockData";
+import { desktopAgentQueueMock, desktopMockSnapshot, desktopReplayMockByEpisode, desktopRuntimeMock, desktopSyncBacklogMock, desktopSyncStatusMock } from "../../lib/mockData";
 import { theme } from "../../lib/theme";
 import type {
   AgentEvent,
+  AgentQueueItem,
   CompileTaskRequest,
   DashboardSummary,
   RuntimeEnvironmentAssessment,
@@ -83,6 +84,7 @@ export function DesktopWorkspace(): JSX.Element {
   const [selectedReplay, setSelectedReplay] = useState<RuntimeEpisodeReplay | null>(desktopReplayMockByEpisode["episode-001"]);
   const [syncStatus, setSyncStatus] = useState<SyncStatusSnapshot>(desktopSyncStatusMock);
   const [syncBacklog, setSyncBacklog] = useState<SyncBacklogItem[]>(desktopSyncBacklogMock);
+  const [queueItems, setQueueItems] = useState<AgentQueueItem[]>(desktopAgentQueueMock);
   const [syncingBacklog, setSyncingBacklog] = useState(false);
   const [transport, setTransport] = useState(apiClient.describe().transport);
   const [errorMessage, setErrorMessage] = useState<string>();
@@ -99,18 +101,20 @@ export function DesktopWorkspace(): JSX.Element {
   const loadWorkspace = async (reason?: string) => {
     setRefreshing(true);
     try {
-      const [nextSummary, nextRuntime, nextAgent, nextSyncStatus, nextSyncBacklog] = await Promise.all([
+      const [nextSummary, nextRuntime, nextAgent, nextSyncStatus, nextSyncBacklog, nextQueueItems] = await Promise.all([
         apiClient.getDashboardSummary(),
         apiClient.getRuntimeWorkspaceData(),
         apiClient.getAgentSnapshot(),
         apiClient.getSyncStatus(),
         apiClient.listSyncBacklog(),
+        apiClient.listAgentQueue(),
       ]);
       startTransition(() => {
         setSummary({ ...nextSummary, agent: nextAgent });
         setRuntimeData((current) => mergeRuntimeWorkspaceData(nextRuntime, current, lastAssessment, lastReplan));
         setSyncStatus(nextSyncStatus);
         setSyncBacklog(nextSyncBacklog);
+        setQueueItems(nextQueueItems);
       });
       setSelectedEpisodeId((current) => current ?? nextRuntime.episodes[0]?.id);
       setTransport("http");
@@ -130,6 +134,7 @@ export function DesktopWorkspace(): JSX.Element {
       setRuntimeData((current) => mergeRuntimeWorkspaceData(desktopRuntimeMock, current, lastAssessment, lastReplan));
       setSyncStatus(desktopSyncStatusMock);
       setSyncBacklog(desktopSyncBacklogMock);
+      setQueueItems(desktopAgentQueueMock);
       setSelectedReplay(desktopReplayMockByEpisode[selectedEpisodeId ?? "episode-001"] ?? desktopReplayMockByEpisode["episode-001"]);
       setErrorMessage(error instanceof Error ? error.message : "Failed to refresh workspace.");
       appendEvent({
@@ -148,12 +153,13 @@ export function DesktopWorkspace(): JSX.Element {
     let alive = true;
     void (async () => {
       try {
-        const [nextSummary, nextRuntime, nextAgent, nextSyncStatus, nextSyncBacklog] = await Promise.all([
+        const [nextSummary, nextRuntime, nextAgent, nextSyncStatus, nextSyncBacklog, nextQueueItems] = await Promise.all([
           apiClient.getDashboardSummary(),
           apiClient.getRuntimeWorkspaceData(),
           apiClient.getAgentSnapshot(),
           apiClient.getSyncStatus(),
           apiClient.listSyncBacklog(),
+          apiClient.listAgentQueue(),
         ]);
         if (!alive) {
           return;
@@ -162,6 +168,7 @@ export function DesktopWorkspace(): JSX.Element {
         setRuntimeData((current) => mergeRuntimeWorkspaceData(nextRuntime, current, lastAssessment, lastReplan));
         setSyncStatus(nextSyncStatus);
         setSyncBacklog(nextSyncBacklog);
+        setQueueItems(nextQueueItems);
         setSelectedEpisodeId((current) => current ?? nextRuntime.episodes[0]?.id);
         setTransport("http");
         setEvents((current) => [
@@ -581,6 +588,7 @@ export function DesktopWorkspace(): JSX.Element {
             replay={selectedReplay}
             syncStatus={syncStatus}
             syncBacklog={syncBacklog}
+            queueItems={queueItems}
             runningAction={runtimeActionBusy}
             syncingAction={syncingBacklog}
             onRunOnce={handleRunOnce}

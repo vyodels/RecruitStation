@@ -37,17 +37,17 @@ class SerialScheduler:
         if callable(mark_complete):
             mark_complete(task_id)
 
-    def _mark_pending(self, task: TaskEnvelope) -> None:
+    def _mark_pending(self, task: TaskEnvelope, *, error: str | None = None) -> None:
         mark_pending = getattr(self.queue, "mark_pending", None)
         if callable(mark_pending):
-            mark_pending(task)
+            mark_pending(task, error=error)
             return
         self.queue.put(task)
 
-    def _mark_failed(self, task_id: str) -> None:
+    def _mark_failed(self, task_id: str, *, error: str | None = None) -> None:
         mark_failed = getattr(self.queue, "mark_failed", None)
         if callable(mark_failed):
-            mark_failed(task_id)
+            mark_failed(task_id, error=error)
 
     def run_once(self) -> ScheduledOutcome | None:
         task = self.queue.get()
@@ -77,9 +77,9 @@ class SerialScheduler:
         except Exception as exc:  # pragma: no cover - defensive guard
             task.attempts += 1
             if task.attempts < self.max_attempts:
-                self._mark_pending(task)
+                self._mark_pending(task, error=str(exc))
             else:
-                self._mark_failed(task.task_id)
+                self._mark_failed(task.task_id, error=str(exc))
             outcome = ScheduledOutcome(
                 task=task,
                 result=AgentResult(success=False, status="failed", content=str(exc)),

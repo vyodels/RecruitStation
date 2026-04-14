@@ -27,6 +27,20 @@ class _StaticProvider:
         return self._response
 
 
+class _SequentialProvider:
+    def __init__(self, provider_name: str, responses) -> None:
+        self.provider_name = provider_name
+        self._responses = list(responses)
+        self._index = 0
+
+    def generate(self, messages, *, tools=None, task=None, max_tokens=None, temperature=None):
+        if self._index >= len(self._responses):
+            return self._responses[-1]
+        response = self._responses[self._index]
+        self._index += 1
+        return response
+
+
 @unittest.skipIf(TestClient is None, "FastAPI test dependencies are not installed")
 class ApiRuntimeTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -56,8 +70,11 @@ class ApiRuntimeTests(unittest.TestCase):
         compiler_contract = self.client.get("/api/runtime/compiler-contract")
         self.assertEqual(compiler_contract.status_code, 200)
         compiler_payload = compiler_contract.json()
+        self.assertEqual(compiler_payload["contract_version"], "runtime-task-compiler-v4")
         self.assertEqual(compiler_payload["strategy"], "llm_first_structured_semantic_compiler")
         self.assertIn("goal", compiler_payload["required_fields"])
+        self.assertGreaterEqual(len(compiler_payload["quality_gates"]), 1)
+        self.assertIn("max_repair_passes", compiler_payload["repair_policy"])
         self.assertTrue(any(item["key"] == "browser" for item in compiler_payload["available_capabilities"]))
 
         compiled_task = self.client.post(
@@ -73,9 +90,12 @@ class ApiRuntimeTests(unittest.TestCase):
         self.assertEqual(compiled_task.status_code, 201)
         compile_payload = compiled_task.json()
         self.assertEqual(compile_payload["domain_pack"]["key"], "web_research")
+        self.assertIn("quality_gates", compile_payload["domain_pack"])
+        self.assertIn("template_count", compile_payload["domain_pack"])
         task_spec_id = compile_payload["task_spec"]["id"]
         plan_id = compile_payload["execution_plan"]["id"]
         self.assertEqual(compile_payload["execution_plan"]["plan_body"]["steps"][1]["id"], "assess_runtime_scene")
+        self.assertIn("compiler_quality", compile_payload["task_spec"]["compiled_payload"])
         self.assertTrue(
             any(
                 checkpoint["label"] == "Validate runtime scene before proceeding"
@@ -120,11 +140,14 @@ class ApiRuntimeTests(unittest.TestCase):
         executed_payload = executed_trial.json()
         self.assertEqual(executed_payload["episode"]["status"], "awaiting_review")
         self.assertIsNotNone(executed_payload["template"])
+        self.assertIn("governance", executed_payload["template"]["activation_strategy"])
         self.assertIsNotNone(executed_payload["learning_draft"])
         self.assertIsNotNone(executed_payload["approval"])
         self.assertEqual(executed_payload["approval"]["target_type"], "skill_draft")
+        self.assertIn("version_governance", executed_payload["approval"]["payload"]["skill_draft"])
         self.assertIsNotNone(executed_payload["template_approval"])
         self.assertEqual(executed_payload["template_approval"]["target_type"], "template_candidate")
+        self.assertIn("governance", executed_payload["template_approval"]["payload"])
 
         confirmed_trial = self.client.post(
             f"/api/runtime/trial-runs/{episode_id}/confirm",
@@ -407,6 +430,8 @@ class ApiRuntimeTests(unittest.TestCase):
         payload = compiled_task.json()
         self.assertEqual(payload["domain_pack"]["key"], "market_news")
         self.assertEqual(payload["task_spec"]["compiled_payload"]["compiler"], "llm_structured")
+        self.assertIn("compiler_quality", payload["task_spec"]["compiled_payload"])
+        self.assertFalse(payload["task_spec"]["compiled_payload"]["compiler_quality"]["fallback_used"])
         self.assertEqual(payload["execution_plan"]["runtime_metadata"]["compiler"], "llm_structured")
         self.assertIn("openai_compatible", "\n".join(payload["compiler_notes"]))
 
@@ -429,8 +454,74 @@ class ApiRuntimeTests(unittest.TestCase):
         payload = compiled_task.json()
         self.assertEqual(payload["domain_pack"]["key"], "github_trends")
         self.assertEqual(payload["task_spec"]["compiled_payload"]["compiler"], "heuristic")
+        self.assertTrue(payload["task_spec"]["compiled_payload"]["compiler_quality"]["fallback_used"])
         self.assertIn("failed", "\n".join(payload["compiler_notes"]).lower())
         self.assertIn("fell back", "\n".join(payload["compiler_notes"]).lower())
+
+    def test_task_compile_repairs_schema_valid_but_quality_incomplete_llm_output(self) -> None:
+        from recruit_agent.runtime.models import LLMResponse
+
+        self.container.providers.providers["openai_compatible"] = _SequentialProvider(
+            "openai_compatible",
+            [
+                LLMResponse(
+                    content=json.dumps(
+                        {
+                            "title": "Daily market-moving headlines",
+                            "description": "Compile a fresh digest of market-moving news.",
+                            "goal": "Digest market news.",
+                            "domain": "market_news",
+                            "constraints": {"requires_source_links": True},
+                            "success_criteria": {},
+                            "approval_policy": {"mode": "desktop_review"},
+                            "output_contract": {"kind": "news_digest", "format": "bullet_summary"},
+                            "preferred_capabilities": ["search", "browser", "document"],
+                            "preferred_domains": ["market_news"],
+                            "compiler_notes": ["Initial compile omitted actionable checkpoints."],
+                        }
+                    )
+                ),
+                LLMResponse(
+                    content=json.dumps(
+                        {
+                            "title": "Daily market-moving headlines",
+                            "description": "Compile a fresh digest of market-moving news.",
+                            "goal": "Collect the newest market-moving headlines, compare them, and prepare a source-linked digest.",
+                            "domain": "market_news",
+                            "constraints": {"requires_source_links": True},
+                            "success_criteria": {"minimum_sources": 4, "include_market_impact": True},
+                            "approval_policy": {"mode": "desktop_review"},
+                            "output_contract": {"kind": "news_digest", "format": "bullet_summary"},
+                            "preferred_capabilities": ["search", "browser", "document", "llm"],
+                            "preferred_domains": ["market_news", "general"],
+                            "environment_requirements": {"requires_network": True, "scene_assessment_required": True},
+                            "checkpoints": [{"kind": "quality_gate", "label": "Verify source links before finalizing output"}],
+                            "step_outline": [
+                                {"id": "collect_headlines", "capability": "search"},
+                                {"id": "inspect_sources", "capability": "browser"},
+                                {"id": "draft_digest", "capability": "document"},
+                            ],
+                            "compiler_notes": ["Repair pass restored explicit checkpoints and step outline."],
+                        }
+                    )
+                ),
+            ],
+        )
+        self.container.providers.fallback_order = ["openai_compatible", "scripted_default"]
+
+        compiled_task = self.client.post(
+            "/api/runtime/task-specs/compile",
+            json={
+                "instruction": "Find today's most important stock market news and turn it into a short digest with sources.",
+            },
+        )
+        self.assertEqual(compiled_task.status_code, 201)
+        payload = compiled_task.json()
+        quality = payload["task_spec"]["compiled_payload"]["compiler_quality"]
+        self.assertEqual(payload["task_spec"]["compiled_payload"]["compiler"], "llm_structured")
+        self.assertEqual(quality["repair_count"], 1)
+        self.assertFalse(quality["fallback_used"])
+        self.assertIn("Verify source links before finalizing output", json.dumps(payload["task_spec"]["compiled_payload"]))
 
     def test_templates_and_workflow_patch_review_scaffold(self) -> None:
         created_task = self.client.post(

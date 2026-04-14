@@ -114,6 +114,55 @@ function formatConfidence(value: number): string {
   return `${Math.round(Math.max(0, Math.min(1, value)) * 100)}%`;
 }
 
+function compactRecordEntries(record: Record<string, unknown>, limit = 6): Array<[string, unknown]> {
+  return Object.entries(record).filter(([, value]) => value !== null && value !== undefined).slice(0, limit);
+}
+
+function compilerQualityTone(value: string | null): "positive" | "neutral" | "warning" | "critical" {
+  if (value === "accepted" || value === "high") {
+    return "positive";
+  }
+  if (value === "guardrailed" || value === "medium") {
+    return "warning";
+  }
+  if (value === "fallback" || value === "low") {
+    return "critical";
+  }
+  return "neutral";
+}
+
+function compiledQualitySummary(task: RuntimeTaskSpec): {
+  source: string | null;
+  qualityBand: string | null;
+  warnings: string[];
+  repairApplied: boolean;
+} {
+  const payload = task.compiledPayload ?? {};
+  const quality = typeof payload.compiler_quality === "object" && payload.compiler_quality !== null
+    ? (payload.compiler_quality as Record<string, unknown>)
+    : {};
+  return {
+    source: typeof payload.compiler_source === "string" ? payload.compiler_source : typeof payload.compiler === "string" ? payload.compiler : null,
+    qualityBand:
+      typeof quality.quality_status === "string"
+        ? quality.quality_status
+        : typeof quality.quality_band === "string"
+          ? quality.quality_band
+          : typeof payload.quality_status === "string"
+            ? String(payload.quality_status)
+            : typeof payload.quality_band === "string"
+              ? String(payload.quality_band)
+              : null,
+    warnings: Array.isArray(quality.warnings) ? quality.warnings.map(String) : [],
+    repairApplied:
+      typeof quality.repair_count === "number"
+        ? Number(quality.repair_count) > 0
+        : typeof payload.repair_count === "number"
+          ? Number(payload.repair_count) > 0
+          : Boolean(quality.repair_applied ?? payload.repair_applied ?? false),
+  };
+}
+
 export function RuntimeControlView({
   mode,
   data,
@@ -219,7 +268,27 @@ export function RuntimeControlView({
                   {capability}
                 </StatusBadge>
               ))}
+              {compiledQualitySummary(task).source ? <StatusBadge tone="neutral">compiler {compiledQualitySummary(task).source}</StatusBadge> : null}
+              {compiledQualitySummary(task).qualityBand ? (
+                <StatusBadge tone={compilerQualityTone(compiledQualitySummary(task).qualityBand)}>
+                  quality {compiledQualitySummary(task).qualityBand}
+                </StatusBadge>
+              ) : null}
+              {compiledQualitySummary(task).repairApplied ? <StatusBadge tone="warning">repair applied</StatusBadge> : null}
             </div>
+            {compactRecordEntries(task.outputContract, 4).length ? (
+              <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
+                Output contract:{" "}
+                {compactRecordEntries(task.outputContract, 4)
+                  .map(([key, value]) => `${key}=${typeof value === "string" ? value : summarizeJson(value)}`)
+                  .join(" · ")}
+              </div>
+            ) : null}
+            {compiledQualitySummary(task).warnings.length ? (
+              <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
+                Compiler warnings: {compiledQualitySummary(task).warnings.join(" · ")}
+              </div>
+            ) : null}
             {linkedPlan ? (
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px", flexWrap: "wrap" }}>
                 <div style={{ color: theme.colors.muted, fontSize: "13px" }}>
@@ -409,14 +478,27 @@ export function RuntimeControlView({
               <strong>{template.name}</strong>
               <div style={{ color: theme.colors.muted, fontSize: "13px", marginTop: "6px" }}>{template.validationSummary ?? "No validation summary yet."}</div>
             </div>
-            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-              <StatusBadge tone="neutral">{template.domain}</StatusBadge>
-              <StatusBadge tone={template.status === "active" ? "positive" : "warning"}>{template.status}</StatusBadge>
-            </div>
+          <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+            <StatusBadge tone="neutral">{template.domain}</StatusBadge>
+            <StatusBadge tone={template.status === "active" ? "positive" : "warning"}>{template.status}</StatusBadge>
+            {typeof template.activationStrategy.governance === "object" && template.activationStrategy.governance !== null ? (
+              <StatusBadge tone="neutral">
+                governance {String((template.activationStrategy.governance as Record<string, unknown>).episode_quality_band ?? "tracked")}
+              </StatusBadge>
+            ) : null}
+          </div>
           </div>
           <div style={{ color: theme.colors.muted, fontSize: "13px" }}>
             {Array.isArray(template.templateBody.steps) ? (template.templateBody.steps as unknown[]).length : 0} planned steps · v{template.version}
           </div>
+          {typeof template.activationStrategy.governance === "object" && template.activationStrategy.governance !== null ? (
+            <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
+              Governance:{" "}
+              {compactRecordEntries(template.activationStrategy.governance as Record<string, unknown>, 4)
+                .map(([key, value]) => `${key}=${typeof value === "string" ? value : summarizeJson(value)}`)
+                .join(" · ")}
+            </div>
+          ) : null}
         </article>
       ))}
     </div>
@@ -451,6 +533,11 @@ export function RuntimeControlView({
             <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
               <StatusBadge tone="neutral">{patch.patchKind}</StatusBadge>
               {patch.templateId ? <StatusBadge tone="neutral">template linked</StatusBadge> : null}
+              {patch.runtimeMetadata.episode_quality_band ? (
+                <StatusBadge tone={String(patch.runtimeMetadata.episode_quality_band) === "high" ? "positive" : "warning"}>
+                  quality {String(patch.runtimeMetadata.episode_quality_band)}
+                </StatusBadge>
+              ) : null}
             </div>
             {patch.status === "pending_review" ? (
               <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
@@ -473,6 +560,14 @@ export function RuntimeControlView({
               </div>
             ) : null}
           </div>
+          {compactRecordEntries(patch.runtimeMetadata, 5).length ? (
+            <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
+              Metadata:{" "}
+              {compactRecordEntries(patch.runtimeMetadata, 5)
+                .map(([key, value]) => `${key}=${typeof value === "string" ? value : summarizeJson(value)}`)
+                .join(" · ")}
+            </div>
+          ) : null}
         </article>
       ))}
     </div>
@@ -500,12 +595,46 @@ export function RuntimeControlView({
             <StatusBadge tone="neutral">{domain.key}</StatusBadge>
           </div>
           <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+            <StatusBadge tone={domain.maturity === "beta" ? "positive" : domain.maturity === "stable" ? "positive" : "warning"}>
+              {domain.maturity}
+            </StatusBadge>
+            <StatusBadge tone="neutral">v{domain.version}</StatusBadge>
+            <StatusBadge tone="neutral">{domain.runtimeOnly ? "runtime only" : "packaged"}</StatusBadge>
+            <StatusBadge tone="neutral">
+              {domain.activeTemplateCount}/{domain.templateCount || domain.templateKeys.length} active templates
+            </StatusBadge>
             {domain.defaultCapabilities.map((capability) => (
               <StatusBadge key={`${domain.key}-${capability}`} tone="neutral">
                 {capability}
               </StatusBadge>
             ))}
           </div>
+          {domain.compilerHints.length ? (
+            <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
+              Compiler hints: {domain.compilerHints.join(" · ")}
+            </div>
+          ) : null}
+          {domain.sceneExpectations.length ? (
+            <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
+              Scene expectations: {domain.sceneExpectations.join(" · ")}
+            </div>
+          ) : null}
+          {compactRecordEntries(domain.trialExpectations, 4).length ? (
+            <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
+              Trial expectations:{" "}
+              {compactRecordEntries(domain.trialExpectations, 4)
+                .map(([key, value]) => `${key}=${typeof value === "string" ? value : summarizeJson(value)}`)
+                .join(" · ")}
+            </div>
+          ) : null}
+          {compactRecordEntries(domain.qualityGates, 4).length ? (
+            <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
+              Quality gates:{" "}
+              {compactRecordEntries(domain.qualityGates, 4)
+                .map(([key, value]) => `${key}=${typeof value === "string" ? value : summarizeJson(value)}`)
+                .join(" · ")}
+            </div>
+          ) : null}
           {domain.sampleTasks.length ? (
             <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
               Example: {domain.sampleTasks[0]}
@@ -677,6 +806,19 @@ export function RuntimeControlView({
             Created {formatCompactDate(replan.createdAt)}
             {replan.environmentAssessment ? ` · Scene ${replan.environmentAssessment.sceneType}` : ""}
           </div>
+          {replan.compilerNotes.length ? (
+            <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
+              Compiler notes: {replan.compilerNotes.join(" · ")}
+            </div>
+          ) : null}
+          {replan.auditMetadata && compactRecordEntries(replan.auditMetadata, 4).length ? (
+            <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
+              Audit:{" "}
+              {compactRecordEntries(replan.auditMetadata, 4)
+                .map(([key, value]) => `${key}=${typeof value === "string" ? value : summarizeJson(value)}`)
+                .join(" · ")}
+            </div>
+          ) : null}
         </article>
       ))}
     </div>
@@ -844,6 +986,7 @@ export function RuntimeControlView({
               }}
             >
               <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                <StatusBadge tone="neutral">{data.compilerContract.contractVersion}</StatusBadge>
                 <StatusBadge tone="positive">{data.compilerContract.strategy}</StatusBadge>
                 <StatusBadge tone="warning">fallback: {data.compilerContract.fallbackStrategy}</StatusBadge>
                 <StatusBadge tone="neutral">{data.compilerContract.promptAsset}</StatusBadge>
@@ -851,6 +994,19 @@ export function RuntimeControlView({
               <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
                 Required fields: {data.compilerContract.requiredFields.join(", ")}
               </div>
+              {data.compilerContract.qualityGates.length ? (
+                <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
+                  Quality gates: {data.compilerContract.qualityGates.join(" · ")}
+                </div>
+              ) : null}
+              {compactRecordEntries(data.compilerContract.repairPolicy, 4).length ? (
+                <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
+                  Repair policy:{" "}
+                  {compactRecordEntries(data.compilerContract.repairPolicy, 4)
+                    .map(([key, value]) => `${key}=${typeof value === "string" ? value : summarizeJson(value)}`)
+                    .join(" · ")}
+                </div>
+              ) : null}
               <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
                 Invariants: {data.compilerContract.invariants.join(" ")}
               </div>
@@ -886,6 +1042,11 @@ export function RuntimeControlView({
             {lastOutcome.skillHealth ? (
               <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
                 Skill health: {String(lastOutcome.skillHealth.health ?? lastOutcome.skillHealth.status ?? "unknown")}
+              </div>
+            ) : null}
+            {lastOutcome.learningDraft?.tags?.length ? (
+              <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
+                Learning tags: {lastOutcome.learningDraft.tags.join(" · ")}
               </div>
             ) : null}
           </div>

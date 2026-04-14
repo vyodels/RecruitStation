@@ -82,6 +82,7 @@ class ApiWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(queued.status_code, 200)
         self.assertEqual(queued.json()["queue_depth"], 1)
+        task_id = queued.json()["task_id"]
 
         run_once = self.client.post("/api/agent/run-once")
         self.assertEqual(run_once.status_code, 200)
@@ -105,6 +106,16 @@ class ApiWorkflowTests(unittest.TestCase):
         direct_payload = direct_run.json()
         self.assertTrue(direct_payload["processed"])
         self.assertEqual(direct_payload["status"], "completed")
+
+        queue_snapshot = self.client.get("/api/agent/queue")
+        self.assertEqual(queue_snapshot.status_code, 200)
+        queue_item = next(item for item in queue_snapshot.json() if item["task_id"] == task_id)
+        self.assertIn(queue_item["status"], {"completed", "failed", "pending", "running"})
+        self.assertGreaterEqual(len(queue_item["queue_audit"]), 2)
+
+        recover = self.client.post("/api/agent/queue/recover")
+        self.assertEqual(recover.status_code, 200)
+        self.assertIsInstance(recover.json()["by_status"], dict)
 
     def test_runtime_skill_draft_persists_learning_and_approval(self) -> None:
         from recruit_agent.runtime.models import LLMResponse
