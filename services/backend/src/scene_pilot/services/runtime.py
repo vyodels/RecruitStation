@@ -67,6 +67,7 @@ from scene_pilot.runtime.agent_loop import AgentLoop, AgentLoopConfig
 from scene_pilot.runtime.models import AgentResult, Message
 from scene_pilot.runtime.providers import ProviderError, ProviderRegistry, ScriptedProvider
 from scene_pilot.runtime.prompts import PromptBuilder
+from scene_pilot.runtime.result_semantics import extract_business_status
 from scene_pilot.runtime.tools import ToolRegistry
 from scene_pilot.services.skills import SkillHealthCheckService
 
@@ -78,6 +79,18 @@ def _json_default(value: Any) -> Any:
     if callable(isoformat):
         return isoformat()
     return str(value)
+
+
+_GENERIC_EXECUTION_RESULT_STATUSES = {
+    "completed",
+    "complete",
+    "success",
+    "ok",
+    "done",
+    "result",
+    "default",
+    "succeeded",
+}
 
 
 def _json_ready(value: Any) -> Any:
@@ -503,6 +516,7 @@ class PersistedRuntimeService:
     providers: ProviderRegistry | None = None
     tools: ToolRegistry | None = None
     prompt_builder: PromptBuilder = field(default_factory=PromptBuilder)
+    allow_heuristic_fallback: bool = False
 
     def list_domain_packs(self) -> list[DomainPackRead]:
         return [self._domain_pack_read(key, config) for key, config in DOMAIN_PACKS.items()]
@@ -511,7 +525,7 @@ class PersistedRuntimeService:
         return TaskCompilerContractRead(
             contract_version="runtime-task-compiler-v4",
             strategy="llm_first_structured_semantic_compiler",
-            fallback_strategy="heuristic_domain_and_capability_inference",
+            fallback_strategy="heuristic_domain_and_capability_inference" if self.allow_heuristic_fallback else "none",
             prompt_asset="tasks/runtime_task_compiler.md",
             required_fields=[
                 "goal",
@@ -533,7 +547,7 @@ class PersistedRuntimeService:
             invariants=[
                 "The compiler must not assume any fixed site integration during development time.",
                 "The compiler must emit a structured task contract before execution begins.",
-                "If LLM compilation fails or produces invalid JSON, the runtime records explicit fallback notes.",
+                "LLM task compilation is mandatory unless heuristic fallback is explicitly enabled by runtime policy.",
                 "Write-oriented actions must remain approval-aware even when inferred at compile time.",
             ],
             quality_gates=[
@@ -549,7 +563,7 @@ class PersistedRuntimeService:
                     "schema_validation_error",
                     "critical_quality_gap",
                 ],
-                "fallback_on_failure": "heuristic_domain_and_capability_inference",
+                "fallback_on_failure": "heuristic_domain_and_capability_inference" if self.allow_heuristic_fallback else "none",
             },
             available_domains=self.list_domain_packs(),
             available_capabilities=self.list_capability_drivers(),
@@ -708,6 +722,42 @@ class PersistedRuntimeService:
             assessment_notes=assessment_notes,
             audit_metadata=audit_metadata,
         )
+
+    def list_environment_assessments(
+        self,
+        *,
+        execution_plan_id: str | None = None,
+        task_spec_id: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[EnvironmentAssessmentRead]:
+        plan_repo = ExecutionPlanRepository(self.session)
+        episode_repo = ExecutionEpisodeRepository(self.session)
+        snapshot_repo = EnvironmentSnapshotRepository(self.session)
+
+        plans = (
+            plan_repo.by_task_spec(task_spec_id, limit=limit, offset=offset)
+            if task_spec_id
+            else plan_repo.list(limit=limit, offset=offset)
+        )
+        if execution_plan_id is not None:
+            plans = [plan for plan in plans if plan.id == execution_plan_id]
+
+        assessments: list[EnvironmentAssessmentRead] = []
+        for plan in plans:
+            latest_episode = next(iter(episode_repo.by_plan(plan.id, limit=1, offset=0)), None)
+            latest_snapshot = snapshot_repo.latest_for_episode(latest_episode.id) if latest_episode is not None else None
+            assessments.append(
+                self.assess_environment(
+                    EnvironmentAssessmentRequest(
+                        task_spec_id=plan.task_spec_id,
+                        execution_plan_id=plan.id,
+                        execution_episode_id=latest_episode.id if latest_episode is not None else None,
+                        environment_snapshot_id=latest_snapshot.id if latest_snapshot is not None else None,
+                    )
+                )
+            )
+        return assessments
 
     def replan_execution(self, plan_id: str, payload: ExecutionPlanReplanRequest) -> ExecutionPlanReplanRead:
         plan_repo = ExecutionPlanRepository(self.session)
@@ -979,14 +1029,18 @@ class PersistedRuntimeService:
         )
 
     def _compile_task_spec(self, payload: TaskCompileRequest) -> CompiledTaskDraft:
-        llm_draft = self._compile_task_spec_with_llm(payload)
+        llm_draft, llm_errors = self._compile_task_spec_with_llm(payload)
         if llm_draft is not None:
             return llm_draft
-        return self._compile_task_spec_heuristic(payload)
+        if self.allow_heuristic_fallback:
+            return self._compile_task_spec_heuristic(payload, notes=llm_errors)
+        if llm_errors:
+            raise ValueError("LLM task compiler failed: " + " ".join(llm_errors))
+        raise ValueError("LLM task compiler is required, but no configured non-scripted provider is available.")
 
-    def _compile_task_spec_with_llm(self, payload: TaskCompileRequest) -> CompiledTaskDraft | None:
+    def _compile_task_spec_with_llm(self, payload: TaskCompileRequest) -> tuple[CompiledTaskDraft | None, list[str]]:
         if self.providers is None:
-            return None
+            return None, ["No provider registry is configured for semantic task compilation."]
 
         errors: list[str] = []
         for provider_name in self._semantic_compiler_provider_names():
@@ -1021,13 +1075,16 @@ class PersistedRuntimeService:
                     )
                 compiler_notes = list(draft.compiler_notes or [])
                 compiler_notes.append(f"Semantic task compiler succeeded via provider: {provider_name}.")
-                return self._materialize_compiled_task_draft(
-                    payload=payload,
-                    draft=draft,
-                    compiler_name="llm_structured",
-                    compiler_notes=compiler_notes,
-                    provider_name=provider_name,
-                    quality_warnings=list(quality_review["warnings"]),
+                return (
+                    self._materialize_compiled_task_draft(
+                        payload=payload,
+                        draft=draft,
+                        compiler_name="llm_structured",
+                        compiler_notes=compiler_notes,
+                        provider_name=provider_name,
+                        quality_warnings=list(quality_review["warnings"]),
+                    ),
+                    [],
                 )
             except (ValidationError, ValueError, json.JSONDecodeError) as exc:
                 if response is None:
@@ -1055,14 +1112,17 @@ class PersistedRuntimeService:
                     compiler_notes.append(
                         f"Semantic task compiler succeeded via provider: {provider_name} after one repair pass."
                     )
-                    return self._materialize_compiled_task_draft(
-                        payload=payload,
-                        draft=draft,
-                        compiler_name="llm_structured",
-                        compiler_notes=compiler_notes,
-                        provider_name=provider_name,
-                        quality_warnings=list(quality_review["warnings"]),
-                        repair_count=1,
+                    return (
+                        self._materialize_compiled_task_draft(
+                            payload=payload,
+                            draft=draft,
+                            compiler_name="llm_structured",
+                            compiler_notes=compiler_notes,
+                            provider_name=provider_name,
+                            quality_warnings=list(quality_review["warnings"]),
+                            repair_count=1,
+                        ),
+                        [],
                     )
                 except (ProviderError, ValidationError, ValueError, json.JSONDecodeError) as repair_exc:
                     errors.append(
@@ -1073,8 +1133,8 @@ class PersistedRuntimeService:
                 errors.append(f"LLM semantic compiler via {provider_name} failed: {exc}.")
 
         if not errors:
-            return None
-        return self._compile_task_spec_heuristic(payload, notes=errors)
+            errors.append("No configured non-scripted provider is available for semantic task compilation.")
+        return None, errors
 
     def _compile_task_spec_heuristic(
         self,
@@ -4285,10 +4345,24 @@ class PersistedRuntimeService:
         episode_runtime_metadata = dict(episode.runtime_metadata or {})
         final_result_data = episode_runtime_metadata.get("final_result_data")
         observed_result = dict(final_result_data) if isinstance(final_result_data, dict) else {}
-        if "status" not in observed_result:
+        final_result_status = episode_runtime_metadata.get("final_result_status")
+        final_result_success = episode_runtime_metadata.get("final_result_success")
+        business_status = extract_business_status(observed_result)
+        normalized_business_status = business_status.lower() if isinstance(business_status, str) else None
+        if business_status and normalized_business_status not in _GENERIC_EXECUTION_RESULT_STATUSES:
+            observed_result["status"] = business_status
+        elif isinstance(final_result_success, bool):
+            observed_result["status"] = "pass" if final_result_success and not episode.divergence_detected else "fail"
+        elif isinstance(final_result_status, str) and final_result_status.strip():
+            observed_result["status"] = final_result_status.strip()
+        elif "status" not in observed_result:
             observed_result["status"] = "pass" if not episode.divergence_detected else "fail"
         if "overall" not in observed_result and "score" not in observed_result:
-            observed_result["overall"] = float((episode.metrics or {}).get("completion_rate") or 0.0)
+            completion_rate = float((episode.metrics or {}).get("completion_rate") or 0.0)
+            if isinstance(final_result_success, bool):
+                observed_result["overall"] = 1.0 if final_result_success and not episode.divergence_detected else completion_rate
+            else:
+                observed_result["overall"] = completion_rate
         result = SkillHealthCheckService().run(skill, observed_result=observed_result)
         self.session.commit()
         self.session.refresh(skill)

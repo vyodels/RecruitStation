@@ -41,6 +41,70 @@ class _SequentialProvider:
         return response
 
 
+class _SemanticCompileProvider:
+    provider_name = "openai_compatible"
+
+    def generate(self, messages, *, tools=None, task=None, max_tokens=None, temperature=None):
+        from scene_pilot.runtime.models import LLMResponse
+
+        instruction = str((task or {}).get("instruction") or "")
+        lowered = instruction.lower()
+        domain = "general"
+        capabilities = ["analyze", "browser", "llm", "document"]
+        output_contract = {"kind": "summary", "format": "markdown"}
+        success_criteria = {"supervised_trial_ready": True}
+        environment_requirements = {"requires_browser": "browser" in capabilities}
+        checkpoints = [{"label": "Validate runtime scene before proceeding", "kind": "scene_assessment"}]
+        step_outline = [
+            {"id": "understand_task", "capability": "analyze"},
+            {"id": "assess_runtime_scene", "capability": "browser"},
+            {"id": "synthesize_result", "capability": "document"},
+        ]
+        notes = ["Semantic compile provider generated a structured task draft for tests."]
+
+        if "pdf" in lowered:
+            domain = "web_research"
+            capabilities = ["search", "browser", "http", "llm", "document"]
+            output_contract = {"kind": "shortlist", "format": "markdown", "minimum_candidates": 3}
+            success_criteria = {"minimum_candidates": 3, "requires_comparison": True}
+        elif "market" in lowered or "stock" in lowered or "digest" in lowered:
+            domain = "market_news"
+            capabilities = ["search", "http", "browser", "llm", "document"]
+            output_contract = {"kind": "digest", "format": "markdown", "include_sources": True}
+            success_criteria = {"minimum_sources": 3, "include_market_impact": True}
+        elif "github" in lowered:
+            domain = "github_trends"
+            capabilities = ["http", "browser", "llm", "document"]
+            output_contract = {"kind": "digest", "format": "markdown", "include_repo_links": True}
+            success_criteria = {"minimum_candidates": 3, "requires_comparison": True}
+        elif "candidate" in lowered or "resume" in lowered or "候选人" in instruction or "简历" in instruction:
+            domain = "recruiting"
+            capabilities = ["browser", "search", "document", "llm", "api"]
+            output_contract = {"kind": "screening_packet", "format": "markdown", "include_score": True}
+            success_criteria = {"requires_candidate_evidence": True, "requires_score": True}
+
+        environment_requirements = {"requires_browser": "browser" in capabilities}
+        return LLMResponse(
+            result_data={
+                "title": instruction[:48] or "Compiled task",
+                "description": f"Structured compile for: {instruction}",
+                "goal": instruction or "Complete the requested automation task.",
+                "domain": domain,
+                "inputs": {},
+                "constraints": {"requires_supervised_trial": True},
+                "success_criteria": success_criteria,
+                "approval_policy": {"approval_actions": ["write", "outbound", "command"]},
+                "output_contract": output_contract,
+                "preferred_capabilities": capabilities,
+                "preferred_domains": [domain, "general"],
+                "environment_requirements": environment_requirements,
+                "checkpoints": checkpoints,
+                "step_outline": step_outline,
+                "compiler_notes": notes,
+            }
+        )
+
+
 @unittest.skipIf(TestClient is None, "FastAPI test dependencies are not installed")
 class ApiRuntimeTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -53,6 +117,8 @@ class ApiRuntimeTests(unittest.TestCase):
         self.client = TestClient(create_app())
         self.client.__enter__()
         self.container = self.client.app.state.container
+        self.container.providers.providers["openai_compatible"] = _SemanticCompileProvider()
+        self.container.providers.fallback_order = ["openai_compatible", "scripted_default"]
         self._load_settings = load_settings
 
     def tearDown(self) -> None:
@@ -249,6 +315,11 @@ class ApiRuntimeTests(unittest.TestCase):
         self.assertEqual(assessment_payload["audit_metadata"]["site_assumption_policy"], "generic_only")
         self.assertEqual(assessment_payload["snapshot"]["id"], snapshot_id)
 
+        listed_assessments = self.client.get(f"/api/runtime/environment-assessments?execution_plan_id={plan_id}")
+        self.assertEqual(listed_assessments.status_code, 200)
+        self.assertGreaterEqual(len(listed_assessments.json()), 1)
+        self.assertEqual(listed_assessments.json()[0]["execution_plan"]["id"], plan_id)
+
     def test_replan_derives_new_execution_plan_from_episode_and_compiler_payload(self) -> None:
         compiled_task = self.client.post(
             "/api/runtime/task-specs/compile",
@@ -435,7 +506,7 @@ class ApiRuntimeTests(unittest.TestCase):
         self.assertEqual(payload["execution_plan"]["runtime_metadata"]["compiler"], "llm_structured")
         self.assertIn("openai_compatible", "\n".join(payload["compiler_notes"]))
 
-    def test_task_compile_falls_back_to_heuristic_when_llm_output_is_invalid(self) -> None:
+    def test_task_compile_fails_when_llm_output_is_invalid(self) -> None:
         from scene_pilot.runtime.models import LLMResponse
 
         self.container.providers.providers["openai_compatible"] = _StaticProvider(
@@ -450,13 +521,8 @@ class ApiRuntimeTests(unittest.TestCase):
                 "instruction": "Open GitHub trending and prepare a repository digest.",
             },
         )
-        self.assertEqual(compiled_task.status_code, 201)
-        payload = compiled_task.json()
-        self.assertEqual(payload["domain_pack"]["key"], "github_trends")
-        self.assertEqual(payload["task_spec"]["compiled_payload"]["compiler"], "heuristic")
-        self.assertTrue(payload["task_spec"]["compiled_payload"]["compiler_quality"]["fallback_used"])
-        self.assertIn("failed", "\n".join(payload["compiler_notes"]).lower())
-        self.assertIn("fell back", "\n".join(payload["compiler_notes"]).lower())
+        self.assertEqual(compiled_task.status_code, 400)
+        self.assertIn("llm task compiler failed", compiled_task.json()["detail"].lower())
 
     def test_task_compile_repairs_schema_valid_but_quality_incomplete_llm_output(self) -> None:
         from scene_pilot.runtime.models import LLMResponse
@@ -755,6 +821,18 @@ class ApiRuntimeTests(unittest.TestCase):
     def test_launch_managed_runtime_execution_through_queue_and_finalize_learning(self) -> None:
         from scene_pilot.runtime.models import LLMResponse, ToolCall
 
+        compiled_task = self.client.post(
+            "/api/runtime/task-specs/compile",
+            json={
+                "instruction": "Open the web, inspect the tool listing, and prepare a shortlist.",
+                "title": "Managed runtime execution",
+                "preferred_capabilities": ["browser", "document"],
+            },
+        )
+        self.assertEqual(compiled_task.status_code, 201)
+        task_spec_id = compiled_task.json()["task_spec"]["id"]
+        plan_id = compiled_task.json()["execution_plan"]["id"]
+
         self.container.providers.providers["openai_compatible"] = _SequentialProvider(
             "openai_compatible",
             [
@@ -811,18 +889,6 @@ class ApiRuntimeTests(unittest.TestCase):
         )
         self.container.providers.fallback_order = ["openai_compatible", "scripted_default"]
 
-        compiled_task = self.client.post(
-            "/api/runtime/task-specs/compile",
-            json={
-                "instruction": "Open the web, inspect the tool listing, and prepare a shortlist.",
-                "title": "Managed runtime execution",
-                "preferred_capabilities": ["browser", "document"],
-            },
-        )
-        self.assertEqual(compiled_task.status_code, 201)
-        task_spec_id = compiled_task.json()["task_spec"]["id"]
-        plan_id = compiled_task.json()["execution_plan"]["id"]
-
         launch = self.client.post(
             f"/api/runtime/plans/{plan_id}/enqueue",
             json={
@@ -870,6 +936,19 @@ class ApiRuntimeTests(unittest.TestCase):
     def test_managed_runtime_execution_replans_and_enqueues_follow_up_task(self) -> None:
         from scene_pilot.runtime.models import LLMResponse, ToolCall
 
+        compiled_task = self.client.post(
+            "/api/runtime/task-specs/compile",
+            json={
+                "instruction": "Open the web app, inspect the live detail page, and keep the summary current.",
+                "title": "Managed runtime replan",
+                "preferred_capabilities": ["browser", "document"],
+            },
+        )
+        self.assertEqual(compiled_task.status_code, 201)
+        task_spec_id = compiled_task.json()["task_spec"]["id"]
+        plan_id = compiled_task.json()["execution_plan"]["id"]
+        base_version = compiled_task.json()["execution_plan"]["version"]
+
         self.container.providers.providers["openai_compatible"] = _SequentialProvider(
             "openai_compatible",
             [
@@ -900,19 +979,6 @@ class ApiRuntimeTests(unittest.TestCase):
             ],
         )
         self.container.providers.fallback_order = ["openai_compatible", "scripted_default"]
-
-        compiled_task = self.client.post(
-            "/api/runtime/task-specs/compile",
-            json={
-                "instruction": "Open the web app, inspect the live detail page, and keep the summary current.",
-                "title": "Managed runtime replan",
-                "preferred_capabilities": ["browser", "document"],
-            },
-        )
-        self.assertEqual(compiled_task.status_code, 201)
-        task_spec_id = compiled_task.json()["task_spec"]["id"]
-        plan_id = compiled_task.json()["execution_plan"]["id"]
-        base_version = compiled_task.json()["execution_plan"]["version"]
 
         launch = self.client.post(
             f"/api/runtime/plans/{plan_id}/enqueue",

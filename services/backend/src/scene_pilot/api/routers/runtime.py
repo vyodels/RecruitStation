@@ -351,6 +351,24 @@ def assess_environment(
         _raise_runtime_http_error(exc)
 
 
+@router.get("/environment-assessments", response_model=list[EnvironmentAssessmentRead])
+@router.get("/environment-assessment", response_model=list[EnvironmentAssessmentRead])
+@router.get("/scene-assessment", response_model=list[EnvironmentAssessmentRead])
+def list_environment_assessments(
+    execution_plan_id: str | None = Query(default=None),
+    task_spec_id: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    service: PersistedRuntimeService = Depends(get_runtime_service),
+) -> list[EnvironmentAssessmentRead]:
+    return service.list_environment_assessments(
+        execution_plan_id=execution_plan_id,
+        task_spec_id=task_spec_id,
+        limit=limit,
+        offset=offset,
+    )
+
+
 @router.get("/templates", response_model=list[WorkflowTemplateRead])
 def list_workflow_templates(
     domain: str | None = Query(default=None),

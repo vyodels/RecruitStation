@@ -294,7 +294,7 @@ function normalizeRuntimeCompilerContract(raw: unknown): RuntimeCompilerContract
   return {
     contractVersion: String(record.contractVersion ?? record.contract_version ?? "runtime-task-compiler-v3"),
     strategy: String(record.strategy ?? "llm_first_structured_semantic_compiler"),
-    fallbackStrategy: String(record.fallbackStrategy ?? record.fallback_strategy ?? "heuristic"),
+    fallbackStrategy: String(record.fallbackStrategy ?? record.fallback_strategy ?? "none"),
     promptAsset: String(record.promptAsset ?? record.prompt_asset ?? "tasks/runtime_task_compiler.md"),
     requiredFields: asArray<string>(record.requiredFields ?? record.required_fields),
     optionalFields: asArray<string>(record.optionalFields ?? record.optional_fields),
@@ -1259,25 +1259,41 @@ function createFetchClient(baseUrl: string): DesktopApiClient {
         }),
       ),
     subscribeToAgentStream(onEvent) {
-      const socket = new WebSocket(resolveWebSocketUrl(baseUrl));
-      socket.addEventListener("message", (event) => {
-        try {
-          const payload = JSON.parse(String(event.data)) as JsonRecord;
-          if (payload.type === "heartbeat") {
-            return;
-          }
-          onEvent({
-            id: String(payload.id ?? `stream-${Date.now()}`),
-            level: String(payload.level ?? "info") as AgentEvent["level"],
-            source: String(payload.source ?? "agent"),
-            message: String(payload.message ?? ""),
-            at: String(payload.at ?? new Date().toISOString()),
-          });
-        } catch {
+      let disposed = false;
+      let socket: WebSocket | null = null;
+      const timer = window.setTimeout(() => {
+        if (disposed) {
           return;
         }
-      });
-      return () => socket.close();
+        socket = new WebSocket(resolveWebSocketUrl(baseUrl));
+        socket.addEventListener("message", (event) => {
+          try {
+            const payload = JSON.parse(String(event.data)) as JsonRecord;
+            if (payload.type === "heartbeat") {
+              return;
+            }
+            onEvent({
+              id: String(payload.id ?? `stream-${Date.now()}`),
+              level: String(payload.level ?? "info") as AgentEvent["level"],
+              source: String(payload.source ?? "agent"),
+              message: String(payload.message ?? ""),
+              at: String(payload.at ?? new Date().toISOString()),
+            });
+          } catch {
+            return;
+          }
+        });
+        socket.addEventListener("error", () => {
+          return;
+        });
+      }, 0);
+      return () => {
+        disposed = true;
+        window.clearTimeout(timer);
+        if (socket !== null && socket.readyState < WebSocket.CLOSING) {
+          socket.close();
+        }
+      };
     },
   };
 }
@@ -1532,12 +1548,7 @@ export function createDesktopApiClient(baseUrl?: string): DesktopApiClient {
       });
     },
     async compileRuntimeTask(payload) {
-      return fetchClient.compileRuntimeTask(payload).catch(async (error) => {
-        if (isOfflineError(error)) {
-          return createMockClient().compileRuntimeTask(payload);
-        }
-        throw error;
-      });
+      return fetchClient.compileRuntimeTask(payload);
     },
     async listRuntimePlans() {
       return fetchClient.listRuntimePlans().catch(async (error) => {

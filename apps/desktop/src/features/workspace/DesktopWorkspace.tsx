@@ -81,7 +81,7 @@ export function DesktopWorkspace(): JSX.Element {
   const [busyPatchId, setBusyPatchId] = useState<string>();
   const [busyPlanId, setBusyPlanId] = useState<string>();
   const [selectedEpisodeId, setSelectedEpisodeId] = useState<string>();
-  const [selectedReplay, setSelectedReplay] = useState<RuntimeEpisodeReplay | null>(desktopReplayMockByEpisode["episode-001"]);
+  const [selectedReplay, setSelectedReplay] = useState<RuntimeEpisodeReplay | null>(null);
   const [syncStatus, setSyncStatus] = useState<SyncStatusSnapshot>(desktopSyncStatusMock);
   const [syncBacklog, setSyncBacklog] = useState<SyncBacklogItem[]>(desktopSyncBacklogMock);
   const [queueItems, setQueueItems] = useState<AgentQueueItem[]>(desktopAgentQueueMock);
@@ -215,7 +215,7 @@ export function DesktopWorkspace(): JSX.Element {
   }, []);
 
   useEffect(() => {
-    const episodeId = selectedEpisodeId ?? runtimeData.episodes[0]?.id;
+    const episodeId = selectedEpisodeId;
     if (!episodeId) {
       setSelectedReplay(null);
       return;
@@ -320,6 +320,7 @@ export function DesktopWorkspace(): JSX.Element {
     setRuntimeActionBusy(true);
     try {
       const result = await apiClient.compileRuntimeTask(request);
+      setErrorMessage(undefined);
       appendEvent({
         id: `compile-${Date.now()}`,
         level: "success",
@@ -328,6 +329,16 @@ export function DesktopWorkspace(): JSX.Element {
         at: new Date().toISOString(),
       });
       await loadWorkspace(`Compiled task ${result.taskSpec.title}.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Task compilation failed.";
+      setErrorMessage(message);
+      appendEvent({
+        id: `compile-error-${Date.now()}`,
+        level: "warning",
+        source: "compiler",
+        message,
+        at: new Date().toISOString(),
+      });
     } finally {
       setRuntimeActionBusy(false);
     }
