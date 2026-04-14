@@ -30,6 +30,11 @@ export function SettingsView({ settings, saving, onSave }: SettingsViewProps): J
         <div style={{ display: "grid", gap: "10px" }}>
           <StatusBadge tone={draft.desktopApprovalsOnly ? "warning" : "neutral"}>{draft.desktopApprovalsOnly ? "desktop approvals only" : "mixed approvals"}</StatusBadge>
           <StatusBadge tone={draft.intranetEnabled ? "positive" : "neutral"}>{draft.intranetEnabled ? "intranet sync enabled" : "no intranet sync"}</StatusBadge>
+          <StatusBadge tone={draft.skillHealthAutonomyEnabled ? "positive" : "neutral"}>
+            {draft.skillHealthAutonomyEnabled
+              ? `skill health autonomy every ${draft.skillHealthAutonomyIntervalSeconds}s`
+              : "skill health autonomy idle"}
+          </StatusBadge>
           <div style={{ color: "rgba(233,239,255,0.72)", fontSize: "13px" }}>
             Locale {draft.locale} · Timezone {draft.timezone}
           </div>
@@ -48,6 +53,34 @@ export function SettingsView({ settings, saving, onSave }: SettingsViewProps): J
               onChange={(event) => setDraft((current) => ({ ...current, desktopApprovalsOnly: event.target.checked }))}
             />
             Keep approvals desktop-only
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: "10px", fontSize: "14px" }}>
+            <input
+              type="checkbox"
+              checked={draft.skillHealthAutonomyEnabled}
+              onChange={(event) =>
+                setDraft((current) => ({
+                  ...current,
+                  skillHealthAutonomyEnabled: event.target.checked,
+                }))
+              }
+            />
+            Enable periodic skill health autonomy
+          </label>
+          <label style={{ display: "grid", gap: "6px", fontSize: "13px", color: "rgba(233,239,255,0.72)" }}>
+            Skill health autonomy interval (seconds)
+            <input
+              type="number"
+              min={1}
+              value={draft.skillHealthAutonomyIntervalSeconds ?? 300}
+              onChange={(event) =>
+                setDraft((current) => ({
+                  ...current,
+                  skillHealthAutonomyIntervalSeconds: Number(event.target.value || current.skillHealthAutonomyIntervalSeconds || 300),
+                }))
+              }
+              style={inputStyle}
+            />
           </label>
         </div>
       </Panel>
@@ -122,6 +155,8 @@ export function SettingsView({ settings, saving, onSave }: SettingsViewProps): J
               onSave({
                 intranetEnabled: draft.intranetEnabled,
                 desktopApprovalsOnly: draft.desktopApprovalsOnly,
+                skillHealthAutonomyEnabled: draft.skillHealthAutonomyEnabled,
+                skillHealthAutonomyIntervalSeconds: draft.skillHealthAutonomyIntervalSeconds,
                 platform: draft.platform,
               })
             }

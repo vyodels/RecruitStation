@@ -249,11 +249,17 @@ def _promote_skill_draft(
         health_check_config = {"expected_result_status": "pass"}
 
     status = "active" if container.flags.is_enabled("skills.auto_activate") else "approved"
+    platform = (
+        str(draft.get("platform") or "").strip()
+        or str(payload.get("task_domain") or "").strip()
+        or str(execution_hints.get("domain") or "").strip()
+        or "runtime-scene"
+    )
     defaults = {
         "skill_id": skill_key,
         "name": skill_name,
         "status": status,
-        "platform": str(draft.get("platform") or "boss"),
+        "platform": platform,
         "bound_to_workflow_node": draft.get("bound_to_workflow_node") or payload.get("workflow_node_id"),
         "strategy": strategy,
         "execution_hints": execution_hints,

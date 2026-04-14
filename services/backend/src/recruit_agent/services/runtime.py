@@ -2405,6 +2405,7 @@ class PersistedRuntimeService:
                 "payload": {
                     "learning_id": learning.id,
                     "task_spec_id": task_spec.id,
+                    "task_domain": task_spec.domain,
                     "execution_plan_id": plan.id,
                     "execution_episode_id": episode.id,
                     "workflow_node_id": self._first_actionable_step(plan),

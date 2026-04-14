@@ -158,6 +158,16 @@ function normalizeSettings(raw: unknown): SettingsSnapshot {
     timezone: String(record.timezone ?? "Asia/Shanghai"),
     intranetEnabled: Boolean(record.intranetEnabled ?? record.intranet_enabled ?? false),
     desktopApprovalsOnly: Boolean(record.desktopApprovalsOnly ?? (record.approval_source ?? "desktop_app") === "desktop_app"),
+    skillHealthAutonomyEnabled: Boolean(
+      asRecord(record.featureFlags ?? record.feature_flags).enableSkillHealthAutonomy ??
+        asRecord(record.featureFlags ?? record.feature_flags).enable_skill_health_autonomy ??
+        false,
+    ),
+    skillHealthAutonomyIntervalSeconds: Number(
+      record.skillHealthAutonomyIntervalSeconds ??
+        record.skill_health_autonomy_interval_seconds ??
+        300,
+    ),
     providers: asArray<JsonRecord>(record.providers).map((provider) => ({
       kind: String(provider.kind ?? "openai-compatible") as SettingsSnapshot["providers"][number]["kind"],
       name: String(provider.name ?? "Provider"),
@@ -514,6 +524,7 @@ function normalizeRuntimeReplanResult(raw: unknown): RuntimePlanReplanResult {
 function normalizeRuntimeLearningOutcome(raw: unknown): RuntimeLearningOutcome {
   const record = asRecord(raw);
   const approval = asRecord(record.approval);
+  const templateApproval = asRecord(record.templateApproval ?? record.template_approval);
   const learningDraft = asRecord(record.learningDraft ?? record.learning_draft);
   return {
     episode: normalizeRuntimeEpisode(record.episode),
@@ -539,6 +550,42 @@ function normalizeRuntimeLearningOutcome(raw: unknown): RuntimeLearningOutcome {
           title: String(approval.title ?? ""),
           status: String(approval.status ?? "pending"),
           requestedBy: approval.requestedBy ? String(approval.requestedBy) : approval.requested_by ? String(approval.requested_by) : null,
+        }
+      : null,
+    templateApproval: Object.keys(templateApproval).length
+      ? {
+          id: String(templateApproval.id ?? ""),
+          targetType: String(templateApproval.targetType ?? templateApproval.target_type ?? ""),
+          targetId: String(templateApproval.targetId ?? templateApproval.target_id ?? ""),
+          title: String(templateApproval.title ?? ""),
+          status: String(templateApproval.status ?? "pending"),
+          requestedBy: templateApproval.requestedBy
+            ? String(templateApproval.requestedBy)
+            : templateApproval.requested_by
+              ? String(templateApproval.requested_by)
+              : null,
+          reviewedBy: templateApproval.reviewedBy
+            ? String(templateApproval.reviewedBy)
+            : templateApproval.reviewed_by
+              ? String(templateApproval.reviewed_by)
+              : null,
+          reviewedAt: templateApproval.reviewedAt
+            ? String(templateApproval.reviewedAt)
+            : templateApproval.reviewed_at
+              ? String(templateApproval.reviewed_at)
+              : null,
+          payload: asRecord(templateApproval.payload),
+          notes: templateApproval.notes ? String(templateApproval.notes) : null,
+          createdAt: templateApproval.createdAt
+            ? String(templateApproval.createdAt)
+            : templateApproval.created_at
+              ? String(templateApproval.created_at)
+              : undefined,
+          updatedAt: templateApproval.updatedAt
+            ? String(templateApproval.updatedAt)
+            : templateApproval.updated_at
+              ? String(templateApproval.updated_at)
+              : undefined,
         }
       : null,
     skillHealth: record.skillHealth ? asRecord(record.skillHealth) : record.skill_health ? asRecord(record.skill_health) : null,
@@ -970,13 +1017,25 @@ function createFetchClient(baseUrl: string): DesktopApiClient {
         body: JSON.stringify({ reviewer: "desktop-user", reason }),
       });
     },
-    updateSettings: async (settings) =>
-      normalizeSettings(
+    updateSettings: async (settings) => {
+      const payload: Record<string, unknown> = { ...settings };
+      if ("skillHealthAutonomyEnabled" in payload) {
+        payload.feature_flags = {
+          enable_skill_health_autonomy: Boolean(payload.skillHealthAutonomyEnabled),
+        };
+        delete payload.skillHealthAutonomyEnabled;
+      }
+      if ("skillHealthAutonomyIntervalSeconds" in payload) {
+        payload.skill_health_autonomy_interval_seconds = payload.skillHealthAutonomyIntervalSeconds;
+        delete payload.skillHealthAutonomyIntervalSeconds;
+      }
+      return normalizeSettings(
         await requestJson<unknown>(baseUrl, "/api/settings", {
           method: "PATCH",
-          body: JSON.stringify(settings),
+          body: JSON.stringify(payload),
         }),
-      ),
+      );
+    },
     runAgentOnce: async () =>
       normalizeAgentRunResult(
         await requestJson<unknown>(baseUrl, "/api/agent/run-once", {

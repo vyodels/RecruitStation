@@ -226,6 +226,7 @@ const settings: SettingsSnapshot = {
   timezone: "Asia/Shanghai",
   intranetEnabled: false,
   desktopApprovalsOnly: true,
+  skillHealthAutonomyEnabled: false,
   skillHealthAutonomyIntervalSeconds: 300,
   providers: [
     { kind: "openai-compatible", name: "Primary OpenAI API", model: "gpt-5.4", enabled: true, temperature: 0.2, baseUrl: "https://api.openai.com/v1" },

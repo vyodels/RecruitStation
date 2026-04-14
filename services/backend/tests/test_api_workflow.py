@@ -180,6 +180,7 @@ class ApiWorkflowTests(unittest.TestCase):
         promoted_skill = next(item for item in skills.json() if item["id"] == promoted_skill_id)
         self.assertEqual(promoted_skill["bound_to_workflow_node"], "initial_screening")
         self.assertEqual(promoted_skill["status"], "approved")
+        self.assertEqual(promoted_skill["platform"], "runtime-scene")
 
         event_sources = [event.source for event in container.events.snapshot()]
         self.assertIn("learning", event_sources)

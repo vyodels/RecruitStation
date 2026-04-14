@@ -821,12 +821,27 @@ export function RuntimeControlView({
                 {lastOutcome.episode.status}
               </StatusBadge>
               {lastOutcome.template ? <StatusBadge tone="positive">template derived</StatusBadge> : null}
+              {lastOutcome.templateApproval ? (
+                <StatusBadge tone={lastOutcome.templateApproval.status === "approved" ? "positive" : "warning"}>
+                  template approval {lastOutcome.templateApproval.status}
+                </StatusBadge>
+              ) : null}
               {lastOutcome.patch ? <StatusBadge tone="warning">patch proposed</StatusBadge> : null}
               {lastOutcome.approval ? <StatusBadge tone="warning">approval created</StatusBadge> : null}
             </div>
             <div style={{ color: theme.colors.muted, lineHeight: 1.6 }}>
               {lastOutcome.episode.resultSummary ?? "No outcome summary available."}
             </div>
+            {lastOutcome.templateApproval?.notes ? (
+              <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
+                Template review note: {lastOutcome.templateApproval.notes}
+              </div>
+            ) : null}
+            {lastOutcome.skillHealth ? (
+              <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
+                Skill health: {String(lastOutcome.skillHealth.health ?? lastOutcome.skillHealth.status ?? "unknown")}
+              </div>
+            ) : null}
           </div>
         </Panel>
       ) : null}

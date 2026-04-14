@@ -145,6 +145,7 @@ export interface SettingsSnapshot {
   timezone: string;
   intranetEnabled: boolean;
   desktopApprovalsOnly: boolean;
+  skillHealthAutonomyEnabled: boolean;
   skillHealthAutonomyIntervalSeconds?: number | null;
   providers: ProviderConfig[];
   intranetSync?: {

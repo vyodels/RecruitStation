@@ -60,7 +60,26 @@ export function PatchReviewView({ patches, busyPatchId, onApprove, onReject }: P
                 <StatusBadge tone="neutral">{patch.patchKind}</StatusBadge>
                 {patch.templateId ? <StatusBadge tone="neutral">template {patch.templateId.slice(0, 8)}</StatusBadge> : null}
                 {patch.executionEpisodeId ? <StatusBadge tone="neutral">episode {patch.executionEpisodeId.slice(0, 8)}</StatusBadge> : null}
+                {patch.runtimeMetadata?.apply_result && typeof patch.runtimeMetadata.apply_result === "object" ? (
+                  <StatusBadge tone="positive">
+                    plan {String((patch.runtimeMetadata.apply_result as Record<string, unknown>).execution_plan_version ?? "applied")}
+                  </StatusBadge>
+                ) : null}
               </div>
+              {patch.runtimeMetadata?.apply_result && typeof patch.runtimeMetadata.apply_result === "object" ? (
+                <div style={{ color: "rgba(233,239,255,0.68)", fontSize: "13px", lineHeight: 1.6 }}>
+                  Applied artifacts:
+                  {(() => {
+                    const result = patch.runtimeMetadata.apply_result as Record<string, unknown>;
+                    const parts = [
+                      result.execution_plan_id ? ` plan ${String(result.execution_plan_id).slice(0, 8)}` : "",
+                      result.template_id ? ` template ${String(result.template_id).slice(0, 8)}` : "",
+                      result.previous_plan_id ? ` from ${String(result.previous_plan_id).slice(0, 8)}` : "",
+                    ].filter(Boolean);
+                    return parts.length ? parts.join(" ·") : " no persisted artifacts recorded.";
+                  })()}
+                </div>
+              ) : null}
               {patch.status === "pending_review" ? (
                 <div style={{ display: "flex", gap: "10px", marginTop: "2px" }}>
                   <button
