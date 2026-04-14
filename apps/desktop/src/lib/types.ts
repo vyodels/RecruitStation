@@ -145,6 +145,7 @@ export interface SettingsSnapshot {
   timezone: string;
   intranetEnabled: boolean;
   desktopApprovalsOnly: boolean;
+  skillHealthAutonomyIntervalSeconds?: number | null;
   providers: ProviderConfig[];
   intranetSync?: {
     enabled: boolean;
@@ -400,6 +401,7 @@ export interface RuntimeLearningOutcome {
     createdAt?: string;
     updatedAt?: string;
   } | null;
+  templateApproval?: RuntimeLearningOutcome["approval"] | null;
   skillHealth?: Record<string, unknown> | null;
 }
 
