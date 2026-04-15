@@ -16,6 +16,8 @@ try:
 except ModuleNotFoundError:
     TestClient = None  # type: ignore[assignment]
 
+PLAYBOOKS_API_BASE = "/api/recruit-agent/playbooks"
+
 
 @unittest.skipIf(TestClient is None, "FastAPI test dependencies are not installed")
 class ApiWorkflowTests(unittest.TestCase):
@@ -26,7 +28,7 @@ class ApiWorkflowTests(unittest.TestCase):
         from scene_pilot.server import create_app
 
         self.tempdir = tempfile.TemporaryDirectory()
-        os.environ["SCENE_PILOT_DATA_DIR"] = self.tempdir.name
+        os.environ["RECRUIT_AGENT_DATA_DIR"] = self.tempdir.name
         load_settings.cache_clear()
         self.client = TestClient(create_app())
         self.client.__enter__()
@@ -46,7 +48,7 @@ class ApiWorkflowTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.client.__exit__(None, None, None)
         self.tempdir.cleanup()
-        os.environ.pop("SCENE_PILOT_DATA_DIR", None)
+        os.environ.pop("RECRUIT_AGENT_DATA_DIR", None)
         self._load_settings.cache_clear()
 
     def test_candidate_crud_and_approval(self) -> None:
@@ -254,7 +256,7 @@ class ApiWorkflowTests(unittest.TestCase):
         self.assertEqual(created_skill.status_code, 201)
 
         created_workflow = self.client.post(
-            "/api/workflows",
+            PLAYBOOKS_API_BASE,
             json={
                 "name": "Persisted Screening Flow",
                 "status": "active",
@@ -334,6 +336,146 @@ class ApiWorkflowTests(unittest.TestCase):
             self.assertEqual(decision_log.decision_type, "initial_screening")
             self.assertEqual(decision_log.decision, "pass")
 
+    def test_runtime_endpoints_expose_session_runs_and_events(self) -> None:
+        from scene_pilot.runtime.models import LLMResponse
+        from scene_pilot.runtime.providers import ScriptedProvider
+
+        container = self.client.app.state.container
+        container.agent_control.agent_loop.provider = ScriptedProvider(
+            provider_name="scripted-runtime-control",
+            responses=[
+                LLMResponse(
+                    content="Completed screening with structured context.",
+                    result_data={"status": "pass", "summary": "Context manifest attached."},
+                )
+            ],
+        )
+
+        dashboard = self.client.get("/api/dashboard")
+        candidate_id = dashboard.json()["candidates"][0]["id"]
+
+        queued = self.client.post(
+            "/api/agent/tasks",
+            json={
+                "task_type": "initial_screening",
+                "priority": 220,
+                "candidate_id": candidate_id,
+                "payload": {"jd_criteria": "Runtime context"},
+            },
+        )
+        self.assertEqual(queued.status_code, 200)
+        task_id = queued.json()["task_id"]
+
+        run_once = self.client.post("/api/agent/run-once")
+        self.assertEqual(run_once.status_code, 200)
+        self.assertEqual(run_once.json()["status"], "completed")
+
+        runtime_session = self.client.get("/api/recruit-agent/runtime/session")
+        self.assertEqual(runtime_session.status_code, 200)
+
+        runtime_runs = self.client.get(f"/api/recruit-agent/runtime/runs?candidate_id={candidate_id}")
+        self.assertEqual(runtime_runs.status_code, 200)
+        run_payload = next(item for item in runtime_runs.json() if item["queue_task_id"] == task_id)
+        self.assertEqual(run_payload["lane"], "candidate")
+        self.assertEqual(run_payload["status"], "completed")
+        self.assertGreater(run_payload["context_manifest"]["fragment_count"], 0)
+        self.assertGreater(run_payload["context_manifest"]["selected_token_estimate"], 0)
+
+        runtime_events = self.client.get(f"/api/recruit-agent/runtime/events?run_id={run_payload['id']}")
+        self.assertEqual(runtime_events.status_code, 200)
+        event_types = {item["event_type"] for item in runtime_events.json()}
+        self.assertIn("task_enqueued", event_types)
+        self.assertIn("run_started", event_types)
+        self.assertIn("run_finalized", event_types)
+
+    def test_context_policy_affects_context_manifest_scores(self) -> None:
+        from scene_pilot.runtime.models import LLMResponse
+        from scene_pilot.runtime.providers import ScriptedProvider
+
+        container = self.client.app.state.container
+        container.agent_control.agent_loop.provider = ScriptedProvider(
+            provider_name="scripted-context-policy",
+            responses=[
+                LLMResponse(
+                    content="Completed outreach context selection.",
+                    result_data={"status": "pass", "summary": "Context policy applied."},
+                )
+            ],
+        )
+
+        update_profile = self.client.patch(
+            "/api/recruit-agent/profile",
+            json={
+                "prompt_config": {
+                    "context_policy": {
+                        "global": {
+                            "token_budget_default": 2048,
+                            "drop_order": ["global_memory", "job_memory", "platform_context"],
+                        },
+                        "lanes": {
+                            "candidate": {
+                                "must_include": ["task_brief", "candidate_progress", "recent_messages"],
+                                "default_weights": {
+                                    "recent_messages": 1.5,
+                                    "candidate_memory": 1.25,
+                                    "global_memory": 0.2,
+                                },
+                            }
+                        },
+                        "run_type_overrides": {
+                            "initiate_communication": {
+                                "prefer": ["recent_messages", "candidate_memory"],
+                                "suppress": ["global_memory"],
+                            }
+                        },
+                    }
+                }
+            },
+        )
+        self.assertEqual(update_profile.status_code, 200)
+
+        dashboard = self.client.get("/api/dashboard")
+        candidate_id = dashboard.json()["candidates"][0]["id"]
+        self.assertEqual(self.client.get(f"/api/recruit-agent/candidate-memories/{candidate_id}").status_code, 200)
+        self.assertEqual(self.client.get("/api/recruit-agent/global-memory").status_code, 200)
+        entry = self.client.post(
+            f"/api/recruit-agent/candidate-threads/{candidate_id}/entries",
+            json={
+                "direction": "inbound",
+                "content": "可以先发我岗位详细信息和简历要求吗？",
+                "message_type": "text",
+                "platform": "boss",
+            },
+        )
+        self.assertEqual(entry.status_code, 201)
+
+        queued = self.client.post(
+            "/api/agent/tasks",
+            json={
+                "task_type": "initiate_communication",
+                "priority": 210,
+                "candidate_id": candidate_id,
+                "payload": {"message": "你好，想继续和你沟通岗位细节。"},
+            },
+        )
+        self.assertEqual(queued.status_code, 200)
+        task_id = queued.json()["task_id"]
+
+        run_once = self.client.post("/api/agent/run-once")
+        self.assertEqual(run_once.status_code, 200)
+        self.assertEqual(run_once.json()["status"], "completed")
+
+        runtime_runs = self.client.get(f"/api/recruit-agent/runtime/runs?candidate_id={candidate_id}")
+        self.assertEqual(runtime_runs.status_code, 200)
+        run_payload = next(item for item in runtime_runs.json() if item["queue_task_id"] == task_id)
+        fragments = run_payload["context_manifest"]["fragments"]
+        recent_messages = next(item for item in fragments if item["policy_key"] == "recent_messages")
+        candidate_memory = next(item for item in fragments if item["policy_key"] == "candidate_memory")
+        global_memory = next(item for item in fragments if item["policy_key"] == "global_memory")
+        self.assertGreater(recent_messages["final_score"], recent_messages["base_score"])
+        self.assertGreater(candidate_memory["final_score"], candidate_memory["base_score"])
+        self.assertLess(global_memory["final_score"], global_memory["base_score"])
+
     def test_runtime_normalizes_provider_business_status_across_persistence(self) -> None:
         from scene_pilot.models import CandidateSession, DecisionLog, WorkflowRun
         from scene_pilot.runtime.models import LLMResponse
@@ -360,7 +502,7 @@ class ApiWorkflowTests(unittest.TestCase):
         candidate_id = dashboard.json()["candidates"][0]["id"]
 
         created_workflow = self.client.post(
-            "/api/workflows",
+            PLAYBOOKS_API_BASE,
             json={
                 "name": "Provider Shape Flow",
                 "status": "active",
@@ -523,6 +665,12 @@ class ApiWorkflowTests(unittest.TestCase):
         self.assertEqual(blocked_approval["payload"]["blocked_task"]["task_id"], task_id)
         self.assertIn("resume_task", blocked_approval["payload"])
 
+        checkpoints = self.client.get("/api/recruit-agent/runtime/checkpoints?open_only=true")
+        self.assertEqual(checkpoints.status_code, 200)
+        checkpoint = next(item for item in checkpoints.json() if item["approval_id"] == blocked_approval["id"])
+        self.assertEqual(checkpoint["status"], "open")
+        self.assertEqual(checkpoint["checkpoint_kind"], "approval")
+
         approved = self.client.post(
             f"/api/approvals/{blocked_approval['id']}/approve",
             json={"reviewer": "desktop-user", "reason": "Continue after human review"},
@@ -532,9 +680,97 @@ class ApiWorkflowTests(unittest.TestCase):
         self.assertEqual(approved.json()["payload"]["resolution"]["status"], "approved")
         self.assertTrue(approved.json()["payload"]["resolution"]["resumed"])
 
+        resolved_checkpoints = self.client.get("/api/recruit-agent/runtime/checkpoints")
+        self.assertEqual(resolved_checkpoints.status_code, 200)
+        resolved_checkpoint = next(item for item in resolved_checkpoints.json() if item["approval_id"] == blocked_approval["id"])
+        self.assertEqual(resolved_checkpoint["status"], "resolved")
+
         second_run = self.client.post("/api/agent/run-once")
         self.assertEqual(second_run.status_code, 200)
         self.assertEqual(second_run.json()["status"], "completed")
+
+    def test_runtime_concurrency_limit_defers_boss_runs(self) -> None:
+        from scene_pilot.repositories import AgentRunRepository, AgentSessionRepository
+        from scene_pilot.services.recruit_agent import ensure_primary_recruit_agent_profile
+
+        settings_response = self.client.patch(
+            "/api/settings",
+            json={"platform": {"maxConcurrentRuns": 1, "bossMaxConcurrentRuns": 1}},
+        )
+        self.assertEqual(settings_response.status_code, 200)
+
+        blocker_candidate = self.client.post(
+            "/api/candidates",
+            json={
+                "name": "Blocking Candidate",
+                "platform": "boss",
+                "status": "screening",
+                "jd_id": "jd-runtime",
+            },
+        ).json()
+        target_candidate = self.client.post(
+            "/api/candidates",
+            json={
+                "name": "Queued Candidate",
+                "platform": "boss",
+                "status": "discovered",
+                "jd_id": "jd-runtime",
+            },
+        ).json()
+
+        container = self.client.app.state.container
+        with container.session_factory() as session:
+            profile = ensure_primary_recruit_agent_profile(session)
+            session_repo = AgentSessionRepository(session)
+            runtime_session = session_repo.by_agent_and_key(agent_profile_id=profile.id, session_key="primary")
+            if runtime_session is None:
+                runtime_session = session_repo.create(
+                    {
+                        "agent_profile_id": profile.id,
+                        "session_key": "primary",
+                        "status": "active",
+                        "runtime_metadata": {"agent_key": profile.agent_key},
+                    }
+                )
+            AgentRunRepository(session).create(
+                {
+                    "session_id": runtime_session.id,
+                    "candidate_id": blocker_candidate["id"],
+                    "jd_id": blocker_candidate["jd_id"],
+                    "platform": "boss",
+                    "lane": "candidate",
+                    "run_type": "initial_screening",
+                    "status": "running",
+                    "priority": 300,
+                    "queue_task_id": "existing-boss-run",
+                    "runtime_metadata": {"seeded": True},
+                }
+            )
+
+        queued = self.client.post(
+            "/api/agent/tasks",
+            json={
+                "task_type": "initial_screening",
+                "priority": 180,
+                "candidate_id": target_candidate["id"],
+                "payload": {"jd_criteria": "Boss limit"},
+            },
+        )
+        self.assertEqual(queued.status_code, 200)
+        task_id = queued.json()["task_id"]
+
+        run_once = self.client.post("/api/agent/run-once")
+        self.assertEqual(run_once.status_code, 200)
+        self.assertEqual(run_once.json()["status"], "deferred")
+
+        queue_snapshot = self.client.get("/api/agent/queue?status=pending")
+        self.assertEqual(queue_snapshot.status_code, 200)
+        self.assertTrue(any(item["task_id"] == task_id for item in queue_snapshot.json()))
+
+        runtime_runs = self.client.get(f"/api/recruit-agent/runtime/runs?candidate_id={target_candidate['id']}")
+        self.assertEqual(runtime_runs.status_code, 200)
+        deferred_run = next(item for item in runtime_runs.json() if item["queue_task_id"] == task_id)
+        self.assertEqual(deferred_run["status"], "queued")
 
     def test_blocked_task_reject_marks_closure_metadata(self) -> None:
         from scene_pilot.runtime.models import LLMResponse

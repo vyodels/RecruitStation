@@ -54,7 +54,7 @@ class WorkflowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tempdir:
             settings = AppSettings(
                 data_dir=tempdir,
-                database_url=f"sqlite:///{Path(tempdir) / 'scene-pilot.db'}",
+                database_url=f"sqlite:///{Path(tempdir) / 'recruit-agent.db'}",
             )
             engine = create_engine_from_settings(settings)
             initialize_database(engine)

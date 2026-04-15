@@ -37,7 +37,7 @@ async def lifespan(app: FastAPI):
 
 def create_app(settings: AppSettings | None = None) -> FastAPI:
     container = AppContainer.build(settings, seed_demo=settings is None)
-    app = FastAPI(title="ScenePilot", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="Recruit Agent", version="0.1.0", lifespan=lifespan)
     app.state.bootstrap_container = container
     app.add_middleware(
         CORSMiddleware,
@@ -80,4 +80,4 @@ app = create_app()
 
 
 def main() -> dict[str, Any]:
-    return {"app": "ScenePilot backend"}
+    return {"app": "Recruit Agent backend"}

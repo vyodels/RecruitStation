@@ -12,6 +12,10 @@ TaskRunner = Callable[[TaskEnvelope], AgentResult]
 FollowUpFactory = Callable[[TaskEnvelope, AgentResult], Iterable[TaskEnvelope]]
 
 
+class TaskDeferred(RuntimeError):
+    pass
+
+
 @dataclass(slots=True)
 class ScheduledOutcome:
     task: TaskEnvelope
@@ -76,6 +80,15 @@ class SerialScheduler:
             outcome = ScheduledOutcome(task=task, result=result, enqueued_follow_ups=enqueued_follow_ups)
             self.history.append(outcome)
             self._mark_complete(task.task_id)
+            return outcome
+        except TaskDeferred as exc:
+            self._mark_pending(task, error=str(exc))
+            outcome = ScheduledOutcome(
+                task=task,
+                result=AgentResult(success=False, status="deferred", content=str(exc)),
+                error=str(exc),
+            )
+            self.history.append(outcome)
             return outcome
         except Exception as exc:  # pragma: no cover - defensive guard
             task.attempts += 1

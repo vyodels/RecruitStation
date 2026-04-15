@@ -19,7 +19,7 @@ from scene_pilot.db.session import create_engine_from_settings, initialize_datab
 def _build_engine(tmp_path: Path):
     settings = AppSettings(
         data_dir=str(tmp_path / "data"),
-        database_url=f"sqlite:///{tmp_path / 'scene-pilot.db'}",
+        database_url=f"sqlite:///{tmp_path / 'recruit-agent.db'}",
     )
     return create_engine_from_settings(settings)
 
@@ -38,6 +38,11 @@ def test_initialize_database_records_baseline_version(tmp_path):
         }
         assert SCHEMA_MIGRATIONS_TABLE in tables
         assert "candidates" in tables
+        assert "candidate_assignments" in tables
+        assert "resume_artifacts" in tables
+        assert "candidate_scorecards" in tables
+        assert "candidate_review_decisions" in tables
+        assert "talent_pool_sync_records" in tables
         assert current_schema_version(connection) == CURRENT_SCHEMA_VERSION
 
 

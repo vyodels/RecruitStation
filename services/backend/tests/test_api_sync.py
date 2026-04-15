@@ -24,7 +24,7 @@ class ApiSyncTests(unittest.TestCase):
         from scene_pilot.server import create_app
 
         self.tempdir = tempfile.TemporaryDirectory()
-        os.environ["SCENE_PILOT_DATA_DIR"] = self.tempdir.name
+        os.environ["RECRUIT_AGENT_DATA_DIR"] = self.tempdir.name
         load_settings.cache_clear()
         self.client = TestClient(create_app())
         self.client.__enter__()
@@ -34,7 +34,7 @@ class ApiSyncTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.client.__exit__(None, None, None)
         self.tempdir.cleanup()
-        os.environ.pop("SCENE_PILOT_DATA_DIR", None)
+        os.environ.pop("RECRUIT_AGENT_DATA_DIR", None)
         self._load_settings.cache_clear()
 
     def test_sync_status_and_backlog_listing(self) -> None:

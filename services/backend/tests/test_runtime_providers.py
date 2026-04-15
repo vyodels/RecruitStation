@@ -54,16 +54,16 @@ class FakeOpener:
 class ProviderTests(unittest.TestCase):
     def tearDown(self) -> None:
         for key in [
-            "SCENE_PILOT_PROVIDER_CONFIG__OPENAI_MODEL",
-            "SCENE_PILOT_PROVIDER_CONFIG__OPENAI_BASE_URL",
-            "SCENE_PILOT_PROVIDER_CONFIG__OPENAI_API_KEY",
-            "SCENE_PILOT_PROVIDER_CONFIG__OPENAI_TIMEOUT_SECONDS",
-            "SCENE_PILOT_PROVIDER_CONFIG__ANTHROPIC_MODEL",
-            "SCENE_PILOT_PROVIDER_CONFIG__ANTHROPIC_BASE_URL",
-            "SCENE_PILOT_PROVIDER_CONFIG__ANTHROPIC_API_KEY",
-            "SCENE_PILOT_PROVIDER_CONFIG__ANTHROPIC_TIMEOUT_SECONDS",
-            "SCENE_PILOT_PROVIDER_CONFIG__BOSS_ACCOUNT",
-            "SCENE_PILOT_PROVIDER_CONFIG__COOLDOWN_DAYS",
+            "RECRUIT_AGENT_PROVIDER_CONFIG__OPENAI_MODEL",
+            "RECRUIT_AGENT_PROVIDER_CONFIG__OPENAI_BASE_URL",
+            "RECRUIT_AGENT_PROVIDER_CONFIG__OPENAI_API_KEY",
+            "RECRUIT_AGENT_PROVIDER_CONFIG__OPENAI_TIMEOUT_SECONDS",
+            "RECRUIT_AGENT_PROVIDER_CONFIG__ANTHROPIC_MODEL",
+            "RECRUIT_AGENT_PROVIDER_CONFIG__ANTHROPIC_BASE_URL",
+            "RECRUIT_AGENT_PROVIDER_CONFIG__ANTHROPIC_API_KEY",
+            "RECRUIT_AGENT_PROVIDER_CONFIG__ANTHROPIC_TIMEOUT_SECONDS",
+            "RECRUIT_AGENT_PROVIDER_CONFIG__BOSS_ACCOUNT",
+            "RECRUIT_AGENT_PROVIDER_CONFIG__COOLDOWN_DAYS",
         ]:
             os.environ.pop(key, None)
         load_settings.cache_clear()
@@ -109,16 +109,16 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(response.tool_calls[0].arguments["value"], "world")
 
     def test_settings_parse_provider_config_from_env(self) -> None:
-        os.environ["SCENE_PILOT_PROVIDER_CONFIG__OPENAI_MODEL"] = "gpt-4.1-mini"
-        os.environ["SCENE_PILOT_PROVIDER_CONFIG__OPENAI_BASE_URL"] = "https://example.com/openai"
-        os.environ["SCENE_PILOT_PROVIDER_CONFIG__OPENAI_API_KEY"] = "test-openai-key"
-        os.environ["SCENE_PILOT_PROVIDER_CONFIG__OPENAI_TIMEOUT_SECONDS"] = "11"
-        os.environ["SCENE_PILOT_PROVIDER_CONFIG__ANTHROPIC_MODEL"] = "claude-3.7"
-        os.environ["SCENE_PILOT_PROVIDER_CONFIG__ANTHROPIC_BASE_URL"] = "https://example.com/anthropic"
-        os.environ["SCENE_PILOT_PROVIDER_CONFIG__ANTHROPIC_API_KEY"] = "test-anthropic-key"
-        os.environ["SCENE_PILOT_PROVIDER_CONFIG__ANTHROPIC_TIMEOUT_SECONDS"] = "17"
-        os.environ["SCENE_PILOT_PROVIDER_CONFIG__BOSS_ACCOUNT"] = "boss-02"
-        os.environ["SCENE_PILOT_PROVIDER_CONFIG__COOLDOWN_DAYS"] = "21"
+        os.environ["RECRUIT_AGENT_PROVIDER_CONFIG__OPENAI_MODEL"] = "gpt-4.1-mini"
+        os.environ["RECRUIT_AGENT_PROVIDER_CONFIG__OPENAI_BASE_URL"] = "https://example.com/openai"
+        os.environ["RECRUIT_AGENT_PROVIDER_CONFIG__OPENAI_API_KEY"] = "test-openai-key"
+        os.environ["RECRUIT_AGENT_PROVIDER_CONFIG__OPENAI_TIMEOUT_SECONDS"] = "11"
+        os.environ["RECRUIT_AGENT_PROVIDER_CONFIG__ANTHROPIC_MODEL"] = "claude-3.7"
+        os.environ["RECRUIT_AGENT_PROVIDER_CONFIG__ANTHROPIC_BASE_URL"] = "https://example.com/anthropic"
+        os.environ["RECRUIT_AGENT_PROVIDER_CONFIG__ANTHROPIC_API_KEY"] = "test-anthropic-key"
+        os.environ["RECRUIT_AGENT_PROVIDER_CONFIG__ANTHROPIC_TIMEOUT_SECONDS"] = "17"
+        os.environ["RECRUIT_AGENT_PROVIDER_CONFIG__BOSS_ACCOUNT"] = "boss-02"
+        os.environ["RECRUIT_AGENT_PROVIDER_CONFIG__COOLDOWN_DAYS"] = "21"
 
         settings = AppSettings()
         runtime_settings = settings.provider_runtime_settings()

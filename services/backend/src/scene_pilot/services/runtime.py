@@ -118,8 +118,8 @@ def _json_ready(value: Any) -> Any:
 
 DOMAIN_PACKS: dict[str, dict[str, Any]] = {
     "general": {
-        "name": "通用自动化",
-        "description": "适用于探索型网页或桌面任务的通用受监督场景画像。",
+        "name": "内部通用能力",
+        "description": "仅作为 Recruit Agent 内部执行内核的通用支持，不再作为独立产品场景暴露。",
         "version": "1.2.0",
         "maturity": "beta",
         "runtime_only": True,
@@ -169,9 +169,9 @@ DOMAIN_PACKS: dict[str, dict[str, Any]] = {
         "scene_expectations": ["listing_surface", "detail_surface", "submission_scene"],
         "trial_expectations": {"requires_supervised_trial": True, "requires_scene_assessment_for_browser": True},
     },
-    "market_news": {
-        "name": "市场新闻",
-        "description": "收集最新市场新闻、比较来源，并生成简洁的日报摘要。",
+    "archived_public_briefing": {
+        "name": "归档示例：资讯汇总",
+        "description": "归档的内部回归样例，仅保留为执行内核验证用途。",
         "version": "0.4.0",
         "maturity": "experimental",
         "runtime_only": True,
@@ -182,7 +182,7 @@ DOMAIN_PACKS: dict[str, dict[str, Any]] = {
         ],
         "default_constraints": {"requires_source_links": True},
         "default_output_contract": {"kind": "news_digest", "format": "bullet_summary"},
-        "template_keys": ["market_news_digest"],
+        "template_keys": ["archived_public_briefing_digest"],
         "compiler_hints": [
             "保留一手来源链接，并让摘要聚焦当前市场影响。",
             "在做文章综合之前，优先完成来源发现。",
@@ -195,20 +195,20 @@ DOMAIN_PACKS: dict[str, dict[str, Any]] = {
         "scene_expectations": ["listing_surface", "detail_surface", "news_page"],
         "trial_expectations": {"minimum_sources": 3, "requires_scene_assessment_for_browser": True},
     },
-    "web_research": {
-        "name": "网页研究",
-        "description": "在公开网络中搜索、评估选项，并输出带理由和链接的候选清单。",
+    "archived_public_research": {
+        "name": "归档示例：公开网页比较",
+        "description": "归档的内部回归样例，仅保留为执行内核验证用途。",
         "version": "0.4.0",
         "maturity": "experimental",
         "runtime_only": True,
         "default_capabilities": ["search", "browser", "http", "llm", "document"],
         "sample_tasks": [
-            "找出好用的 PDF 转换工具，比较后给出 shortlist。",
+            "对公开网页结果做候选项比较并生成 shortlist。",
             "在全网研究工具，并说明为什么值得尝试。",
         ],
         "default_constraints": {"requires_source_links": True},
         "default_output_contract": {"kind": "research_shortlist", "format": "table"},
-        "template_keys": ["web_research_shortlist"],
+        "template_keys": ["archived_public_research_shortlist"],
         "compiler_hints": [
             "优先输出带理由、链接和取舍说明的候选清单。",
             "当场景仍在探索阶段时，先用搜索和浏览器观察，再做最终综合。",
@@ -221,20 +221,20 @@ DOMAIN_PACKS: dict[str, dict[str, Any]] = {
         "scene_expectations": ["listing_surface", "detail_surface", "tool_listing"],
         "trial_expectations": {"minimum_candidates": 3, "requires_scene_assessment_for_browser": True},
     },
-    "github_trends": {
-        "name": "GitHub 热点",
-        "description": "查看 GitHub 活动，识别热门仓库，并总结它们值得关注的原因。",
+    "archived_repository_watch": {
+        "name": "归档示例：公开仓库观察",
+        "description": "归档的内部回归样例，仅保留为执行内核验证用途。",
         "version": "0.4.0",
         "maturity": "experimental",
         "runtime_only": True,
         "default_capabilities": ["http", "search", "browser", "llm", "document"],
         "sample_tasks": [
-            "列出今天的 GitHub 热门仓库，并附上链接和一句话摘要。",
+            "列出今天的热门仓库，并附上链接和一句话摘要。",
             "追踪热门开源项目，并整理一份简明简报。",
         ],
         "default_constraints": {"requires_source_links": True},
         "default_output_contract": {"kind": "repository_digest", "format": "table"},
-        "template_keys": ["github_trends_digest"],
+        "template_keys": ["archived_repository_watch_digest"],
         "compiler_hints": [
             "保留仓库链接、一句话摘要，以及项目为什么值得关注的证据。",
             "先用 HTTP 或搜索做广度发现，再用浏览器完成细节核验。",
@@ -431,12 +431,12 @@ DEFAULT_WORKFLOW_TEMPLATES: tuple[dict[str, Any], ...] = (
             ]
         },
         "activation_strategy": {"mode": "trial_first", "requires_approval": True},
-        "validation_summary": "用于受监督初筛试跑的招聘工作流种子版本。",
+        "validation_summary": "用于 Recruit Agent 受监督初筛的种子版本。",
     },
     {
-        "template_key": "market_news_digest",
-        "name": "市场新闻摘要",
-        "domain": "market_news",
+        "template_key": "archived_public_briefing_digest",
+        "name": "归档示例：资讯汇总摘要",
+        "domain": "archived_public_briefing",
         "status": "active",
         "version": 1,
         "template_body": {
@@ -448,12 +448,12 @@ DEFAULT_WORKFLOW_TEMPLATES: tuple[dict[str, Any], ...] = (
             ]
         },
         "activation_strategy": {"mode": "trial_first"},
-        "validation_summary": "用于受监督市场新闻摘要的种子模板。",
+        "validation_summary": "归档的资讯汇总回归样例模板。",
     },
     {
-        "template_key": "web_research_shortlist",
-        "name": "网页研究候选清单",
-        "domain": "web_research",
+        "template_key": "archived_public_research_shortlist",
+        "name": "归档示例：公开网页候选清单",
+        "domain": "archived_public_research",
         "status": "active",
         "version": 1,
         "template_body": {
@@ -468,9 +468,9 @@ DEFAULT_WORKFLOW_TEMPLATES: tuple[dict[str, Any], ...] = (
         "validation_summary": "用于网页工具研究和 shortlist 的种子模板。",
     },
     {
-        "template_key": "github_trends_digest",
-        "name": "GitHub 热点摘要",
-        "domain": "github_trends",
+        "template_key": "archived_repository_watch_digest",
+        "name": "归档示例：公开仓库摘要",
+        "domain": "archived_repository_watch",
         "status": "active",
         "version": 1,
         "template_body": {
@@ -482,7 +482,7 @@ DEFAULT_WORKFLOW_TEMPLATES: tuple[dict[str, Any], ...] = (
             ]
         },
         "activation_strategy": {"mode": "trial_first"},
-        "validation_summary": "用于 GitHub 热点观察的种子模板。",
+        "validation_summary": "归档的公开仓库观察回归样例模板。",
     },
 )
 
@@ -1709,7 +1709,7 @@ class PersistedRuntimeService:
 
         normalized = self._normalize_domain(compiled_domain)
         if normalized in DOMAIN_PACKS:
-            notes.append(f"Selected domain pack from semantic compiler output: {normalized}.")
+            notes.append(f"Selected execution profile from semantic compiler output: {normalized}.")
             return normalized, DOMAIN_PACKS[normalized], notes
 
         fallback_domain, fallback_config, fallback_notes = self._resolve_domain_pack(None, instruction, preferred_domains)
@@ -4144,19 +4144,19 @@ class PersistedRuntimeService:
         for candidate in candidates:
             normalized = self._normalize_domain(candidate)
             if normalized in DOMAIN_PACKS:
-                notes.append(f"Selected domain pack from explicit hint: {normalized}.")
+                notes.append(f"Selected execution profile from explicit hint: {normalized}.")
                 return normalized, DOMAIN_PACKS[normalized], notes
 
         normalized_instruction = instruction.lower()
         keyword_map = {
             "recruiting": ("candidate", "resume", "jd", "boss", "hiring", "recruit"),
-            "market_news": ("stock", "market", "equity", "news", "macro", "earnings"),
-            "github_trends": ("github", "repository", "repo", "open source", "trending"),
-            "web_research": ("search", "find", "tool", "pdf", "compare", "website"),
+            "archived_public_briefing": ("stock", "market", "equity", "news", "macro", "earnings"),
+            "archived_repository_watch": ("github", "repository", "repo", "open source", "trending"),
+            "archived_public_research": ("search", "find", "tool", "pdf", "compare", "website"),
         }
         for domain_key, keywords in keyword_map.items():
             if any(keyword in normalized_instruction for keyword in keywords):
-                notes.append(f"Inferred domain pack {domain_key} from keyword match.")
+                notes.append(f"Inferred execution profile {domain_key} from keyword match.")
                 return domain_key, DOMAIN_PACKS[domain_key], notes
 
         notes.append("No strong domain keyword match found. Falling back to general automation.")
@@ -4183,11 +4183,11 @@ class PersistedRuntimeService:
     def _default_success_criteria(self, domain_key: str) -> dict[str, Any]:
         if domain_key == "recruiting":
             return {"requires_resume_or_profile": True, "requires_score": True}
-        if domain_key == "market_news":
+        if domain_key == "archived_public_briefing":
             return {"minimum_sources": 3, "include_market_impact": True}
-        if domain_key == "github_trends":
+        if domain_key == "archived_repository_watch":
             return {"minimum_repositories": 5, "include_repo_links": True}
-        if domain_key == "web_research":
+        if domain_key == "archived_public_research":
             return {"minimum_candidates": 3, "include_comparison": True}
         return {"task_completed": True, "supervised_trial": True}
 
@@ -4905,9 +4905,9 @@ class PersistedRuntimeService:
             return ""
         normalized = value.strip().lower().replace(" ", "_")
         aliases = {
-            "research": "web_research",
-            "github": "github_trends",
-            "market": "market_news",
+            "research": "archived_public_research",
+            "github": "archived_repository_watch",
+            "market": "archived_public_briefing",
             "recruit": "recruiting",
         }
         return aliases.get(normalized, normalized)
@@ -4953,13 +4953,13 @@ class PersistedRuntimeService:
                 return "搜索匹配的候选人档案。"
             case ("recruiting", "api"):
                 return "准备经过批准的交接或同步载荷。"
-            case ("market_news", "search"):
+            case ("archived_public_briefing", "search"):
                 return "在可信来源中搜索最新市场头条。"
-            case ("market_news", "browser"):
+            case ("archived_public_briefing", "browser"):
                 return "打开最相关的文章并观察上下文。"
-            case ("web_research", "search"):
+            case ("archived_public_research", "search"):
                 return "在全网搜索候选工具和参考资料。"
-            case ("github_trends", "http"):
+            case ("archived_repository_watch", "http"):
                 return "抓取或检查热门仓库元数据。"
             case (_, "browser"):
                 return "观察当前浏览器环境。"
@@ -4977,18 +4977,18 @@ class PersistedRuntimeService:
     def _observation_summary(self, domain: str, capability: str) -> str:
         if domain == "recruiting" and capability == "document":
             return "已捕获候选人上下文和简历证据。"
-        if domain == "market_news" and capability == "browser":
+        if domain == "archived_public_briefing" and capability == "browser":
             return "已确认来源文章页面包含可发布内容。"
-        if domain == "github_trends" and capability == "browser":
+        if domain == "archived_repository_watch" and capability == "browser":
             return "已核对仓库元数据和 README 上下文。"
         return self._step_summary(domain, capability)
 
     def _result_summary(self, domain: str, notes: str | None) -> str:
         base = {
             "recruiting": "试跑已捕获候选人证据，并生成受监督的初筛摘要。",
-            "market_news": "试跑已收集近期市场头条，并整理出摘要草稿。",
-            "web_research": "试跑已完成网页探索，并生成面向 shortlist 的摘要。",
-            "github_trends": "试跑已收集热门仓库，并整理出热点摘要。",
+            "archived_public_briefing": "归档试跑已收集公开资讯，并整理出摘要草稿。",
+            "archived_public_research": "归档试跑已完成公开网页探索，并生成对比摘要。",
+            "archived_repository_watch": "归档试跑已收集公开仓库线索，并整理出观察摘要。",
             "general": "试跑已完成，并记录了观察到的执行模式。",
         }.get(domain, "试跑已完成，并记录了观察到的执行模式。")
         if notes:
@@ -5005,9 +5005,9 @@ class PersistedRuntimeService:
     def _derive_page_type(self, domain: str, url: str | None) -> str:
         if domain == "recruiting":
             return "candidate_workspace"
-        if domain == "market_news":
+        if domain == "archived_public_briefing":
             return "news_page"
-        if domain == "github_trends":
+        if domain == "archived_repository_watch":
             return "repository_listing"
         if url:
             return "web_page"
@@ -5019,8 +5019,8 @@ class PersistedRuntimeService:
                 {"kind": "open_profile", "label": "打开候选人档案"},
                 {"kind": "capture_resume", "label": "捕获简历详情"},
             ]
-        if domain == "market_news":
+        if domain == "archived_public_briefing":
             return [{"kind": "open_article", "label": "打开最新文章"}]
-        if domain == "github_trends":
+        if domain == "archived_repository_watch":
             return [{"kind": "open_repository", "label": "打开仓库页面"}]
         return [{"kind": "review_output", "label": "审查生成结果"}]

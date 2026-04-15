@@ -8,7 +8,7 @@ def make_client(tmp_path):
     app = create_app(
         AppSettings(
             data_dir=str(tmp_path / "data"),
-            database_url=f"sqlite:///{tmp_path / 'scene-pilot.db'}",
+            database_url=f"sqlite:///{tmp_path / 'recruit-agent.db'}",
         )
     )
     return TestClient(app)
@@ -46,4 +46,3 @@ def test_candidate_crud(tmp_path):
 
         delete_response = client.delete(f"/api/candidates/{candidate_id}")
         assert delete_response.status_code == 204
-

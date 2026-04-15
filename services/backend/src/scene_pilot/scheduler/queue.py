@@ -104,7 +104,7 @@ class InMemoryQueue:
 
 
 class RedisQueueStub(InMemoryQueue):
-    def __init__(self, namespace: str = "scene-pilot", redis_url: str | None = None) -> None:
+    def __init__(self, namespace: str = "recruit-agent", redis_url: str | None = None) -> None:
         super().__init__()
         self.namespace = namespace
         self.redis_url = redis_url

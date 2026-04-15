@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+import os
 from pathlib import Path
 from typing import Any
 
@@ -36,24 +37,36 @@ class ProviderRuntimeSettings(BaseModel):
 class IntranetSyncSettings(BaseModel):
     base_url: str | None = None
     api_token: str | None = None
-    api_path: str = "/api/scene-pilot/sync"
+    api_path: str = "/api/recruit-agent/sync"
     timeout_seconds: int = 10
+
+
+def _apply_env_alias_prefix() -> None:
+    for key, value in list(os.environ.items()):
+        if not key.startswith("SCENE_PILOT_"):
+            continue
+        alias_key = f"RECRUIT_AGENT_{key[len('SCENE_PILOT_'):]}"
+        os.environ.setdefault(alias_key, value)
 
 
 class AppSettings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_prefix="SCENE_PILOT_",
+        env_prefix="RECRUIT_AGENT_",
         env_file=".env",
         env_nested_delimiter="__",
         extra="ignore",
     )
 
-    app_name: str = "ScenePilot"
+    def __init__(self, **values: Any) -> None:
+        _apply_env_alias_prefix()
+        super().__init__(**values)
+
+    app_name: str = "Recruit Agent"
     environment: str = "development"
     host: str = "127.0.0.1"
     port: int = 8741
     data_dir: str = "./data"
-    database_url: str = "sqlite:///./scene-pilot.db"
+    database_url: str = "sqlite:///./recruit-agent.db"
     database_echo: bool = False
     scheduler_lock_timeout_seconds: int = 300
     skill_health_autonomy_interval_seconds: int = 300
@@ -70,10 +83,10 @@ class AppSettings(BaseSettings):
         url = make_url(self.database_url)
         if url.drivername.startswith("sqlite") and url.database:
             database = url.database
-            if database in {".", "./scene-pilot.db", "scene-pilot.db"}:
+            if database in {".", "./recruit-agent.db", "recruit-agent.db", "./scene-pilot.db", "scene-pilot.db"}:
                 data_dir = self.resolved_data_dir()
                 data_dir.mkdir(parents=True, exist_ok=True)
-                return f"sqlite:///{(data_dir / 'scene-pilot.db').resolve()}"
+                return f"sqlite:///{(data_dir / 'recruit-agent.db').resolve()}"
 
             database_path = Path(database).expanduser()
             if not database_path.is_absolute():
@@ -116,4 +129,5 @@ class AppSettings(BaseSettings):
 
 @lru_cache(maxsize=1)
 def load_settings() -> AppSettings:
+    _apply_env_alias_prefix()
     return AppSettings()

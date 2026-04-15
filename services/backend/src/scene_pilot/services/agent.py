@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from sqlalchemy.orm import Session, sessionmaker
 
+from scene_pilot.core.settings import AppSettings
 from scene_pilot.db.base import utcnow
 from scene_pilot.models import AgentLearning, ApprovalItem
 from scene_pilot.repositories import (
@@ -26,8 +27,10 @@ from scene_pilot.runtime.result_semantics import extract_business_status
 from scene_pilot.scheduler.queue import TaskEnvelope
 from scene_pilot.scheduler.scheduler import ScheduledOutcome, SerialScheduler
 from scene_pilot.platforms import PlatformAdapter
+from scene_pilot.services.context_assembler import ContextAssemblerService
 from scene_pilot.services.events import EventStreamService
 from scene_pilot.services.feature_flags import FeatureFlagService
+from scene_pilot.services.runtime_control import RuntimeControlService
 from scene_pilot.services.skills import SkillHealthCheckService
 from scene_pilot.services.sync import SyncService
 from scene_pilot.services.runtime import PersistedRuntimeService
@@ -39,6 +42,7 @@ from scene_pilot.workflows.engine import WorkflowEngine
 class AgentControlService:
     scheduler: SerialScheduler
     workflow_engine: WorkflowEngine
+    settings: AppSettings
     agent_loop: AgentLoop | None = None
     events: EventStreamService = field(default_factory=EventStreamService)
     flags: FeatureFlagService = field(default_factory=FeatureFlagService)
@@ -69,6 +73,13 @@ class AgentControlService:
             workflow_node_id=workflow_node_id or task_type,
             metadata=metadata or {},
         )
+        if self.session_factory is not None:
+            with self.session_factory() as session:
+                RuntimeControlService(
+                    session,
+                    settings=self.settings,
+                    live_events=self.events,
+                ).ensure_run_for_task(task)
         self.scheduler.submit(task)
         self.events.publish("info", "scheduler", f"Queued task {task.task_type}", task_id=task.task_id)
         return task
@@ -109,6 +120,16 @@ class AgentControlService:
             resolution["resumed"] = resumed
             payload["closed_at"] = utcnow().isoformat()
             self._apply_blocked_session_resolution(session, approval, status=status, notes=notes)
+            RuntimeControlService(
+                session,
+                settings=self.settings,
+                live_events=self.events,
+            ).resolve_checkpoint_for_approval(
+                approval_id=approval.id,
+                status=status,
+                reviewer=reviewer,
+                notes=notes,
+            )
 
         payload["resolution"] = resolution
         approval.payload = payload
@@ -121,24 +142,54 @@ class AgentControlService:
             runtime_session = self._build_runtime_session(task, workflow=workflow, workflow_node=workflow_node)
             runtime_skill = self._build_skill_context(task, workflow_node=workflow_node)
             platform_context = self._build_platform_context(task)
-            workflow_run_id = self._start_workflow_run(
-                task,
-                workflow=workflow,
-                workflow_node=workflow_node,
-                session_context=runtime_session,
-                skill_context=runtime_skill,
-                platform_context=platform_context,
-            )
-            managed_execution = self._prepare_managed_execution(task)
+            runtime_state: dict[str, Any] | None = None
+            context_manifest: dict[str, Any] | None = None
 
-            if managed_execution is not None:
-                result = self._run_managed_execution(
-                    task,
-                    managed_execution=managed_execution,
-                    session_context=runtime_session,
-                    skill_context=runtime_skill,
-                    platform_context=platform_context,
-                )
+            def _finalize_runtime_state(result: AgentResult) -> None:
+                if self.session_factory is None or runtime_state is None:
+                    return
+                with self.session_factory() as session:
+                    RuntimeControlService(
+                        session,
+                        settings=self.settings,
+                        live_events=self.events,
+                    ).finalize_run(
+                        task=task,
+                        status=result.status,
+                        success=result.success,
+                        blocked_reason=result.content if result.status in {"waiting_human", "waiting_candidate", "blocked"} else None,
+                        last_error=None if result.success or result.status in {"waiting_human", "waiting_candidate"} else result.content,
+                        runtime_metadata_patch={
+                            "last_result_status": result.status,
+                            "last_result_success": result.success,
+                            "last_result_task_type": task.task_type,
+                            "context_fragment_count": int((context_manifest or {}).get("fragment_count") or 0),
+                            "selected_token_estimate": int((context_manifest or {}).get("selected_token_estimate") or 0),
+                        },
+                    )
+
+            def _finalize_runtime_error(exc: Exception) -> None:
+                if self.session_factory is None or runtime_state is None:
+                    return
+                with self.session_factory() as session:
+                    RuntimeControlService(
+                        session,
+                        settings=self.settings,
+                        live_events=self.events,
+                    ).finalize_run(
+                        task=task,
+                        status="failed",
+                        success=False,
+                        last_error=str(exc),
+                    )
+
+            def _complete(
+                result: AgentResult,
+                *,
+                persist_learning: bool = False,
+                session_context_override: dict[str, Any] | None = None,
+                workflow_run_id: str | None,
+            ) -> AgentResult:
                 if result.status == "waiting_human":
                     self._persist_blocked_task_approval(task, result)
                 self._persist_task_artifacts(
@@ -147,179 +198,190 @@ class AgentControlService:
                     workflow=workflow,
                     workflow_node=workflow_node,
                     workflow_run_id=workflow_run_id,
-                    session_context={
+                    session_context=session_context_override if session_context_override is not None else runtime_session,
+                    skill_context=runtime_skill,
+                )
+                if persist_learning:
+                    self._persist_runtime_learning(task, result)
+                _finalize_runtime_state(result)
+                return result
+
+            try:
+                if self.session_factory is not None:
+                    with self.session_factory() as session:
+                        runtime_control = RuntimeControlService(
+                            session,
+                            settings=self.settings,
+                            live_events=self.events,
+                        )
+                        runtime_state = runtime_control.begin_run(task)
+                        context_manifest = ContextAssemblerService(
+                            session,
+                            provider=self.agent_loop.provider if self.agent_loop is not None else None,
+                        ).build(
+                            task,
+                            lane=str(runtime_state.get("lane") or "agent"),
+                            session_context=runtime_session,
+                            skill_context=runtime_skill,
+                            platform_context=platform_context,
+                        )
+                        runtime_control.attach_context_manifest(
+                            run_id=str(runtime_state["run_id"]),
+                            context_manifest=context_manifest,
+                        )
+
+                    runtime_session = {
                         **runtime_session,
-                        "managed_execution": {
-                            "task_spec_id": managed_execution.task_spec.id,
-                            "execution_plan_id": managed_execution.execution_plan.id,
-                            "execution_episode_id": managed_execution.execution_episode.id,
-                            "scene_type": managed_execution.assessment.scene_type,
+                        "runtime": {
+                            **runtime_state,
+                            "context_manifest": context_manifest,
                         },
-                    },
-                    skill_context=runtime_skill,
-                )
-                self._persist_runtime_learning(task, result)
-                return result
+                    }
+                    platform_context = {
+                        **platform_context,
+                        "runtime_control": runtime_state,
+                        "context_manifest": context_manifest,
+                    }
+                    task.metadata["context_manifest"] = context_manifest
 
-            if task.task_type == "discover_candidate" and self.platform_adapter is not None:
-                discovered = self.platform_adapter.discover_candidates(task.payload)
-                result = AgentResult(
-                    success=True,
-                    status="completed",
-                    content=f"已在当前运行时场景中发现 {len(discovered)} 位候选人。",
-                    data={
-                        "status": "pass",
-                        "discovered_count": len(discovered),
-                        "candidates": [candidate.raw for candidate in discovered],
-                    },
-                    metadata={"platform_action": "discover_candidates"},
-                )
-                self._persist_task_artifacts(
+                workflow_run_id = self._start_workflow_run(
                     task,
-                    result,
                     workflow=workflow,
                     workflow_node=workflow_node,
-                    workflow_run_id=workflow_run_id,
                     session_context=runtime_session,
                     skill_context=runtime_skill,
+                    platform_context=platform_context,
                 )
-                return result
+                managed_execution = self._prepare_managed_execution(task)
 
-            if task.task_type == "request_resume" and self.platform_adapter is not None and task.candidate_id:
-                platform_result = self.platform_adapter.request_resume(task.candidate_id)
-                self._enqueue_sync("resume_request", task.candidate_id, platform_result)
-                result = AgentResult(
-                    success=True,
-                    status="completed",
-                    content="已在当前运行时场景中提交简历请求。",
-                    data={"status": "pass", "platform_result": platform_result},
-                    metadata={"platform_action": "request_resume"},
-                )
-                self._persist_task_artifacts(
-                    task,
-                    result,
-                    workflow=workflow,
-                    workflow_node=workflow_node,
-                    workflow_run_id=workflow_run_id,
-                    session_context=runtime_session,
-                    skill_context=runtime_skill,
-                )
-                return result
+                if managed_execution is not None:
+                    result = self._run_managed_execution(
+                        task,
+                        managed_execution=managed_execution,
+                        session_context=runtime_session,
+                        skill_context=runtime_skill,
+                        platform_context=platform_context,
+                    )
+                    return _complete(
+                        result,
+                        persist_learning=True,
+                        session_context_override={
+                            **runtime_session,
+                            "managed_execution": {
+                                "task_spec_id": managed_execution.task_spec.id,
+                                "execution_plan_id": managed_execution.execution_plan.id,
+                                "execution_episode_id": managed_execution.execution_episode.id,
+                                "scene_type": managed_execution.assessment.scene_type,
+                            },
+                        },
+                        workflow_run_id=workflow_run_id,
+                    )
 
-            if (
-                task.task_type == "initiate_communication"
-                and self.platform_adapter is not None
-                and task.candidate_id
-                and self.flags.is_enabled("feature.outbound_messaging")
-            ):
-                platform_result = self.platform_adapter.send_message(
-                    task.candidate_id,
-                    str(task.payload.get("message") or "Hello, we would like to continue the recruiting process."),
-                )
-                self._enqueue_sync("communication", task.candidate_id, platform_result)
-                result = AgentResult(
-                    success=True,
-                    status="completed",
-                    content="已在当前运行时场景中提交外联消息。",
-                    data={"status": "pass", "platform_result": platform_result},
-                    metadata={"platform_action": "send_message"},
-                )
-                self._persist_task_artifacts(
-                    task,
-                    result,
-                    workflow=workflow,
-                    workflow_node=workflow_node,
-                    workflow_run_id=workflow_run_id,
-                    session_context=runtime_session,
-                    skill_context=runtime_skill,
-                )
-                return result
+                if task.task_type == "discover_candidate" and self.platform_adapter is not None:
+                    discovered = self.platform_adapter.discover_candidates(task.payload)
+                    result = AgentResult(
+                        success=True,
+                        status="completed",
+                        content=f"已在当前运行时场景中发现 {len(discovered)} 位候选人。",
+                        data={
+                            "status": "pass",
+                            "discovered_count": len(discovered),
+                            "candidates": [candidate.raw for candidate in discovered],
+                        },
+                        metadata={"platform_action": "discover_candidates"},
+                    )
+                    return _complete(result, workflow_run_id=workflow_run_id)
 
-            if task.task_type == "archive_candidate" and self.platform_adapter is not None and task.candidate_id:
-                platform_result = self.platform_adapter.archive_candidate(
-                    task.candidate_id,
-                    str(task.payload.get("reason") or "Archived by workflow."),
-                )
-                self._enqueue_sync("candidate_archive", task.candidate_id, platform_result)
-                result = AgentResult(
-                    success=True,
-                    status="completed",
-                    content="已在当前运行时场景中归档候选人。",
-                    data={"status": "pass", "platform_result": platform_result},
-                    metadata={"platform_action": "archive_candidate"},
-                )
-                self._persist_task_artifacts(
-                    task,
-                    result,
-                    workflow=workflow,
-                    workflow_node=workflow_node,
-                    workflow_run_id=workflow_run_id,
-                    session_context=runtime_session,
-                    skill_context=runtime_skill,
-                )
-                return result
+                if task.task_type == "request_resume" and self.platform_adapter is not None and task.candidate_id:
+                    platform_result = self.platform_adapter.request_resume(task.candidate_id)
+                    self._enqueue_sync("resume_request", task.candidate_id, platform_result)
+                    result = AgentResult(
+                        success=True,
+                        status="completed",
+                        content="已在当前运行时场景中提交简历请求。",
+                        data={"status": "pass", "platform_result": platform_result},
+                        metadata={"platform_action": "request_resume"},
+                    )
+                    return _complete(result, workflow_run_id=workflow_run_id)
 
-            if self.agent_loop is None:
-                result = AgentResult(
-                    success=True,
-                    status="completed",
-                    content="在没有实时 provider 的情况下完成了一次模拟运行。",
-                    data={
-                        "status": "pass",
-                        "task_id": task.task_id,
-                        "candidate_id": task.candidate_id,
-                    },
-                    metadata={"synthetic": True},
+                if (
+                    task.task_type == "initiate_communication"
+                    and self.platform_adapter is not None
+                    and task.candidate_id
+                    and self.flags.is_enabled("feature.outbound_messaging")
+                ):
+                    platform_result = self.platform_adapter.send_message(
+                        task.candidate_id,
+                        str(task.payload.get("message") or "Hello, we would like to continue the recruiting process."),
+                    )
+                    self._enqueue_sync("communication", task.candidate_id, platform_result)
+                    result = AgentResult(
+                        success=True,
+                        status="completed",
+                        content="已在当前运行时场景中提交外联消息。",
+                        data={"status": "pass", "platform_result": platform_result},
+                        metadata={"platform_action": "send_message"},
+                    )
+                    return _complete(result, workflow_run_id=workflow_run_id)
+
+                if task.task_type == "archive_candidate" and self.platform_adapter is not None and task.candidate_id:
+                    platform_result = self.platform_adapter.archive_candidate(
+                        task.candidate_id,
+                        str(task.payload.get("reason") or "Archived by workflow."),
+                    )
+                    self._enqueue_sync("candidate_archive", task.candidate_id, platform_result)
+                    result = AgentResult(
+                        success=True,
+                        status="completed",
+                        content="已在当前运行时场景中归档候选人。",
+                        data={"status": "pass", "platform_result": platform_result},
+                        metadata={"platform_action": "archive_candidate"},
+                    )
+                    return _complete(result, workflow_run_id=workflow_run_id)
+
+                if self.agent_loop is None:
+                    result = AgentResult(
+                        success=True,
+                        status="completed",
+                        content="在没有实时 provider 的情况下完成了一次模拟运行。",
+                        data={
+                            "status": "pass",
+                            "task_id": task.task_id,
+                            "candidate_id": task.candidate_id,
+                        },
+                        metadata={"synthetic": True},
+                    )
+                    return _complete(result, workflow_run_id=workflow_run_id)
+
+                runtime_task = SimpleNamespace(
+                    task_type=task.task_type,
+                    workflow_node_id=task.workflow_node_id,
+                    payload=task.payload,
+                    max_turns=6,
+                    token_budget=4096,
                 )
-                self._persist_task_artifacts(
-                    task,
-                    result,
-                    workflow=workflow,
-                    workflow_node=workflow_node,
-                    workflow_run_id=workflow_run_id,
-                    session_context=runtime_session,
-                    skill_context=runtime_skill,
+                result = self.agent_loop.run(
+                    runtime_task,
+                    session=runtime_session or None,
+                    skill=runtime_skill or None,
+                    extra_context=platform_context or None,
                 )
-                return result
 
-            runtime_task = SimpleNamespace(
-                task_type=task.task_type,
-                workflow_node_id=task.workflow_node_id,
-                payload=task.payload,
-                max_turns=6,
-                token_budget=4096,
-            )
-            result = self.agent_loop.run(
-                runtime_task,
-                session=runtime_session or None,
-                skill=runtime_skill or None,
-                extra_context=platform_context or None,
-            )
+                if (
+                    task.task_type == "candidate_scoring"
+                    and self.platform_adapter is not None
+                    and task.candidate_id
+                    and result.success
+                    and result.data
+                ):
+                    platform_result = self.platform_adapter.score_candidate(task.candidate_id, result.data)
+                    result.metadata["platform_result"] = platform_result
+                    self._enqueue_sync("candidate_score", task.candidate_id, platform_result)
 
-            if (
-                task.task_type == "candidate_scoring"
-                and self.platform_adapter is not None
-                and task.candidate_id
-                and result.success
-                and result.data
-            ):
-                platform_result = self.platform_adapter.score_candidate(task.candidate_id, result.data)
-                result.metadata["platform_result"] = platform_result
-                self._enqueue_sync("candidate_score", task.candidate_id, platform_result)
-
-            if result.status == "waiting_human":
-                self._persist_blocked_task_approval(task, result)
-            self._persist_task_artifacts(
-                task,
-                result,
-                workflow=workflow,
-                workflow_node=workflow_node,
-                workflow_run_id=workflow_run_id,
-                session_context=runtime_session,
-                skill_context=runtime_skill,
-            )
-            self._persist_runtime_learning(task, result)
-            return result
+                return _complete(result, persist_learning=True, workflow_run_id=workflow_run_id)
+            except Exception as exc:
+                _finalize_runtime_error(exc)
+                raise
 
         return _run
 
@@ -1106,7 +1168,7 @@ class AgentControlService:
                     return
 
                 payload = self._build_blocked_task_payload(task, result)
-                approval_repo.create(
+                approval = approval_repo.create(
                     {
                         "target_type": "blocked_task",
                         "target_id": task.task_id,
@@ -1116,6 +1178,24 @@ class AgentControlService:
                         "payload": payload,
                         "notes": result.content or "任务已暂停，等待人工审查。",
                     }
+                )
+                RuntimeControlService(
+                    session,
+                    settings=self.settings,
+                    live_events=self.events,
+                ).create_checkpoint(
+                    task=task,
+                    checkpoint_kind="approval",
+                    title=approval.title,
+                    summary=result.content or "任务已暂停，等待人工审查。",
+                    payload={
+                        "approval_id": approval.id,
+                        "task_id": task.task_id,
+                        "task_type": task.task_type,
+                        "candidate_id": task.candidate_id,
+                        "blocked_task": payload.get("blocked_task"),
+                    },
+                    approval_id=approval.id,
                 )
                 self.events.publish(
                     "warning",

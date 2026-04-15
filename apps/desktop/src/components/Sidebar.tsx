@@ -14,11 +14,12 @@ interface SidebarProps {
 export function Sidebar({ active, onChange, counts }: SidebarProps): JSX.Element {
   const { copy } = useI18n();
   const tabs: Array<{ key: WorkspaceTab; label: string; detail: string }> = [
-    { key: "dashboard", label: copy("Overview", "概览"), detail: copy("Global health and cross-workflow signals", "全局健康状态与跨工作流信号") },
-    { key: "workflow-management", label: copy("Workflow Management", "工作流管理"), detail: copy("Create, trial, revise, and publish workflows", "创建、试跑、修正并发布工作流") },
-    { key: "workbench", label: copy("Workbench", "工作台"), detail: copy("Inspect each workflow and its live instances", "查看每条工作流及其实时运行状况") },
-    { key: "approvals", label: copy("Approvals", "审批中心"), detail: copy("Human gates and activation decisions", "人工关卡与生效决策") },
-    { key: "skills", label: copy("Skills", "Skills"), detail: copy("Skill approvals, health, and evolution", "Skills 审批、健康与演进") },
+    { key: "dashboard", label: copy("Overview", "概览"), detail: copy("Candidate progress, approvals, and live signals", "候选人进度、审批和实时信号") },
+    { key: "agent-inbox", label: copy("Agent IM", "Agent IM"), detail: copy("Run-time confirmations, blocked flow, and operator chat", "运行时确认、流程阻塞和操作员会话") },
+    { key: "recruit-agent", label: copy("Recruit Agent", "招聘 Agent"), detail: copy("Role, prompt, workflow, memory, and skill contracts", "角色、提示词、工作流、memory 和 skill 契约") },
+    { key: "workbench", label: copy("Workbench", "工作台"), detail: copy("Candidate progress and recent agent execution results", "候选人进度与最近的 agent 执行结果") },
+    { key: "communications", label: copy("Communications", "沟通中心"), detail: copy("Candidate-scoped threads and runtime confirmations", "候选人隔离线程与运行时确认") },
+    { key: "evolution", label: copy("Evolution", "自学习/演进"), detail: copy("Skill degradation, compaction, and evolution approvals", "skill 退化、compact 和演进审批") },
     { key: "settings", label: copy("Settings", "设置"), detail: copy("Provider and sync", "Provider 与同步") },
   ];
   return (
@@ -33,13 +34,13 @@ export function Sidebar({ active, onChange, counts }: SidebarProps): JSX.Element
     >
       <div style={{ marginBottom: "16px" }}>
         <div style={{ color: theme.colors.accent, textTransform: "uppercase", letterSpacing: "0.2em", fontSize: "11px" }}>
-          {copy("ScenePilot", "ScenePilot")}
+          {copy("Recruit Agent", "Recruit Agent")}
         </div>
-        <h1 style={{ margin: "8px 0 6px", fontSize: "24px", lineHeight: 1.08 }}>{copy("Workflow Console", "工作流控制台")}</h1>
+        <h1 style={{ margin: "8px 0 6px", fontSize: "24px", lineHeight: 1.08 }}>{copy("Recruit Agent Console", "招聘 Agent 控制台")}</h1>
         <p style={{ margin: 0, color: theme.colors.muted, fontSize: "13px", lineHeight: 1.5 }}>
           {copy(
-            "Local-first natural-language automation focused on workflow creation, supervised trial runs, workbench operations, approvals, and reusable scene knowledge.",
-            "本地优先的自然语言自动化平台，聚焦工作流创建、受监督试跑、工作台运营、审批，以及可复用的场景知识。",
+            "Local-first recruit-agent workspace focused on candidate progress, operator-visible configuration, isolated memory, communications, and skill evolution.",
+            "本地优先的 recruit-agent 工作区，聚焦候选人进度、可外露的 agent 配置、隔离 memory、沟通管理和 skill 演进。",
           )}
         </p>
       </div>

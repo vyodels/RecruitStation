@@ -24,6 +24,7 @@ from scene_pilot.services.feature_flags import FeatureFlagService
 from scene_pilot.services.browser_mcp import BrowserMcpClient, BrowserMcpError, capture_boss_scene, discover_boss_candidates, inspect_boss_candidate
 from scene_pilot.repositories import SettingsRepository, SkillRepository
 from scene_pilot.services.runtime import PersistedRuntimeService
+from scene_pilot.services.runtime_control import RuntimeControlService
 from scene_pilot.services.skills import SkillHealthSweepService, SkillLifecycleService, SkillSafetyService
 from scene_pilot.services.sync import SyncService
 from scene_pilot.services.system_commands import SystemCommandService
@@ -428,6 +429,7 @@ class AppContainer:
         self.dashboard.settings = settings
         self.sync.intranet_enabled = settings.feature_flags.enable_intranet_sync
         self.sync.target = _build_sync_target(settings)
+        self.agent_control.settings = settings
         self.flags.merge(
             {
                 "skills.auto_activate": False,
@@ -517,6 +519,7 @@ class AppContainer:
         agent_control = AgentControlService(
             scheduler=scheduler,
             workflow_engine=workflow_engine,
+            settings=resolved_settings,
             agent_loop=agent_loop,
             events=events,
             flags=flags,
@@ -556,6 +559,8 @@ class AppContainer:
             recovered_tasks = int(recover_stale())
         with container.session_factory() as session:
             recovered_episodes = PersistedRuntimeService(session=session, providers=container.providers).recover_running_episodes()
+        with container.session_factory() as session:
+            recovered_runs = RuntimeControlService(session, settings=resolved_settings, live_events=events).recover_running_runs()
         should_seed = seed_demo if seed_demo is not None else settings is None
         if should_seed:
             container.seed()
@@ -572,6 +577,13 @@ class AppContainer:
                 "runtime",
                 "已恢复上一次本地运行中断的执行记录。",
                 recovered_episodes=recovered_episodes,
+            )
+        if recovered_runs:
+            events.publish(
+                "warning",
+                "runtime_control",
+                "已恢复上一次中断的 AgentRun 记录。",
+                recovered_runs=recovered_runs,
             )
         events.publish("info", "bootstrap", "应用容器已初始化。")
         return container
@@ -705,7 +717,7 @@ class AppContainer:
                 [
                     Candidate(
                         name="Mia Chen",
-                        platform="招聘工作流",
+                        platform="Recruit Agent",
                         platform_candidate_id="site_001",
                         status="screening",
                         current_workflow_node="initial_screening",
@@ -724,7 +736,7 @@ class AppContainer:
                     ),
                     Candidate(
                         name="Jason Li",
-                        platform="招聘工作流",
+                        platform="Recruit Agent",
                         platform_candidate_id="site_002",
                         status="pending_communication",
                         current_workflow_node="initiate_communication",
@@ -741,7 +753,7 @@ class AppContainer:
                     ),
                     Candidate(
                         name="Luna Wang",
-                        platform="招聘工作流",
+                        platform="Recruit Agent",
                         platform_candidate_id="site_003",
                         status="cooldown",
                         current_workflow_node="cooldown",
@@ -801,7 +813,7 @@ class AppContainer:
                         version=1,
                         status="active",
                         bound_to_workflow_node="initiate_communication",
-                        platform="招聘工作流",
+                        platform="Recruit Agent",
                         strategy={"summary": "生成简短、克制、带岗位上下文的外联内容。"},
                         last_health_status="healthy",
                         last_health_check=_utcnow(),
@@ -812,7 +824,7 @@ class AppContainer:
                         version=1,
                         status="pending_review",
                         bound_to_workflow_node="initial_screening",
-                        platform="招聘工作流",
+                        platform="Recruit Agent",
                         strategy={"summary": "由近期候选人案例沉淀而来，当前等待批准。"},
                         last_health_status="warning",
                         last_health_check=_utcnow(),
@@ -831,7 +843,7 @@ class AppContainer:
                         title="激活人才库交接",
                         status="pending",
                         requested_by="ops",
-                        payload={"summary": "启用从评分到人工审查的工作流路径。"},
+                        payload={"summary": "启用从评分到人工审查的候选人交接路径。"},
                     ),
                 ]
             )

@@ -17,6 +17,13 @@ def _runtime_scene_account(settings: AppSettings) -> str:
     return str(provider_config.get("site_account") or provider_config.get("boss_account") or "本机场景 01")
 
 
+def _normalize_optional_string(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
 def _to_desktop_settings(settings: AppSettings) -> SettingsSnapshotRead:
     return SettingsSnapshotRead.model_validate(
         {
@@ -33,17 +40,19 @@ def _to_desktop_settings(settings: AppSettings) -> SettingsSnapshotRead:
                     "kind": "openai-compatible",
                     "name": "主 OpenAI 接口",
                     "model": settings.provider_config.get("openai_model", "gpt-5.4"),
-                    "enabled": True,
+                    "enabled": bool(settings.provider_config.get("openai_enabled", True)),
                     "temperature": 0.2,
                     "baseUrl": settings.provider_config.get("openai_base_url", "https://api.openai.com/v1"),
+                    "apiKey": settings.provider_config.get("openai_api_key"),
                 },
                 {
                     "kind": "anthropic",
                     "name": "备用 Anthropic 接口",
                     "model": settings.provider_config.get("anthropic_model", "claude-sonnet-4"),
-                    "enabled": False,
+                    "enabled": bool(settings.provider_config.get("anthropic_enabled", False)),
                     "temperature": 0.2,
                     "baseUrl": settings.provider_config.get("anthropic_base_url", "https://api.anthropic.com"),
+                    "apiKey": settings.provider_config.get("anthropic_api_key"),
                 },
             ],
             "intranetSync": {
@@ -53,10 +62,12 @@ def _to_desktop_settings(settings: AppSettings) -> SettingsSnapshotRead:
                 "timeoutSeconds": settings.intranet_sync.timeout_seconds,
             },
             "platform": {
-                "name": "运行时场景画像",
+                "name": "本地执行配置",
                 "account": _runtime_scene_account(settings),
                 "cooldownDays": settings.provider_config.get("cooldown_days", 30),
                 "allowOutboundMessaging": settings.feature_flags.enable_outbound_messaging,
+                "maxConcurrentRuns": settings.provider_config.get("max_concurrent_runs", 1),
+                "bossMaxConcurrentRuns": settings.provider_config.get("boss_max_concurrent_runs"),
             },
         }
     )
@@ -106,15 +117,32 @@ def update_settings(
             provider_config["cooldown_days"] = platform_data["cooldownDays"]
         if "allowOutboundMessaging" in platform_data:
             data["feature_flags"]["enable_outbound_messaging"] = platform_data["allowOutboundMessaging"]
+        if "maxConcurrentRuns" in platform_data:
+            provider_config["max_concurrent_runs"] = max(int(platform_data["maxConcurrentRuns"]), 1)
+        if "bossMaxConcurrentRuns" in platform_data:
+            boss_limit = platform_data["bossMaxConcurrentRuns"]
+            provider_config["boss_max_concurrent_runs"] = max(int(boss_limit), 1) if boss_limit is not None else None
     if payload.providers is not None:
         provider_config = data.setdefault("provider_config", {})
         for provider in payload.providers:
             if provider.kind == "openai-compatible":
                 provider_config["openai_model"] = provider.model
-                provider_config["openai_base_url"] = provider.baseUrl
+                normalized_base_url = _normalize_optional_string(provider.baseUrl)
+                if normalized_base_url is None:
+                    provider_config.pop("openai_base_url", None)
+                else:
+                    provider_config["openai_base_url"] = normalized_base_url
+                provider_config["openai_api_key"] = _normalize_optional_string(provider.apiKey)
+                provider_config["openai_enabled"] = provider.enabled
             elif provider.kind == "anthropic":
                 provider_config["anthropic_model"] = provider.model
-                provider_config["anthropic_base_url"] = provider.baseUrl
+                normalized_base_url = _normalize_optional_string(provider.baseUrl)
+                if normalized_base_url is None:
+                    provider_config.pop("anthropic_base_url", None)
+                else:
+                    provider_config["anthropic_base_url"] = normalized_base_url
+                provider_config["anthropic_api_key"] = _normalize_optional_string(provider.apiKey)
+                provider_config["anthropic_enabled"] = provider.enabled
     if payload.approval_source is not None:
         data["approval_source"] = payload.approval_source
     if payload.feature_flags is not None:

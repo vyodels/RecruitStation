@@ -103,6 +103,13 @@ def update_skill(skill_id: str, payload: SkillUpdate, session: Session = Depends
     return SkillRead.model_validate(updated)
 
 
+@router.delete("/{skill_id}", status_code=204)
+def delete_skill(skill_id: str, session: Session = Depends(get_session)) -> None:
+    repo = SkillRepository(session)
+    item = _get_skill_or_404(repo, skill_id)
+    repo.delete(item)
+
+
 @router.post("/{skill_id}/submit-review", response_model=SkillRead)
 def submit_skill_for_review(skill_id: str, session: Session = Depends(get_session)) -> SkillRead:
     repo = SkillRepository(session)

@@ -6,9 +6,9 @@ import process from "node:process";
 import url from "node:url";
 
 const isDev = !app.isPackaged;
-const backendOrigin = (process.env.SCENE_PILOT_BACKEND_URL ?? "http://127.0.0.1:8741").replace(/\/$/, "");
+const backendOrigin = (process.env.RECRUIT_AGENT_BACKEND_URL ?? "http://127.0.0.1:8741").replace(/\/$/, "");
 const backendHealthUrl = `${backendOrigin}/health`;
-const backendStartupTimeoutMs = Number(process.env.SCENE_PILOT_BACKEND_STARTUP_TIMEOUT_MS ?? 20_000);
+const backendStartupTimeoutMs = Number(process.env.RECRUIT_AGENT_BACKEND_STARTUP_TIMEOUT_MS ?? 20_000);
 let backendProcess: ChildProcessWithoutNullStreams | undefined;
 
 function createWindow(): BrowserWindow {
@@ -17,7 +17,7 @@ function createWindow(): BrowserWindow {
     height: 920,
     minWidth: 1180,
     minHeight: 760,
-    title: "ScenePilot",
+    title: "Recruit Agent",
     show: false,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
@@ -34,7 +34,7 @@ function buildBootHtml(title: string, detail: string): string {
     <html>
       <body style="margin:0;display:grid;place-items:center;background:#070b16;color:#eef3ff;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif">
         <main style="max-width:560px;padding:32px 36px;border:1px solid rgba(255,255,255,0.12);border-radius:24px;background:rgba(255,255,255,0.04)">
-          <div style="font-size:12px;letter-spacing:0.18em;text-transform:uppercase;color:rgba(238,243,255,0.56)">ScenePilot</div>
+          <div style="font-size:12px;letter-spacing:0.18em;text-transform:uppercase;color:rgba(238,243,255,0.56)">Recruit Agent</div>
           <h1 style="margin:12px 0 10px;font-size:28px;line-height:1.1">${escapedTitle}</h1>
           <p style="margin:0;color:rgba(238,243,255,0.74);line-height:1.6">${escapedDetail}</p>
         </main>
@@ -51,8 +51,9 @@ async function showBootState(window: BrowserWindow, title: string, detail: strin
 }
 
 function resolveBackendCommand(): string[] {
-  if (process.env.SCENE_PILOT_BACKEND_CMD) {
-    return process.env.SCENE_PILOT_BACKEND_CMD.split(" ");
+  const backendCommand = process.env.RECRUIT_AGENT_BACKEND_CMD;
+  if (backendCommand) {
+    return backendCommand.split(" ");
   }
 
   if (!isDev) {
@@ -62,15 +63,16 @@ function resolveBackendCommand(): string[] {
     }
   }
 
-  return ["python3", "-m", "scene_pilot.server"];
+  return ["python3", "-m", "recruit_agent.server"];
 }
 
 function resolvePackagedBackendBinary(): string | null {
-  if (process.env.SCENE_PILOT_BACKEND_BUNDLED_PATH) {
-    return process.env.SCENE_PILOT_BACKEND_BUNDLED_PATH;
+  const bundledBackendPath = process.env.RECRUIT_AGENT_BACKEND_BUNDLED_PATH;
+  if (bundledBackendPath) {
+    return bundledBackendPath;
   }
 
-  const executableName = process.platform === "win32" ? "scene-pilot-backend.exe" : "scene-pilot-backend";
+  const executableName = process.platform === "win32" ? "recruit-agent-backend.exe" : "recruit-agent-backend";
   return path.join(process.resourcesPath, "backend-dist", executableName);
 }
 
@@ -79,8 +81,9 @@ function resolveBackendCwd(): string {
     return path.resolve(__dirname, "../../services/backend/src");
   }
 
-  if (process.env.SCENE_PILOT_BACKEND_CWD) {
-    return process.env.SCENE_PILOT_BACKEND_CWD;
+  const backendCwd = process.env.RECRUIT_AGENT_BACKEND_CWD;
+  if (backendCwd) {
+    return backendCwd;
   }
 
   return path.join(process.resourcesPath, "backend-src", "src");
@@ -102,7 +105,7 @@ function startBackend(): void {
     cwd,
     env: {
       ...process.env,
-      SCENE_PILOT_DESKTOP_MODE: "1",
+      RECRUIT_AGENT_DESKTOP_MODE: "1",
     },
   });
 

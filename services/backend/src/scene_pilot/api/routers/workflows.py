@@ -7,7 +7,7 @@ from scene_pilot.api.deps import get_session
 from scene_pilot.repositories import WorkflowRepository
 from scene_pilot.schemas import WorkflowCreate, WorkflowRead, WorkflowUpdate
 
-router = APIRouter(prefix="/api/workflows", tags=["workflows"])
+router = APIRouter(prefix="/api/recruit-agent/playbooks", tags=["recruit-agent-playbooks"])
 
 
 @router.get("", response_model=list[WorkflowRead])
@@ -29,7 +29,7 @@ def create_workflow(payload: WorkflowCreate, session: Session = Depends(get_sess
 def get_workflow(workflow_id: str, session: Session = Depends(get_session)) -> WorkflowRead:
     item = WorkflowRepository(session).get(workflow_id)
     if item is None:
-        raise HTTPException(status_code=404, detail="Workflow not found")
+        raise HTTPException(status_code=404, detail="Playbook not found")
     return WorkflowRead.model_validate(item)
 
 
@@ -42,7 +42,7 @@ def update_workflow(
     repo = WorkflowRepository(session)
     item = repo.get(workflow_id)
     if item is None:
-        raise HTTPException(status_code=404, detail="Workflow not found")
+        raise HTTPException(status_code=404, detail="Playbook not found")
     updated = repo.update(item, payload)
     return WorkflowRead.model_validate(updated)
 
@@ -52,5 +52,5 @@ def delete_workflow(workflow_id: str, session: Session = Depends(get_session)) -
     repo = WorkflowRepository(session)
     item = repo.get(workflow_id)
     if item is None:
-        raise HTTPException(status_code=404, detail="Workflow not found")
+        raise HTTPException(status_code=404, detail="Playbook not found")
     repo.delete(item)

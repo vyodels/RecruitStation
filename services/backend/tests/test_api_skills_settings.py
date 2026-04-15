@@ -8,7 +8,7 @@ def make_client(tmp_path):
     app = create_app(
         AppSettings(
             data_dir=str(tmp_path / "data"),
-            database_url=f"sqlite:///{tmp_path / 'scene-pilot.db'}",
+            database_url=f"sqlite:///{tmp_path / 'recruit-agent.db'}",
         )
     )
     return TestClient(app)
@@ -103,3 +103,68 @@ def test_settings_reload_runtime_provider_config(tmp_path):
         assert "openai_compatible" in restarted_container.providers.providers
         assert restarted_container.providers.providers["openai_compatible"].config.base_url == "http://127.0.0.1:8317/v1"
         assert restarted_container.providers.providers["openai_compatible"].config.api_key == "test-openai-compatible-key"
+
+
+def test_settings_provider_credentials_are_persisted_and_exposed(tmp_path):
+    with make_client(tmp_path) as client:
+        update_response = client.patch(
+            "/api/settings",
+            json={
+                "providers": [
+                    {
+                        "kind": "openai-compatible",
+                        "name": "主 OpenAI 接口",
+                        "model": "gpt-5.4",
+                        "enabled": True,
+                        "temperature": 0.2,
+                        "baseUrl": "https://openrouter.ai/api/v1",
+                        "apiKey": "sk-openrouter-example",
+                    },
+                    {
+                        "kind": "anthropic",
+                        "name": "备用 Anthropic 接口",
+                        "model": "claude-sonnet-4",
+                        "enabled": True,
+                        "temperature": 0.2,
+                        "baseUrl": "https://api.anthropic.com",
+                        "apiKey": "sk-ant-example",
+                    },
+                ]
+            },
+        )
+        assert update_response.status_code == 200
+        payload = update_response.json()
+        assert payload["providers"][0]["baseUrl"] == "https://openrouter.ai/api/v1"
+        assert payload["providers"][0]["apiKey"] == "sk-openrouter-example"
+        assert payload["providers"][1]["apiKey"] == "sk-ant-example"
+
+    with make_client(tmp_path) as restarted_client:
+        settings_response = restarted_client.get("/api/settings")
+        assert settings_response.status_code == 200
+        payload = settings_response.json()
+        assert payload["providers"][0]["apiKey"] == "sk-openrouter-example"
+        assert payload["providers"][1]["baseUrl"] == "https://api.anthropic.com"
+
+
+def test_settings_platform_concurrency_limits_are_persisted(tmp_path):
+    with make_client(tmp_path) as client:
+        update_response = client.patch(
+            "/api/settings",
+            json={
+                "platform": {
+                    "maxConcurrentRuns": 2,
+                    "bossMaxConcurrentRuns": 1,
+                }
+            },
+        )
+        assert update_response.status_code == 200
+        payload = update_response.json()
+        assert payload["platform"]["maxConcurrentRuns"] == 2
+        assert payload["platform"]["bossMaxConcurrentRuns"] == 1
+
+    with make_client(tmp_path) as restarted_client:
+        settings_response = restarted_client.get("/api/settings")
+        assert settings_response.status_code == 200
+        payload = settings_response.json()
+        assert payload["platform"]["maxConcurrentRuns"] == 2
+        assert payload["platform"]["bossMaxConcurrentRuns"] == 1

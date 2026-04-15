@@ -8,7 +8,7 @@ def make_client(tmp_path):
     app = create_app(
         AppSettings(
             data_dir=str(tmp_path / "data"),
-            database_url=f"sqlite:///{tmp_path / 'scene-pilot.db'}",
+            database_url=f"sqlite:///{tmp_path / 'recruit-agent.db'}",
         )
     )
     return TestClient(app)

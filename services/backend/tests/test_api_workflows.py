@@ -3,12 +3,14 @@ from fastapi.testclient import TestClient
 from scene_pilot.core.app import create_app
 from scene_pilot.core.settings import AppSettings
 
+PLAYBOOKS_API_BASE = "/api/recruit-agent/playbooks"
+
 
 def make_client(tmp_path):
     app = create_app(
         AppSettings(
             data_dir=str(tmp_path / "data"),
-            database_url=f"sqlite:///{tmp_path / 'scene-pilot.db'}",
+            database_url=f"sqlite:///{tmp_path / 'recruit-agent.db'}",
         )
     )
     return TestClient(app)
@@ -17,7 +19,7 @@ def make_client(tmp_path):
 def test_workflow_crud(tmp_path):
     with make_client(tmp_path) as client:
         create_response = client.post(
-            "/api/workflows",
+            PLAYBOOKS_API_BASE,
             json={
                 "name": "Initial Screening",
                 "jd_id": "jd-001",
@@ -31,18 +33,17 @@ def test_workflow_crud(tmp_path):
         assert workflow["name"] == "Initial Screening"
 
         workflow_id = workflow["id"]
-        list_response = client.get("/api/workflows")
+        list_response = client.get(PLAYBOOKS_API_BASE)
         assert list_response.status_code == 200
         assert len(list_response.json()) == 1
 
         patch_response = client.patch(
-            f"/api/workflows/{workflow_id}",
+            f"{PLAYBOOKS_API_BASE}/{workflow_id}",
             json={"status": "active", "version": 2},
         )
         assert patch_response.status_code == 200
         assert patch_response.json()["status"] == "active"
         assert patch_response.json()["version"] == 2
 
-        delete_response = client.delete(f"/api/workflows/{workflow_id}")
+        delete_response = client.delete(f"{PLAYBOOKS_API_BASE}/{workflow_id}")
         assert delete_response.status_code == 204
-

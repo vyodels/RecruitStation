@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
@@ -15,12 +15,12 @@ class FeatureFlags(BaseModel):
 
 
 class AppSettingsBase(BaseModel):
-    app_name: str = "ScenePilot"
+    app_name: str = "Recruit Agent"
     environment: str = "development"
     host: str = "127.0.0.1"
     port: int = 8741
     data_dir: str = "./data"
-    database_url: str = "sqlite:///./scene-pilot.db"
+    database_url: str = "sqlite:///./recruit-agent.db"
     database_echo: bool = False
     scheduler_lock_timeout_seconds: int = 300
     skill_health_autonomy_interval_seconds: int = 300
@@ -60,6 +60,7 @@ class CandidateBase(BaseModel):
     current_workflow_node: str | None = None
     jd_id: str | None = None
     contact_info: dict[str, Any] = Field(default_factory=dict)
+    state_snapshot: dict[str, Any] = Field(default_factory=dict)
     resume_path: str | None = None
     online_resume_text: str | None = None
     ai_scores: dict[str, Any] = Field(default_factory=dict)
@@ -80,6 +81,7 @@ class CandidateUpdate(BaseModel):
     current_workflow_node: str | None = None
     jd_id: str | None = None
     contact_info: dict[str, Any] | None = None
+    state_snapshot: dict[str, Any] | None = None
     resume_path: str | None = None
     online_resume_text: str | None = None
     ai_scores: dict[str, Any] | None = None
@@ -94,6 +96,476 @@ class CandidateRead(CandidateBase):
     id: str
     created_at: datetime
     updated_at: datetime
+
+
+class RecruitAgentProfileBase(BaseModel):
+    agent_key: str
+    name: str
+    status: str = "draft"
+    description: str | None = None
+    is_primary: bool = False
+    role_definition: dict[str, Any] = Field(default_factory=dict)
+    prompt_config: dict[str, Any] = Field(default_factory=dict)
+    workflow_definition: dict[str, Any] = Field(default_factory=dict)
+    memory_policy: dict[str, Any] = Field(default_factory=dict)
+    dashboard_config: dict[str, Any] = Field(default_factory=dict)
+    channel_config: dict[str, Any] = Field(default_factory=dict)
+    agent_metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RecruitAgentProfileCreate(RecruitAgentProfileBase):
+    pass
+
+
+class RecruitAgentProfileUpdate(BaseModel):
+    agent_key: str | None = None
+    name: str | None = None
+    status: str | None = None
+    description: str | None = None
+    is_primary: bool | None = None
+    role_definition: dict[str, Any] | None = None
+    prompt_config: dict[str, Any] | None = None
+    workflow_definition: dict[str, Any] | None = None
+    memory_policy: dict[str, Any] | None = None
+    dashboard_config: dict[str, Any] | None = None
+    channel_config: dict[str, Any] | None = None
+    agent_metadata: dict[str, Any] | None = None
+
+
+class RecruitAgentProfileRead(RecruitAgentProfileBase):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class CandidateMemoryBase(BaseModel):
+    agent_profile_id: str
+    candidate_id: str
+    status: str = "active"
+    memory_schema_version: str = "candidate-memory-v1"
+    summary: str | None = None
+    raw_content: dict[str, Any] = Field(default_factory=dict)
+    content: dict[str, Any] = Field(default_factory=dict)
+    disclosure: dict[str, Any] = Field(default_factory=dict)
+    token_estimate: int = 0
+    source_count: int = 0
+    compacted_at: datetime | None = None
+    compacted_reason: str | None = None
+    memory_metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CandidateMemoryCreate(CandidateMemoryBase):
+    pass
+
+
+class CandidateMemoryUpdate(BaseModel):
+    status: str | None = None
+    memory_schema_version: str | None = None
+    summary: str | None = None
+    raw_content: dict[str, Any] | None = None
+    content: dict[str, Any] | None = None
+    disclosure: dict[str, Any] | None = None
+    token_estimate: int | None = None
+    source_count: int | None = None
+    compacted_at: datetime | None = None
+    compacted_reason: str | None = None
+    memory_metadata: dict[str, Any] | None = None
+
+
+class CandidateMemoryRead(CandidateMemoryBase):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class JobMemoryBase(BaseModel):
+    agent_profile_id: str
+    jd_id: str
+    status: str = "active"
+    memory_schema_version: str = "job-memory-v1"
+    summary: str | None = None
+    raw_content: dict[str, Any] = Field(default_factory=dict)
+    content: dict[str, Any] = Field(default_factory=dict)
+    disclosure: dict[str, Any] = Field(default_factory=dict)
+    token_estimate: int = 0
+    source_count: int = 0
+    compacted_at: datetime | None = None
+    compacted_reason: str | None = None
+    memory_metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class JobMemoryCreate(JobMemoryBase):
+    pass
+
+
+class JobMemoryUpdate(BaseModel):
+    status: str | None = None
+    memory_schema_version: str | None = None
+    summary: str | None = None
+    raw_content: dict[str, Any] | None = None
+    content: dict[str, Any] | None = None
+    disclosure: dict[str, Any] | None = None
+    token_estimate: int | None = None
+    source_count: int | None = None
+    compacted_at: datetime | None = None
+    compacted_reason: str | None = None
+    memory_metadata: dict[str, Any] | None = None
+
+
+class JobMemoryRead(JobMemoryBase):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class AgentGlobalMemoryBase(BaseModel):
+    agent_profile_id: str
+    status: str = "active"
+    memory_schema_version: str = "agent-global-memory-v1"
+    summary: str | None = None
+    raw_content: dict[str, Any] = Field(default_factory=dict)
+    content: dict[str, Any] = Field(default_factory=dict)
+    disclosure: dict[str, Any] = Field(default_factory=dict)
+    token_estimate: int = 0
+    source_count: int = 0
+    compacted_at: datetime | None = None
+    compacted_reason: str | None = None
+    memory_metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentGlobalMemoryCreate(AgentGlobalMemoryBase):
+    pass
+
+
+class AgentGlobalMemoryUpdate(BaseModel):
+    status: str | None = None
+    memory_schema_version: str | None = None
+    summary: str | None = None
+    raw_content: dict[str, Any] | None = None
+    content: dict[str, Any] | None = None
+    disclosure: dict[str, Any] | None = None
+    token_estimate: int | None = None
+    source_count: int | None = None
+    compacted_at: datetime | None = None
+    compacted_reason: str | None = None
+    memory_metadata: dict[str, Any] | None = None
+
+
+class AgentGlobalMemoryRead(AgentGlobalMemoryBase):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class MemoryCompactRequest(BaseModel):
+    reason: str = "manual_compact"
+    force: bool = False
+
+
+class CandidateConversationEntryBase(BaseModel):
+    direction: str
+    content: str
+    message_type: str = "text"
+    platform: str = "site"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    timestamp: datetime | None = None
+
+
+class CandidateConversationEntryCreate(CandidateConversationEntryBase):
+    pass
+
+
+class CandidateConversationEntryRead(CandidateConversationEntryBase):
+    id: str
+
+
+class CandidateStateSnapshotRead(BaseModel):
+    current_phase_key: str | None = None
+    current_phase_label: str | None = None
+    current_stage_key: str | None = None
+    current_stage_label: str | None = None
+    contact_status: str | None = None
+    contact_channels: list[str] = Field(default_factory=list)
+    contact_acquired: bool = False
+    resume_status: str | None = None
+    ai_assessment_status: str | None = None
+    human_assessment_status: str | None = None
+    operator_flags: list[str] = Field(default_factory=list)
+    next_recommended_stages: list[str] = Field(default_factory=list)
+    interview_plan: dict[str, Any] = Field(default_factory=dict)
+    latest_note: str | None = None
+    latest_transition_at: datetime | None = None
+    latest_transition_source: str | None = None
+    snapshot_metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CandidateStateTransitionRequest(BaseModel):
+    to_status: str
+    phase_key: str | None = None
+    phase_label: str | None = None
+    stage_key: str | None = None
+    stage_label: str | None = None
+    note: str | None = None
+    source: str = "operator"
+    actor: str | None = "desktop-user"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    interview_round: int | None = None
+    contact_channels: list[str] | None = None
+
+
+class CandidateStageEventBase(BaseModel):
+    candidate_id: str
+    event_type: str = "stage_transition"
+    from_status: str | None = None
+    to_status: str
+    phase_key: str | None = None
+    phase_label: str | None = None
+    stage_key: str | None = None
+    stage_label: str | None = None
+    actor: str | None = None
+    source: str = "agent"
+    note: str | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+    occurred_at: datetime | None = None
+
+
+class CandidateStageEventCreate(CandidateStageEventBase):
+    pass
+
+
+class CandidateStageEventRead(CandidateStageEventBase):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class CandidateAssessmentBase(BaseModel):
+    candidate_id: str
+    assessment_type: str = "ai"
+    stage_key: str | None = None
+    status: str = "completed"
+    decision: str | None = None
+    score: int | None = None
+    summary: str | None = None
+    evidence_refs: list[Any] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict, validation_alias=AliasChoices("assessment_metadata", "metadata"))
+    created_by: str | None = None
+    reviewed_by: str | None = None
+    reviewed_at: datetime | None = None
+
+
+class CandidateAssessmentCreate(CandidateAssessmentBase):
+    pass
+
+
+class CandidateAssessmentRead(CandidateAssessmentBase):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class CandidateAssignmentBase(BaseModel):
+    candidate_id: str
+    assignee: str
+    owner_role: str = "operator"
+    status: str = "active"
+    note: str | None = None
+    assignment_metadata: dict[str, Any] = Field(
+        default_factory=dict,
+        validation_alias=AliasChoices("assignment_metadata", "metadata"),
+    )
+    assigned_at: datetime | None = None
+    released_at: datetime | None = None
+
+
+class CandidateAssignmentCreate(CandidateAssignmentBase):
+    pass
+
+
+class CandidateAssignmentRead(CandidateAssignmentBase):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class ResumeArtifactBase(BaseModel):
+    candidate_id: str
+    source: str = "boss"
+    artifact_type: str = "resume"
+    file_name: str | None = None
+    file_path: str | None = None
+    extracted_text: str | None = None
+    contact_snapshot: dict[str, Any] = Field(default_factory=dict)
+    artifact_metadata: dict[str, Any] = Field(
+        default_factory=dict,
+        validation_alias=AliasChoices("artifact_metadata", "metadata"),
+    )
+    captured_at: datetime | None = None
+
+
+class ResumeArtifactCreate(ResumeArtifactBase):
+    pass
+
+
+class ResumeArtifactRead(ResumeArtifactBase):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class CandidateScorecardBase(BaseModel):
+    candidate_id: str
+    stage_key: str | None = None
+    source: str = "ai"
+    rubric_version: str = "recruit-scorecard-v1"
+    score_total: int | None = None
+    verdict: str | None = None
+    summary: str | None = None
+    dimension_scores: dict[str, Any] = Field(default_factory=dict)
+    evidence_refs: list[Any] = Field(default_factory=list)
+    scorecard_metadata: dict[str, Any] = Field(
+        default_factory=dict,
+        validation_alias=AliasChoices("scorecard_metadata", "metadata"),
+    )
+
+
+class CandidateScorecardCreate(CandidateScorecardBase):
+    pass
+
+
+class CandidateScorecardRead(CandidateScorecardBase):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class CandidateReviewDecisionBase(BaseModel):
+    candidate_id: str
+    stage_key: str | None = None
+    decision: str
+    rationale: str | None = None
+    decision_source: str = "manual"
+    decided_by: str | None = None
+    scorecard_id: str | None = None
+    review_metadata: dict[str, Any] = Field(
+        default_factory=dict,
+        validation_alias=AliasChoices("review_metadata", "metadata"),
+    )
+    decided_at: datetime | None = None
+
+
+class CandidateReviewDecisionCreate(CandidateReviewDecisionBase):
+    pass
+
+
+class CandidateReviewDecisionRead(CandidateReviewDecisionBase):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class TalentPoolSyncRecordBase(BaseModel):
+    candidate_id: str
+    destination: str = "talent_pool"
+    status: str = "pending"
+    external_ref: str | None = None
+    payload_snapshot: dict[str, Any] = Field(default_factory=dict)
+    error_message: str | None = None
+    synced_at: datetime | None = None
+    last_attempted_at: datetime | None = None
+    sync_metadata: dict[str, Any] = Field(
+        default_factory=dict,
+        validation_alias=AliasChoices("sync_metadata", "metadata"),
+    )
+
+
+class TalentPoolSyncRecordCreate(TalentPoolSyncRecordBase):
+    pass
+
+
+class TalentPoolSyncRecordRead(TalentPoolSyncRecordBase):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class EvolutionArtifactBase(BaseModel):
+    agent_profile_id: str | None = None
+    artifact_kind: Literal["skill_draft", "prompt_patch", "memory_policy_patch", "playbook_patch", "workflow_patch"]
+    title: str
+    summary: str | None = None
+    status: Literal["draft", "pending_review", "approved", "applied", "rejected", "archived"] = "pending_review"
+    related_candidate_id: str | None = None
+    related_skill_id: str | None = None
+    proposed_by: str | None = None
+    reviewed_by: str | None = None
+    reviewed_at: datetime | None = None
+    applied_at: datetime | None = None
+    artifact_body: dict[str, Any] = Field(default_factory=dict)
+    artifact_metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class EvolutionArtifactCreate(EvolutionArtifactBase):
+    pass
+
+
+class EvolutionArtifactUpdate(BaseModel):
+    summary: str | None = None
+    status: Literal["draft", "pending_review", "approved", "applied", "rejected", "archived"] | None = None
+    reviewed_by: str | None = None
+    reviewed_at: datetime | None = None
+    applied_at: datetime | None = None
+    artifact_body: dict[str, Any] | None = None
+    artifact_metadata: dict[str, Any] | None = None
+
+
+class EvolutionArtifactRead(EvolutionArtifactBase):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class CandidateThreadRead(BaseModel):
+    candidate: CandidateRead
+    session_status: str = "active"
+    context_summary: str | None = None
+    facts: dict[str, Any] = Field(default_factory=dict)
+    recent_messages: list[dict[str, Any]] = Field(default_factory=list)
+    communication_logs: list[CandidateConversationEntryRead] = Field(default_factory=list)
+    state_snapshot: CandidateStateSnapshotRead = Field(default_factory=CandidateStateSnapshotRead)
+    stage_events: list[CandidateStageEventRead] = Field(default_factory=list)
+    assessments: list[CandidateAssessmentRead] = Field(default_factory=list)
+    assignments: list[CandidateAssignmentRead] = Field(default_factory=list)
+    resume_artifacts: list[ResumeArtifactRead] = Field(default_factory=list)
+    scorecards: list[CandidateScorecardRead] = Field(default_factory=list)
+    review_decisions: list[CandidateReviewDecisionRead] = Field(default_factory=list)
+    sync_records: list[TalentPoolSyncRecordRead] = Field(default_factory=list)
+    available_statuses: list[str] = Field(default_factory=list)
+    runtime_approvals: list["ApprovalRead"] = Field(default_factory=list)
 
 
 class WorkflowBase(BaseModel):
@@ -627,13 +1099,19 @@ class ExecutionPlanReplanRead(BaseModel):
 class SkillBase(BaseModel):
     skill_id: str
     name: str
+    description: str | None = None
+    category: str = "general"
     version: int = 1
     status: str = "draft"
     bound_to_workflow_node: str | None = None
     platform: str = "site"
+    input_schema: dict[str, Any] = Field(default_factory=dict)
+    output_schema: dict[str, Any] = Field(default_factory=dict)
     strategy: dict[str, Any] = Field(default_factory=dict)
     execution_hints: dict[str, Any] = Field(default_factory=dict)
+    risk_level: str = "medium"
     health_check_config: dict[str, Any] = Field(default_factory=dict)
+    skill_metadata: dict[str, Any] = Field(default_factory=dict)
     last_health_check: datetime | None = None
     last_health_status: str | None = None
     confirmed_by: str | None = None
@@ -647,13 +1125,19 @@ class SkillCreate(SkillBase):
 class SkillUpdate(BaseModel):
     skill_id: str | None = None
     name: str | None = None
+    description: str | None = None
+    category: str | None = None
     version: int | None = None
     status: str | None = None
     bound_to_workflow_node: str | None = None
     platform: str | None = None
+    input_schema: dict[str, Any] | None = None
+    output_schema: dict[str, Any] | None = None
     strategy: dict[str, Any] | None = None
     execution_hints: dict[str, Any] | None = None
+    risk_level: str | None = None
     health_check_config: dict[str, Any] | None = None
+    skill_metadata: dict[str, Any] | None = None
     last_health_check: datetime | None = None
     last_health_status: str | None = None
     confirmed_by: str | None = None
@@ -889,6 +1373,7 @@ class ProviderConfigRead(BaseModel):
     enabled: bool
     temperature: float = 0.2
     baseUrl: str | None = None
+    apiKey: str | None = None
 
 
 class ProviderConfigUpdate(BaseModel):
@@ -898,6 +1383,7 @@ class ProviderConfigUpdate(BaseModel):
     enabled: bool
     temperature: float = 0.2
     baseUrl: str | None = None
+    apiKey: str | None = None
 
 
 class IntranetSyncConfigRead(BaseModel):
@@ -919,6 +1405,8 @@ class PlatformSettingsRead(BaseModel):
     account: str
     cooldownDays: int
     allowOutboundMessaging: bool
+    maxConcurrentRuns: int = 1
+    bossMaxConcurrentRuns: int | None = None
 
 
 class PlatformSettingsUpdate(BaseModel):
@@ -926,6 +1414,8 @@ class PlatformSettingsUpdate(BaseModel):
     account: str | None = None
     cooldownDays: int | None = None
     allowOutboundMessaging: bool | None = None
+    maxConcurrentRuns: int | None = None
+    bossMaxConcurrentRuns: int | None = None
 
 
 class SettingsSnapshotRead(BaseModel):
@@ -1123,6 +1613,106 @@ class AgentQueueItemRead(BaseModel):
 class AgentQueueRecoveryRead(BaseModel):
     recovered_count: int
     by_status: dict[str, int] = Field(default_factory=dict)
+
+
+class RuntimeSessionRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    agent_profile_id: str
+    session_key: str
+    status: str
+    current_lane: str | None = None
+    last_active_at: datetime | None = None
+    last_run_at: datetime | None = None
+    runtime_metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+    updated_at: datetime
+
+
+class RuntimeControlledRunRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    session_id: str
+    execution_episode_id: str | None = None
+    candidate_id: str | None = None
+    jd_id: str | None = None
+    platform: str
+    lane: str
+    run_type: str
+    status: str
+    priority: int
+    queue_task_id: str | None = None
+    checkpoint_status: str
+    context_manifest: dict[str, Any] = Field(default_factory=dict)
+    runtime_metadata: dict[str, Any] = Field(default_factory=dict)
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    blocked_reason: str | None = None
+    last_error: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class RuntimeWorkItemRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    session_id: str
+    run_id: str | None = None
+    queue_task_id: str | None = None
+    candidate_id: str | None = None
+    platform: str
+    lane: str
+    item_type: str
+    status: str
+    priority: int
+    dedupe_key: str | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+    scheduled_for: datetime | None = None
+    claimed_at: datetime | None = None
+    completed_at: datetime | None = None
+    deferred_until: datetime | None = None
+    last_error: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class RuntimeCheckpointRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    session_id: str
+    run_id: str
+    candidate_id: str | None = None
+    approval_id: str | None = None
+    checkpoint_kind: str
+    status: str
+    title: str
+    summary: str | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+    resolved_by: str | None = None
+    resolved_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class RuntimeEventRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    session_id: str
+    run_id: str | None = None
+    candidate_id: str | None = None
+    level: str
+    source: str
+    event_type: str
+    message: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+    occurred_at: datetime
+    created_at: datetime
+    updated_at: datetime
 
 
 class TrialRunRequest(BaseModel):

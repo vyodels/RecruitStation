@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useState } from "react";
-import { Panel, StatusBadge, Timeline, TopTabPage } from "../../components";
+import React, { useMemo } from "react";
+import { MetricCard, Panel, ProgressBars, StatusBadge, Timeline } from "../../components";
 import { formatCompactDate } from "../../lib/format";
 import { useI18n } from "../../lib/i18n";
 import { theme } from "../../lib/theme";
@@ -9,30 +9,11 @@ import type {
   AgentQueueItem,
   AgentSnapshot,
   DashboardSummary,
-  RuntimeEnvironmentAssessment,
   RuntimeEpisodeReplay,
   RuntimeWorkspaceData,
   SyncBacklogItem,
   SyncStatusSnapshot,
 } from "../../lib/types";
-import { AgentMonitorView } from "../agent-monitor/AgentMonitorView";
-import { CandidatesView } from "../candidates/CandidatesView";
-import { WorkflowsView } from "../workflows/WorkflowsView";
-
-type WorkbenchGlobalTab = "overview" | "operations";
-
-function toneFromStatus(value: string): "positive" | "neutral" | "warning" | "critical" {
-  if (/(failed|error|critical|diverged|drift|rejected)/i.test(value)) {
-    return "critical";
-  }
-  if (/(pending|review|warning|blocked|draft)/i.test(value)) {
-    return "warning";
-  }
-  if (/(active|approved|stable|running|completed|confirmed)/i.test(value)) {
-    return "positive";
-  }
-  return "neutral";
-}
 
 interface WorkbenchViewProps {
   summary: DashboardSummary;
@@ -50,7 +31,32 @@ interface WorkbenchViewProps {
   onQueueScreeningTask(): void;
   onFlushSync?(): void;
   onSelectEpisode?(episodeId: string): void;
+  onOpenCommunications?(filter?: string, candidateId?: string): void;
+  onOpenAgentInbox?(): void;
 }
+
+function toneFromCandidateStatus(status: string): "positive" | "neutral" | "warning" | "critical" {
+  if (/(rejected|cooldown)/i.test(status)) {
+    return "critical";
+  }
+  if (/(pending|waiting|review|screening|communicating|resume|contact|assessment)/i.test(status)) {
+    return "warning";
+  }
+  if (/(offer|passed|scheduled)/i.test(status)) {
+    return "positive";
+  }
+  return "neutral";
+}
+
+const buttonStyle: React.CSSProperties = {
+  border: `1px solid ${theme.colors.border}`,
+  borderRadius: "12px",
+  background: "rgba(255,255,255,0.04)",
+  color: theme.colors.text,
+  padding: "9px 12px",
+  cursor: "pointer",
+  fontWeight: 700,
+};
 
 export function WorkbenchView({
   summary,
@@ -68,36 +74,29 @@ export function WorkbenchView({
   onQueueScreeningTask,
   onFlushSync,
   onSelectEpisode,
+  onOpenCommunications,
+  onOpenAgentInbox,
 }: WorkbenchViewProps): JSX.Element {
   const { copy } = useI18n();
-  const [scopeId, setScopeId] = useState<string>("global");
-  const [globalTab, setGlobalTab] = useState<WorkbenchGlobalTab>("overview");
-  const [workflowTab, setWorkflowTab] = useState<string>("overview");
 
-  const workflowScopes = useMemo(
+  const executionCards = useMemo(
     () =>
-      data.taskSpecs.map((task) => {
-        const plans = data.plans.filter((plan) => plan.taskSpecId === task.id);
-        const episodes = data.episodes.filter((episode) => episode.taskSpecId === task.id);
-        const templates = data.templates.filter((template) => template.sourceTaskSpecId === task.id || template.domain === task.domain);
-        const adjustments = data.patches.filter((patch) => patch.taskSpecId === task.id);
-        const assessments = data.environmentAssessments.filter((assessment) => assessment.taskSpecId === task.id);
-        const snapshots = data.snapshots.filter((snapshot) => snapshot.taskSpecId === task.id);
+      data.episodes.map((episode) => {
+        const plan = data.plans.find((item) => item.id === episode.executionPlanId);
         return {
-          task,
-          plans,
-          episodes,
-          templates,
-          adjustments,
-          assessments,
-          snapshots,
+          id: episode.id,
+          title: plan?.name ?? episode.executionPlanId,
+          summary: episode.resultSummary ?? copy("No summary yet.", "暂无执行摘要。"),
+          status: episode.status,
+          at: episode.updatedAt,
         };
       }),
-    [data.environmentAssessments, data.episodes, data.patches, data.plans, data.snapshots, data.taskSpecs, data.templates],
+    [copy, data.episodes, data.plans],
   );
+
   const timelineEvents = useMemo(
     () =>
-      events.slice(-6).map((event) => ({
+      events.slice(-8).map((event) => ({
         id: event.id,
         label: translateUiToken(event.source, copy),
         detail: event.message,
@@ -111,528 +110,203 @@ export function WorkbenchView({
                 ? ("positive" as const)
                 : ("neutral" as const),
       })),
-    [events],
+    [copy, events],
   );
 
-  useEffect(() => {
-    if (scopeId === "global") {
-      return;
-    }
-    if (!workflowScopes.some((scope) => scope.task.id === scopeId)) {
-      setScopeId("global");
-    }
-  }, [scopeId, workflowScopes]);
-
-  const selectedWorkflow = workflowScopes.find((scope) => scope.task.id === scopeId) ?? null;
-
-  useEffect(() => {
-    if (!selectedWorkflow) {
-      return;
-    }
-    const availableTabs = ["overview", ...selectedWorkflow.episodes.map((episode) => episode.id)];
-    if (!availableTabs.includes(workflowTab)) {
-      setWorkflowTab("overview");
-    }
-  }, [selectedWorkflow, workflowTab]);
-
-  useEffect(() => {
-    if (!selectedWorkflow) {
-      return;
-    }
-    if (workflowTab !== "overview") {
-      onSelectEpisode?.(workflowTab);
-    }
-  }, [onSelectEpisode, selectedWorkflow, workflowTab]);
-
-  const renderInlineEmptyState = (title: string, detail: string) => (
-    <div
-      style={{
-        padding: "14px",
-        borderRadius: "16px",
-        border: "1px solid rgba(255,255,255,0.08)",
-        background: "rgba(255,255,255,0.03)",
-        color: theme.colors.muted,
-        fontSize: "13px",
-        lineHeight: 1.6,
-        display: "grid",
-        gap: "6px",
-      }}
-    >
-      <strong style={{ color: theme.colors.text }}>{title}</strong>
-      <span>{detail}</span>
-    </div>
-  );
-
-  const renderGlobalOverview = () => (
-    <div style={{ display: "grid", gap: "18px" }}>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: "14px" }}>
-        {[
-          {
-            label: copy("Running workflows", "运行中的工作流"),
-            value: workflowScopes.filter((scope) => scope.episodes.some((episode) => /(running|pending|awaiting_review)/i.test(episode.status))).length,
-            tone: "positive" as const,
-          },
-          {
-            label: copy("Workflow instances", "工作流实例"),
-            value: data.episodes.length,
-            tone: "neutral" as const,
-          },
-          {
-            label: copy("Pending approvals", "待审批"),
-            value: summary.approvals.filter((approval) => approval.status === "pending").length,
-            tone: "warning" as const,
-          },
-          {
-            label: copy("Scene assessments", "场景评估"),
-            value: data.environmentAssessments.length,
-            tone: "neutral" as const,
-          },
-        ].map((card) => (
-          <Panel key={card.label} dense title={String(card.value)} eyebrow={card.label}>
-            <StatusBadge tone={card.tone}>{card.label}</StatusBadge>
-          </Panel>
-        ))}
-      </div>
-
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: "18px", alignItems: "start" }}>
-        <Panel
-          title={copy("Workflow operations", "工作流运行情况")}
-          eyebrow={copy("Live workbench board", "实时工作台总览")}
-          description={copy(
-            "Track how many workflow instances are active, blocked, or waiting for operator review under each workflow.",
-            "查看每条工作流下有多少工作流实例正在运行、阻塞或等待人工审查。",
-          )}
-          >
-          <div style={{ display: "grid", gap: "12px" }}>
-            {workflowScopes.length
-              ? workflowScopes.map((scope) => (
-                  <button
-                    key={scope.task.id}
-                    type="button"
-                    onClick={() => setScopeId(scope.task.id)}
-                    style={{
-                      cursor: "pointer",
-                      width: "100%",
-                      textAlign: "left",
-                      padding: "14px",
-                      borderRadius: "16px",
-                      border: `1px solid ${scopeId === scope.task.id ? "rgba(122,167,255,0.36)" : theme.colors.border}`,
-                      background: scopeId === scope.task.id ? "rgba(122,167,255,0.12)" : "rgba(255,255,255,0.02)",
-                      color: theme.colors.text,
-                      display: "grid",
-                      gap: "8px",
-                    }}
-                  >
-                    <div style={{ display: "flex", justifyContent: "space-between", gap: "10px", alignItems: "start", flexWrap: "wrap" }}>
-                      <div>
-                        <strong>{scope.task.title}</strong>
-                        <div style={{ color: theme.colors.muted, fontSize: "13px", marginTop: "6px" }}>{scope.task.goal}</div>
-                      </div>
-                      <StatusBadge tone={toneFromStatus(scope.task.status)}>{translateUiToken(scope.task.status, copy)}</StatusBadge>
-                    </div>
-                    <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-                      <StatusBadge tone="neutral">{translateUiToken(scope.task.domain, copy)}</StatusBadge>
-                      <StatusBadge tone={scope.episodes.some((episode) => /(running|pending|awaiting_review)/i.test(episode.status)) ? "warning" : "neutral"}>
-                        {copy(`${scope.episodes.length} workflow instances`, `${scope.episodes.length} 个工作流实例`)}
-                      </StatusBadge>
-                      <StatusBadge tone="neutral">{copy(`${scope.templates.length} versions`, `${scope.templates.length} 个版本`)}</StatusBadge>
-                      {scope.adjustments.filter((patch) => patch.status === "pending_review").length ? (
-                        <StatusBadge tone="warning">
-                          {copy(
-                            `${scope.adjustments.filter((patch) => patch.status === "pending_review").length} pending revisions`,
-                            `${scope.adjustments.filter((patch) => patch.status === "pending_review").length} 个待处理修订建议`,
-                          )}
-                        </StatusBadge>
-                      ) : null}
-                    </div>
-                  </button>
-                ))
-              : renderInlineEmptyState(
-                  copy("No workflows yet", "还没有工作流"),
-                  copy("Create the first workflow to see active workflow instance distribution and runtime status here.", "创建第一条工作流后，这里会显示工作流实例分布和实时运行状态。"),
-                )}
-          </div>
-        </Panel>
-
-        <Panel
-          title={copy("Recent workbench signals", "最近工作台信号")}
-          eyebrow={copy("Operator visibility", "操作员可见性")}
-          description={copy(
-            "Recent workflow-related events that explain why a workflow instance is moving, waiting, or asking for review.",
-            "最近与工作流相关的事件，用来说明工作流实例为什么在推进、等待，或请求人工审查。",
-          )}
-        >
-          <Timeline events={timelineEvents} />
-        </Panel>
-      </div>
-    </div>
-  );
-
-  const renderSelectedWorkflowOverview = () => {
-    if (!selectedWorkflow) {
-      return null;
-    }
-    const runningInstances = selectedWorkflow.episodes.filter((episode) => /(running|pending|awaiting_review)/i.test(episode.status)).length;
-    const latestAssessment =
-      selectedWorkflow.assessments.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0] ?? null;
-
-    return (
-      <div style={{ display: "grid", gap: "18px" }}>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: "14px" }}>
-          {[
-            { label: copy("Workflow instances", "工作流实例"), value: selectedWorkflow.episodes.length, tone: "neutral" as const },
-            { label: copy("Running now", "当前运行中"), value: runningInstances, tone: runningInstances ? ("warning" as const) : ("neutral" as const) },
-            { label: copy("Released versions", "已发布版本"), value: selectedWorkflow.templates.filter((template) => template.status === "active").length, tone: "positive" as const },
-            { label: copy("Scene checks", "场景检查"), value: selectedWorkflow.assessments.length, tone: "neutral" as const },
-          ].map((item) => (
-            <Panel key={item.label} dense title={String(item.value)} eyebrow={item.label}>
-              <StatusBadge tone={item.tone}>{item.label}</StatusBadge>
-            </Panel>
-          ))}
-        </div>
-
-        <Panel
-          title={selectedWorkflow.task.title}
-          eyebrow={copy("Selected workflow", "当前工作流")}
-          description={selectedWorkflow.task.goal}
-          actions={
-            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-              <StatusBadge tone="neutral">{translateUiToken(selectedWorkflow.task.domain, copy)}</StatusBadge>
-              <StatusBadge tone={toneFromStatus(selectedWorkflow.task.status)}>{translateUiToken(selectedWorkflow.task.status, copy)}</StatusBadge>
-            </div>
-          }
-        >
-          <div style={{ display: "grid", gap: "12px" }}>
-            <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
-              {copy(
-                `This workflow currently has ${selectedWorkflow.plans.length} plans, ${selectedWorkflow.episodes.length} workflow instances, and ${selectedWorkflow.adjustments.length} revision records.`,
-                `这条工作流当前有 ${selectedWorkflow.plans.length} 个计划、${selectedWorkflow.episodes.length} 个工作流实例，以及 ${selectedWorkflow.adjustments.length} 条修订记录。`,
-              )}
-            </div>
-            {latestAssessment ? (
-              <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-                <StatusBadge tone={toneFromStatus(latestAssessment.status)}>{translateUiToken(latestAssessment.sceneType, copy)}</StatusBadge>
-                <StatusBadge tone="neutral">{copy(`confidence ${Math.round(latestAssessment.confidence * 100)}%`, `置信度 ${Math.round(latestAssessment.confidence * 100)}%`)}</StatusBadge>
-                <StatusBadge tone={latestAssessment.plannerGuidance.requiresHumanReview ? "warning" : "positive"}>
-                  {latestAssessment.plannerGuidance.requiresHumanReview ? copy("needs review", "需要审查") : copy("ready to proceed", "可以继续")}
-                </StatusBadge>
-              </div>
-            ) : null}
-          </div>
-        </Panel>
-
-        {selectedWorkflow.task.domain === "recruiting" ? (
-          <div style={{ display: "grid", gap: "18px", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))" }}>
-            <Panel
-              title={copy("Recruiting workbench", "招聘工作台")}
-              eyebrow={copy("Domain-specific operations", "领域专属操作")}
-              description={copy(
-                "Recruiting workflows expose candidate pipeline health, resume progress, and recruiting-specific flow state.",
-                "招聘工作流会展示候选人流水线健康度、简历进度，以及招聘专属的流程状态。",
-              )}
-            >
-              <CandidatesView candidates={summary.candidates} />
-            </Panel>
-            <Panel
-              title={copy("Recruiting flow map", "招聘流程地图")}
-              eyebrow={copy("Workflow state", "流程状态")}
-              description={copy(
-                "Recruiting remains one workflow category, so it keeps a dedicated operational panel inside the workbench.",
-                "招聘仍然是一类工作流，因此会在工作台内部保留专属的运行面板。",
-              )}
-            >
-              <WorkflowsView workflows={summary.workflows} />
-            </Panel>
-          </div>
-        ) : (
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: "18px", alignItems: "start" }}>
-            <Panel
-              title={copy("Scene observations", "场景观察")}
-              eyebrow={copy("Live environment", "实时环境")}
-              description={copy(
-                "Workflow-specific scene observations and assessment summaries for the currently selected workflow.",
-                "当前所选工作流的场景观察结果与环境评估摘要。",
-              )}
-            >
-              <div style={{ display: "grid", gap: "10px" }}>
-                {selectedWorkflow.assessments.length
-                  ? selectedWorkflow.assessments.slice(0, 4).map((assessment) => (
-                      <article
-                        key={assessment.id}
-                        style={{
-                          padding: "14px",
-                          borderRadius: "16px",
-                          border: "1px solid rgba(255,255,255,0.08)",
-                          background: "rgba(255,255,255,0.03)",
-                        }}
-                      >
-                        <div style={{ display: "flex", justifyContent: "space-between", gap: "10px", flexWrap: "wrap" }}>
-                          <strong>{assessment.sceneLabel}</strong>
-                          <StatusBadge tone={toneFromStatus(assessment.status)}>{translateUiToken(assessment.status, copy)}</StatusBadge>
-                        </div>
-                        <div style={{ color: theme.colors.muted, fontSize: "13px", marginTop: "8px", lineHeight: 1.6 }}>{assessment.summary}</div>
-                      </article>
-                    ))
-                  : renderInlineEmptyState(
-                      copy("No scene observations yet", "还没有场景观察"),
-                      copy("This workflow has not recorded a fresh scene assessment yet.", "这条工作流还没有记录新的场景评估。"),
-                    )}
-              </div>
-            </Panel>
-            <Panel
-              title={copy("Version and revision summary", "版本与修订摘要")}
-              eyebrow={copy("Workflow evolution", "工作流演进")}
-              description={copy(
-                "Versions, revision suggestions, and recent workflow evolution signals for this selected workflow.",
-                "当前所选工作流的版本、修订建议，以及最近的演进信号。",
-              )}
-            >
-              <div style={{ display: "grid", gap: "10px" }}>
-                {selectedWorkflow.templates.length || selectedWorkflow.adjustments.length ? (
-                  <>
-                    {selectedWorkflow.templates.slice(0, 3).map((template) => (
-                      <div key={template.id} style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
-                        {copy(`Version ${template.version}`, `版本 ${template.version}`)} · {template.name}
-                      </div>
-                    ))}
-                    {selectedWorkflow.adjustments.slice(0, 3).map((patch) => (
-                      <div key={patch.id} style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
-                        {copy("Revision", "修订")} · {patch.title}
-                      </div>
-                    ))}
-                  </>
-                ) : (
-                  renderInlineEmptyState(
-                    copy("No versions or revisions yet", "还没有版本或修订"),
-                    copy("Versions and revision suggestions for this workflow will appear here after trial execution.", "这条工作流在试跑后产出的版本和修订建议会显示在这里。"),
-                  )
-                )}
-              </div>
-            </Panel>
-          </div>
-        )}
-      </div>
-    );
-  };
-
-  const renderSelectedWorkflowInstance = () => {
-    if (!selectedWorkflow || workflowTab === "overview") {
-      return null;
-    }
-    const episode = selectedWorkflow.episodes.find((item) => item.id === workflowTab);
-    if (!episode) {
-      return null;
-    }
-    const assessmentForEpisode =
-      selectedWorkflow.assessments.find((assessment) => assessment.executionEpisodeId === episode.id) ??
-      selectedWorkflow.assessments.find((assessment) => assessment.executionPlanId === episode.executionPlanId) ??
-      null;
-    const snapshots = selectedWorkflow.snapshots.filter((snapshot) => snapshot.executionEpisodeId === episode.id);
-    const queueForEpisode = queueItems.filter((item) => {
-      const taskSpecId = String((item.payload.task_spec_id ?? item.payload.taskSpecId ?? "") || "");
-      return taskSpecId === selectedWorkflow.task.id;
-    });
-    const selectedReplay = replay?.episode.id === episode.id ? replay : null;
-
-    return (
-      <div style={{ display: "grid", gap: "18px" }}>
-        <Panel
-          title={copy("Workflow instance detail", "工作流实例详情")}
-          eyebrow={copy("Live execution state", "实时执行状态")}
-          description={episode.resultSummary ?? copy("This workflow instance is still gathering execution evidence.", "这个工作流实例还在持续收集执行证据。")}
-          actions={
-            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-              <StatusBadge tone={toneFromStatus(episode.status)}>{translateUiToken(episode.status, copy)}</StatusBadge>
-              <StatusBadge tone="neutral">{translateUiToken(episode.mode, copy)}</StatusBadge>
-              {episode.requiresConfirmation ? <StatusBadge tone="warning">{copy("awaiting confirmation", "等待确认")}</StatusBadge> : null}
-            </div>
-          }
-        >
-          <div style={{ display: "grid", gap: "12px" }}>
-            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-              {episode.startedAt ? <StatusBadge tone="neutral">{copy(`Started ${formatCompactDate(episode.startedAt)}`, `开始于 ${formatCompactDate(episode.startedAt)}`)}</StatusBadge> : null}
-              {episode.finishedAt ? <StatusBadge tone="neutral">{copy(`Finished ${formatCompactDate(episode.finishedAt)}`, `结束于 ${formatCompactDate(episode.finishedAt)}`)}</StatusBadge> : null}
-              <StatusBadge tone="neutral">{copy(`${episode.actions.length} actions`, `${episode.actions.length} 个动作`)}</StatusBadge>
-              <StatusBadge tone="neutral">{copy(`${episode.observations.length} observations`, `${episode.observations.length} 条观察`)}</StatusBadge>
-            </div>
-            {assessmentForEpisode ? (
-              <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
-                {assessmentForEpisode.summary}
-              </div>
-            ) : null}
-          </div>
-        </Panel>
-
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: "18px", alignItems: "start" }}>
-          <Panel
-            title={copy("Replay and diagnostics", "回放与诊断")}
-            eyebrow={copy("Instance evidence", "实例证据")}
-            description={copy(
-              "Diagnostic notes, replay timeline, and learning evidence bound to this workflow instance.",
-              "与这个工作流实例绑定的诊断说明、回放时间线，以及学习证据。",
-            )}
-          >
-            {selectedReplay ? (
-              <Timeline events={selectedReplay.diagnostics} />
-            ) : (
-              <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
-                {copy("No replay bundle is loaded for this workflow instance yet.", "这个工作流实例暂未加载回放数据。")}
-              </div>
-            )}
-          </Panel>
-
-          <Panel
-            title={copy("Scene context", "场景上下文")}
-            eyebrow={copy("Snapshots and queue", "快照与队列")}
-            description={copy(
-              "Environment snapshots and queue signals related to the selected workflow instance.",
-              "与当前工作流实例相关的环境快照和队列信号。",
-            )}
-          >
-            <div style={{ display: "grid", gap: "10px" }}>
-              {snapshots.length || queueForEpisode.length ? (
-                <>
-                  {snapshots.slice(0, 3).map((snapshot) => (
-                    <article
-                      key={snapshot.id}
-                      style={{
-                        padding: "12px",
-                        borderRadius: "14px",
-                        border: "1px solid rgba(255,255,255,0.08)",
-                        background: "rgba(255,255,255,0.03)",
-                      }}
-                    >
-                      <div style={{ display: "flex", justifyContent: "space-between", gap: "8px", flexWrap: "wrap" }}>
-                        <strong>{snapshot.title ?? snapshot.environmentKey ?? snapshot.id}</strong>
-                        <StatusBadge tone="neutral">{snapshot.pageType ?? snapshot.source}</StatusBadge>
-                      </div>
-                      <div style={{ color: theme.colors.muted, fontSize: "13px", marginTop: "8px" }}>{snapshot.url ?? copy("No URL captured.", "未捕获 URL。")}</div>
-                    </article>
-                  ))}
-                  {queueForEpisode.slice(0, 2).map((item) => (
-                    <div key={item.taskId} style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
-                      {item.taskType} · {translateUiToken(item.status, copy)}
-                    </div>
-                  ))}
-                </>
-              ) : (
-                renderInlineEmptyState(
-                  copy("No snapshots yet", "还没有快照"),
-                  copy("This workflow instance has not recorded snapshots or queue evidence yet.", "这个工作流实例还没有记录快照或队列证据。"),
-                )
-              )}
-            </div>
-          </Panel>
-        </div>
-      </div>
-    );
-  };
-
-  const globalTabs = [
-    { key: "overview", label: copy("Global board", "全局看板"), detail: copy("All workflows at a glance", "汇总查看所有工作流") },
-    { key: "operations", label: copy("Operations", "运行控制"), detail: copy("Queue, replay, sync, and runtime state", "查看队列、回放、同步与运行状态") },
-  ] satisfies Array<{ key: WorkbenchGlobalTab; label: string; detail: string }>;
-
-  const workflowTabs = selectedWorkflow
-    ? [
-        { key: "overview", label: copy("Overview", "总览"), detail: copy("Workflow-specific summary", "当前工作流汇总") },
-        ...selectedWorkflow.episodes.map((episode, index) => ({
-          key: episode.id,
-          label: copy(`Instance ${index + 1}`, `实例 ${index + 1}`),
-          detail: copy("Open live execution state", "查看当前执行状态"),
-        })),
-      ]
-    : [];
+  const activeCandidates = summary.candidates.filter((candidate) => !/(rejected|cooldown)/i.test(candidate.status));
+  const waitingCommunications = summary.candidates.filter((candidate) => /(contact_required|contact_acquired|pending_communication|communicating|waiting_reply|resume_requested)/i.test(candidate.status));
+  const pendingApprovals = summary.approvals.filter((approval) => approval.status === "pending").length;
 
   return (
-    <div style={{ display: "grid", gap: "10px" }}>
-      {scopeId === "global" ? (
-        <TopTabPage items={globalTabs} active={globalTab} onChange={(key) => setGlobalTab(key as WorkbenchGlobalTab)}>
-          <div style={{ display: "grid", gap: "12px", minWidth: 0 }}>
-            {globalTab === "overview" ? (
-              renderGlobalOverview()
-            ) : (
-              <AgentMonitorView
-                agent={agent}
-                events={events}
-                episodes={data.episodes}
-                selectedEpisodeId={selectedEpisodeId}
-                replay={replay}
-                syncStatus={syncStatus}
-                syncBacklog={syncBacklog}
-                queueItems={queueItems}
-                runningAction={runningAction}
-                syncingAction={syncingAction}
-                onRunOnce={onRunOnce}
-                onQueueScreeningTask={onQueueScreeningTask}
-                onFlushSync={onFlushSync}
-                onSelectEpisode={onSelectEpisode}
-              />
-            )}
-          </div>
-        </TopTabPage>
-      ) : selectedWorkflow ? (
-        <TopTabPage items={workflowTabs} active={workflowTab} onChange={setWorkflowTab}>
-          <div style={{ display: "grid", gridTemplateColumns: "220px minmax(0, 1fr)", gap: "14px", alignItems: "start" }}>
-            <aside style={{ display: "grid", gap: "10px", position: "sticky", top: "128px" }}>
-              <div style={{ display: "grid", gap: "8px" }}>
-                <button
-                  type="button"
-                  onClick={() => setScopeId("global")}
-                  style={{
-                    cursor: "pointer",
-                    textAlign: "left",
-                    padding: "10px 12px",
-                    borderRadius: "14px",
-                    border: `1px solid ${theme.colors.border}`,
-                    background: "rgba(255,255,255,0.02)",
-                    color: theme.colors.text,
-                    fontWeight: 600,
-                  }}
-                >
-                  {copy("Back to global workbench", "返回全局工作台")}
-                </button>
-                <div style={{ color: theme.colors.muted, fontSize: "12px", letterSpacing: "0.08em", textTransform: "uppercase" }}>
-                  {copy("Workflow list", "工作流列表")}
-                </div>
-              </div>
-              {workflowScopes.map((scope) => (
-                <button
-                  key={scope.task.id}
-                  type="button"
-                  onClick={() => setScopeId(scope.task.id)}
-                  style={{
-                    cursor: "pointer",
-                    textAlign: "left",
-                    padding: "12px",
-                    borderRadius: "16px",
-                    border: `1px solid ${scopeId === scope.task.id ? "rgba(122,167,255,0.36)" : theme.colors.border}`,
-                    background: scopeId === scope.task.id ? "rgba(122,167,255,0.12)" : "rgba(255,255,255,0.02)",
-                    color: theme.colors.text,
-                    display: "grid",
-                    gap: "6px",
-                  }}
-                >
-                  <div style={{ display: "flex", justifyContent: "space-between", gap: "8px", alignItems: "start" }}>
-                    <strong style={{ fontSize: "14px" }}>{scope.task.title}</strong>
-                    <StatusBadge tone={scope.episodes.some((episode) => /(running|pending|awaiting_review)/i.test(episode.status)) ? "warning" : "neutral"}>
-                      {scope.episodes.length}
-                    </StatusBadge>
+    <div style={{ display: "grid", gap: "18px" }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "14px" }}>
+        <MetricCard label={copy("Active candidates", "活跃候选人")} value={String(activeCandidates.length)} delta={copy("local-first progress", "本地优先进度")} tone="positive" caption={copy("candidate scoped", "候选人维度")} onClick={() => onOpenCommunications?.("active")} />
+        <MetricCard label={copy("Communication queue", "沟通队列")} value={String(waitingCommunications.length)} delta={copy("waiting for follow-up", "等待跟进")} tone="warning" caption={copy("runtime inbox", "运行时收件箱")} onClick={() => onOpenCommunications?.("waiting")} />
+        <MetricCard label={copy("Pending approvals", "待处理审批")} value={String(pendingApprovals)} delta={copy("runtime + evolution", "运行时 + 演进")} tone={pendingApprovals ? "warning" : "neutral"} caption={copy("desktop review", "桌面审查")} onClick={() => onOpenAgentInbox?.()} />
+        <MetricCard label={copy("Queue depth", "任务队列深度")} value={String(agent.queueDepth)} delta={translateUiToken(agent.status, copy)} tone={agent.health === "healthy" ? "positive" : "warning"} caption={copy("agent runtime", "agent 运行时")} />
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.2fr) minmax(320px, 0.8fr)", gap: "18px", alignItems: "start" }}>
+        <Panel
+          title={copy("Candidate progress", "候选人进度")}
+          eyebrow={copy("Structured progress store", "结构化进度库")}
+          description={copy(
+            "The workbench should stay centered on candidate progression and agent output.",
+            "工作台应该始终聚焦候选人推进和 agent 输出。",
+          )}
+        >
+          <div style={{ display: "grid", gap: "12px" }}>
+            <ProgressBars stages={summary.pipeline} />
+            <div style={{ display: "grid", gap: "10px" }}>
+              {summary.candidates.map((candidate) => (
+                <button key={candidate.id} type="button" onClick={() => onOpenCommunications?.("candidate", candidate.id)} style={{ borderRadius: "16px", border: `1px solid ${theme.colors.border}`, background: "rgba(255,255,255,0.03)", padding: "12px 14px", textAlign: "left", cursor: "pointer", color: "inherit" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: "12px", alignItems: "start", flexWrap: "wrap" }}>
+                    <div>
+                      <strong>{candidate.name}</strong>
+                      <div style={{ color: theme.colors.muted, fontSize: "13px", marginTop: "5px" }}>
+                        {candidate.title} · {candidate.jdTitle} · {candidate.location}
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                      <StatusBadge tone={toneFromCandidateStatus(candidate.status)}>{translateUiToken(candidate.status, copy)}</StatusBadge>
+                      <StatusBadge tone="neutral">{candidate.workflowNode}</StatusBadge>
+                      <StatusBadge tone="neutral">{copy(`score ${candidate.matchScore}`, `分数 ${candidate.matchScore}`)}</StatusBadge>
+                    </div>
                   </div>
-                  <span style={{ color: theme.colors.muted, fontSize: "12px", lineHeight: 1.5 }}>
-                    {translateUiToken(scope.task.domain, copy)}
-                    {scope.episodes.length ? copy(` · ${scope.episodes.length} workflow instances`, ` · ${scope.episodes.length} 个工作流实例`) : ""}
-                  </span>
+                  <div style={{ marginTop: "8px", color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>{candidate.nextAction}</div>
+                  <div style={{ marginTop: "8px", display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                    {candidate.tags.map((tag) => (
+                      <StatusBadge key={tag} tone="neutral">
+                        {tag}
+                      </StatusBadge>
+                    ))}
+                  </div>
                 </button>
               ))}
-            </aside>
-
-            <div style={{ display: "grid", gap: "12px", minWidth: 0 }}>
-              {workflowTab === "overview" ? renderSelectedWorkflowOverview() : renderSelectedWorkflowInstance()}
             </div>
           </div>
-        </TopTabPage>
-      ) : null}
+        </Panel>
+
+        <Panel
+          title={copy("Agent controls", "Agent 控制")}
+          eyebrow={copy("Operational actions", "运行操作")}
+          description={copy(
+            "Keep manual triggers small and explicit: run once, enqueue a screening task, or flush sync backlog.",
+            "手动触发尽量保持小而明确：单次运行、排入初筛任务、重试同步积压。",
+          )}
+        >
+          <div style={{ display: "grid", gap: "10px" }}>
+            <button type="button" onClick={onRunOnce} disabled={Boolean(runningAction)} style={buttonStyle}>
+              {runningAction ? copy("Running...", "执行中...") : copy("Run agent once", "单次运行 Agent")}
+            </button>
+            <button type="button" onClick={onQueueScreeningTask} disabled={Boolean(runningAction)} style={buttonStyle}>
+              {copy("Queue screening task", "排入初筛任务")}
+            </button>
+            {onFlushSync ? (
+              <button type="button" onClick={onFlushSync} disabled={Boolean(syncingAction)} style={buttonStyle}>
+                {syncingAction ? copy("Syncing...", "同步中...") : copy("Flush sync backlog", "重试同步积压")}
+              </button>
+            ) : null}
+            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+              <StatusBadge tone={agent.health === "healthy" ? "positive" : agent.health === "warning" ? "warning" : "critical"}>
+                {translateUiToken(agent.status, copy)}
+              </StatusBadge>
+              <StatusBadge tone="neutral">{agent.activeTask}</StatusBadge>
+              <StatusBadge tone="neutral">{copy(`browser ${agent.browserLock}`, `浏览器 ${agent.browserLock}`)}</StatusBadge>
+            </div>
+            {syncStatus ? (
+              <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
+                {copy(
+                  `Sync ${syncStatus.remoteAvailable ? "available" : "offline"} · pending ${syncStatus.pendingCount} · failed ${syncStatus.failedDeliveryCount ?? 0}`,
+                  `同步${syncStatus.remoteAvailable ? "可用" : "离线"} · 待处理 ${syncStatus.pendingCount} · 失败 ${syncStatus.failedDeliveryCount ?? 0}`,
+                )}
+              </div>
+            ) : null}
+          </div>
+        </Panel>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)", gap: "18px", alignItems: "start" }}>
+        <Panel title={copy("Recent execution results", "最近执行结果")} eyebrow={copy("Agent runs", "Agent 运行记录")} description={copy("A run record still exists technically, but it is presented as the Recruit Agent's recent output.", "技术上仍保留运行记录，但产品上展示为 Recruit Agent 的最近输出。")}>
+          <div style={{ display: "grid", gap: "10px" }}>
+            {executionCards.map((card) => (
+              <button
+                key={card.id}
+                type="button"
+                onClick={() => onSelectEpisode?.(card.id)}
+                style={{
+                  cursor: "pointer",
+                  textAlign: "left",
+                  borderRadius: "16px",
+                  border: `1px solid ${selectedEpisodeId === card.id ? "rgba(122,167,255,0.36)" : theme.colors.border}`,
+                  background: selectedEpisodeId === card.id ? "rgba(122,167,255,0.12)" : "rgba(255,255,255,0.03)",
+                  color: theme.colors.text,
+                  padding: "12px 14px",
+                  display: "grid",
+                  gap: "8px",
+                }}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between", gap: "10px", alignItems: "start" }}>
+                  <strong>{card.title}</strong>
+                  <StatusBadge tone={/(confirmed|completed)/i.test(card.status) ? "positive" : /(pending|awaiting|running)/i.test(card.status) ? "warning" : "critical"}>
+                    {translateUiToken(card.status, copy)}
+                  </StatusBadge>
+                </div>
+                <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>{card.summary}</div>
+                <div style={{ color: theme.colors.muted, fontSize: "12px" }}>{formatCompactDate(card.at)}</div>
+              </button>
+            ))}
+          </div>
+        </Panel>
+
+        <Panel title={copy("Replay and diagnostics", "回放与诊断")} eyebrow={copy("Selected run", "当前运行")} description={copy("Inspect the selected run summary and its first snapshot to understand what the agent observed.", "查看当前运行摘要和首个快照，理解 agent 当时看到了什么。")}>
+          {replay ? (
+            <div style={{ display: "grid", gap: "10px" }}>
+              <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                <StatusBadge tone="neutral">{replay.executionPlan?.name ?? replay.episode.executionPlanId}</StatusBadge>
+                <StatusBadge tone="neutral">{replay.snapshots[0]?.title ?? copy("No snapshot yet", "暂无快照")}</StatusBadge>
+              </div>
+              <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>
+                {replay.episode.resultSummary ?? copy("No replay summary yet.", "暂无回放摘要。")}
+              </div>
+              {replay.snapshots[0] ? (
+                <article style={{ borderRadius: "16px", border: `1px solid ${theme.colors.border}`, background: "rgba(255,255,255,0.03)", padding: "12px 14px" }}>
+                  <div style={{ fontWeight: 700 }}>{replay.snapshots[0].title ?? copy("Snapshot", "快照")}</div>
+                  <div style={{ marginTop: "6px", color: theme.colors.muted, fontSize: "13px" }}>
+                    {replay.snapshots[0].url ?? copy("No URL", "无 URL")}
+                  </div>
+                </article>
+              ) : null}
+            </div>
+          ) : (
+            <div style={{ color: theme.colors.muted }}>{copy("Select a run to load replay diagnostics.", "选择一条运行记录查看回放诊断。")}</div>
+          )}
+        </Panel>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)", gap: "18px", alignItems: "start" }}>
+        <Panel title={copy("Live event stream", "实时事件流")} eyebrow={copy("Operator visibility", "操作员可见性")} description={copy("Recent Recruit Agent signals from the local runtime.", "来自本地运行时的最近 Recruit Agent 信号。")}>
+          <Timeline events={timelineEvents} />
+        </Panel>
+
+        <Panel title={copy("Queue and sync", "队列与同步")} eyebrow={copy("Operational backlog", "操作积压")} description={copy("Observe local queue pressure and sync backlog without leaving the workbench.", "不离开工作台即可观察本地队列压力和同步积压。")}>
+          <div style={{ display: "grid", gap: "12px" }}>
+            <div>
+              <div style={{ fontWeight: 700, marginBottom: "8px" }}>{copy("Queue", "任务队列")}</div>
+              <div style={{ display: "grid", gap: "8px" }}>
+                {queueItems.slice(0, 4).map((item) => (
+                  <article key={item.taskId} style={{ borderRadius: "14px", border: `1px solid ${theme.colors.border}`, background: "rgba(255,255,255,0.03)", padding: "10px 12px" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: "8px" }}>
+                      <strong>{item.taskType}</strong>
+                      <StatusBadge tone="neutral">{item.status}</StatusBadge>
+                    </div>
+                    <div style={{ color: theme.colors.muted, fontSize: "12px", marginTop: "6px" }}>
+                      {item.candidateId ?? copy("global task", "全局任务")} · {copy(`priority ${item.priority}`, `优先级 ${item.priority}`)}
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </div>
+
+            <div>
+              <div style={{ fontWeight: 700, marginBottom: "8px" }}>{copy("Sync backlog", "同步积压")}</div>
+              <div style={{ display: "grid", gap: "8px" }}>
+                {syncBacklog.slice(0, 4).map((item) => (
+                  <article key={item.id} style={{ borderRadius: "14px", border: `1px solid ${theme.colors.border}`, background: "rgba(255,255,255,0.03)", padding: "10px 12px" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: "8px" }}>
+                      <strong>{item.entityType}</strong>
+                      <StatusBadge tone={item.status === "pending" ? "warning" : item.status === "failed" ? "critical" : "positive"}>
+                        {item.status}
+                      </StatusBadge>
+                    </div>
+                    <div style={{ color: theme.colors.muted, fontSize: "12px", marginTop: "6px", lineHeight: 1.5 }}>{item.payloadSummary}</div>
+                  </article>
+                ))}
+              </div>
+            </div>
+          </div>
+        </Panel>
+      </div>
     </div>
   );
 }

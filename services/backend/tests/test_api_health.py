@@ -8,7 +8,7 @@ def test_health_endpoint_reports_ready(tmp_path):
     app = create_app(
         AppSettings(
             data_dir=str(tmp_path / "data"),
-            database_url=f"sqlite:///{tmp_path / 'scene-pilot.db'}",
+            database_url=f"sqlite:///{tmp_path / 'recruit-agent.db'}",
         )
     )
 
@@ -17,4 +17,3 @@ def test_health_endpoint_reports_ready(tmp_path):
 
     assert response.status_code == 200
     assert response.json() == {"status": "ready"}
-

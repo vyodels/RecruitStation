@@ -1,4 +1,4 @@
-This package contains the canonical FastAPI API surface for the ScenePilot backend.
+This package contains the canonical FastAPI API surface for the Recruit Agent backend.
 
 Layout:
 

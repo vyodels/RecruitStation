@@ -119,6 +119,370 @@ def _create_general_runtime_indexes(connection: Connection) -> None:
             connection.execute(text(statement))
 
 
+def _extend_skill_schema(connection: Connection) -> None:
+    tables = {
+        row[0]
+        for row in connection.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()
+    }
+    if "skills" not in tables:
+        return
+
+    columns = {
+        row[1]
+        for row in connection.execute(text("PRAGMA table_info(skills)")).fetchall()
+    }
+    statements = []
+    if "description" not in columns:
+        statements.append("ALTER TABLE skills ADD COLUMN description TEXT")
+    if "category" not in columns:
+        statements.append("ALTER TABLE skills ADD COLUMN category TEXT NOT NULL DEFAULT 'general'")
+    if "input_schema" not in columns:
+        statements.append("ALTER TABLE skills ADD COLUMN input_schema TEXT NOT NULL DEFAULT '{}'")
+    if "output_schema" not in columns:
+        statements.append("ALTER TABLE skills ADD COLUMN output_schema TEXT NOT NULL DEFAULT '{}'")
+    if "risk_level" not in columns:
+        statements.append("ALTER TABLE skills ADD COLUMN risk_level TEXT NOT NULL DEFAULT 'medium'")
+    if "skill_metadata" not in columns:
+        statements.append("ALTER TABLE skills ADD COLUMN skill_metadata TEXT NOT NULL DEFAULT '{}'")
+    for statement in statements:
+        connection.execute(text(statement))
+    connection.execute(text("CREATE INDEX IF NOT EXISTS ix_skills_category_status ON skills (category, status)"))
+    connection.execute(text("CREATE INDEX IF NOT EXISTS ix_skills_risk_level ON skills (risk_level)"))
+
+
+def _extend_recruit_agent_state_schema(connection: Connection) -> None:
+    tables = {
+        row[0]
+        for row in connection.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()
+    }
+
+    if "candidates" in tables:
+        columns = {row[1] for row in connection.execute(text("PRAGMA table_info(candidates)")).fetchall()}
+        if "state_snapshot" not in columns:
+            connection.execute(text("ALTER TABLE candidates ADD COLUMN state_snapshot TEXT NOT NULL DEFAULT '{}'"))
+
+    if "communication_logs" in tables:
+        columns = {row[1] for row in connection.execute(text("PRAGMA table_info(communication_logs)")).fetchall()}
+        if "metadata" not in columns:
+            connection.execute(text("ALTER TABLE communication_logs ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'"))
+
+    for table_name in ("candidate_memories", "job_memories", "agent_global_memories"):
+        if table_name not in tables:
+            continue
+        columns = {row[1] for row in connection.execute(text(f"PRAGMA table_info({table_name})")).fetchall()}
+        if "raw_content" not in columns:
+            connection.execute(text(f"ALTER TABLE {table_name} ADD COLUMN raw_content TEXT NOT NULL DEFAULT '{{}}'"))
+        if "disclosure" not in columns:
+            connection.execute(text(f"ALTER TABLE {table_name} ADD COLUMN disclosure TEXT NOT NULL DEFAULT '{{}}'"))
+
+    indexed_tables = {
+        row[0]
+        for row in connection.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()
+    }
+    if "candidate_stage_events" in indexed_tables:
+        connection.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_candidate_stage_events_candidate_occurred_at ON candidate_stage_events (candidate_id, occurred_at)")
+        )
+    if "candidate_assessments" in indexed_tables:
+        connection.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_candidate_assessments_candidate_created_at ON candidate_assessments (candidate_id, created_at)")
+        )
+    if "evolution_artifacts" in indexed_tables:
+        connection.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_evolution_artifacts_kind_status ON evolution_artifacts (artifact_kind, status)")
+        )
+
+
+def _extend_candidate_fact_tables(connection: Connection) -> None:
+    tables = {
+        row[0]
+        for row in connection.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()
+    }
+    if "candidate_assignments" not in tables:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE candidate_assignments (
+                    id TEXT PRIMARY KEY,
+                    candidate_id TEXT NOT NULL REFERENCES candidates(id) ON DELETE CASCADE,
+                    assignee TEXT NOT NULL,
+                    owner_role TEXT NOT NULL DEFAULT 'operator',
+                    status TEXT NOT NULL DEFAULT 'active',
+                    note TEXT,
+                    assignment_metadata TEXT NOT NULL DEFAULT '{}',
+                    assigned_at TEXT NOT NULL,
+                    released_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+        )
+    if "resume_artifacts" not in tables:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE resume_artifacts (
+                    id TEXT PRIMARY KEY,
+                    candidate_id TEXT NOT NULL REFERENCES candidates(id) ON DELETE CASCADE,
+                    source TEXT NOT NULL DEFAULT 'boss',
+                    artifact_type TEXT NOT NULL DEFAULT 'resume',
+                    file_name TEXT,
+                    file_path TEXT,
+                    extracted_text TEXT,
+                    contact_snapshot TEXT NOT NULL DEFAULT '{}',
+                    artifact_metadata TEXT NOT NULL DEFAULT '{}',
+                    captured_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+        )
+    if "candidate_scorecards" not in tables:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE candidate_scorecards (
+                    id TEXT PRIMARY KEY,
+                    candidate_id TEXT NOT NULL REFERENCES candidates(id) ON DELETE CASCADE,
+                    stage_key TEXT,
+                    source TEXT NOT NULL DEFAULT 'ai',
+                    rubric_version TEXT NOT NULL DEFAULT 'recruit-scorecard-v1',
+                    score_total INTEGER,
+                    verdict TEXT,
+                    summary TEXT,
+                    dimension_scores TEXT NOT NULL DEFAULT '{}',
+                    evidence_refs TEXT NOT NULL DEFAULT '[]',
+                    scorecard_metadata TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+        )
+    if "candidate_review_decisions" not in tables:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE candidate_review_decisions (
+                    id TEXT PRIMARY KEY,
+                    candidate_id TEXT NOT NULL REFERENCES candidates(id) ON DELETE CASCADE,
+                    stage_key TEXT,
+                    decision TEXT NOT NULL,
+                    rationale TEXT,
+                    decision_source TEXT NOT NULL DEFAULT 'manual',
+                    decided_by TEXT,
+                    scorecard_id TEXT REFERENCES candidate_scorecards(id) ON DELETE SET NULL,
+                    review_metadata TEXT NOT NULL DEFAULT '{}',
+                    decided_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+        )
+    if "talent_pool_sync_records" not in tables:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE talent_pool_sync_records (
+                    id TEXT PRIMARY KEY,
+                    candidate_id TEXT NOT NULL REFERENCES candidates(id) ON DELETE CASCADE,
+                    destination TEXT NOT NULL DEFAULT 'talent_pool',
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    external_ref TEXT,
+                    payload_snapshot TEXT NOT NULL DEFAULT '{}',
+                    error_message TEXT,
+                    synced_at TEXT,
+                    last_attempted_at TEXT,
+                    sync_metadata TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+        )
+
+    indexed_tables = {
+        row[0]
+        for row in connection.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()
+    }
+    if "candidate_assignments" in indexed_tables:
+        connection.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_candidate_assignments_candidate_assigned_at ON candidate_assignments (candidate_id, assigned_at)")
+        )
+    if "resume_artifacts" in indexed_tables:
+        connection.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_resume_artifacts_candidate_captured_at ON resume_artifacts (candidate_id, captured_at)")
+        )
+    if "candidate_scorecards" in indexed_tables:
+        connection.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_candidate_scorecards_candidate_created_at ON candidate_scorecards (candidate_id, created_at)")
+        )
+    if "candidate_review_decisions" in indexed_tables:
+        connection.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_candidate_review_decisions_candidate_decided_at ON candidate_review_decisions (candidate_id, decided_at)")
+        )
+    if "talent_pool_sync_records" in indexed_tables:
+        connection.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_talent_pool_sync_records_candidate_created_at ON talent_pool_sync_records (candidate_id, created_at)")
+        )
+
+
+def _create_agent_runtime_control_tables(connection: Connection) -> None:
+    tables = {
+        row[0]
+        for row in connection.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()
+    }
+    if "agent_sessions" not in tables:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE agent_sessions (
+                    id TEXT PRIMARY KEY,
+                    agent_profile_id TEXT NOT NULL REFERENCES recruit_agent_profiles(id) ON DELETE CASCADE,
+                    session_key TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    current_lane TEXT,
+                    last_active_at TEXT,
+                    last_run_at TEXT,
+                    runtime_metadata TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    CONSTRAINT uq_agent_sessions_agent_session_key UNIQUE (agent_profile_id, session_key)
+                )
+                """
+            )
+        )
+    if "agent_runs" not in tables:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE agent_runs (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL REFERENCES agent_sessions(id) ON DELETE CASCADE,
+                    execution_episode_id TEXT REFERENCES execution_episodes(id) ON DELETE SET NULL,
+                    candidate_id TEXT REFERENCES candidates(id) ON DELETE SET NULL,
+                    jd_id TEXT,
+                    platform TEXT NOT NULL DEFAULT 'site',
+                    lane TEXT NOT NULL DEFAULT 'agent',
+                    run_type TEXT NOT NULL DEFAULT 'generic',
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    priority INTEGER NOT NULL DEFAULT 100,
+                    queue_task_id TEXT,
+                    checkpoint_status TEXT NOT NULL DEFAULT 'none',
+                    context_manifest TEXT NOT NULL DEFAULT '{}',
+                    runtime_metadata TEXT NOT NULL DEFAULT '{}',
+                    started_at TEXT,
+                    finished_at TEXT,
+                    blocked_reason TEXT,
+                    last_error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+        )
+    if "agent_work_items" not in tables:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE agent_work_items (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL REFERENCES agent_sessions(id) ON DELETE CASCADE,
+                    run_id TEXT REFERENCES agent_runs(id) ON DELETE SET NULL,
+                    queue_task_id TEXT,
+                    candidate_id TEXT REFERENCES candidates(id) ON DELETE SET NULL,
+                    platform TEXT NOT NULL DEFAULT 'site',
+                    lane TEXT NOT NULL DEFAULT 'agent',
+                    item_type TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    priority INTEGER NOT NULL DEFAULT 100,
+                    dedupe_key TEXT,
+                    payload TEXT NOT NULL DEFAULT '{}',
+                    scheduled_for TEXT,
+                    claimed_at TEXT,
+                    completed_at TEXT,
+                    deferred_until TEXT,
+                    last_error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    CONSTRAINT uq_agent_work_items_queue_task_id UNIQUE (queue_task_id)
+                )
+                """
+            )
+        )
+    if "agent_run_checkpoints" not in tables:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE agent_run_checkpoints (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL REFERENCES agent_sessions(id) ON DELETE CASCADE,
+                    run_id TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+                    candidate_id TEXT REFERENCES candidates(id) ON DELETE SET NULL,
+                    approval_id TEXT REFERENCES approval_items(id) ON DELETE SET NULL,
+                    checkpoint_kind TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'open',
+                    title TEXT NOT NULL,
+                    summary TEXT,
+                    payload TEXT NOT NULL DEFAULT '{}',
+                    resolved_by TEXT,
+                    resolved_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+        )
+    if "agent_runtime_events" not in tables:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE agent_runtime_events (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL REFERENCES agent_sessions(id) ON DELETE CASCADE,
+                    run_id TEXT REFERENCES agent_runs(id) ON DELETE SET NULL,
+                    candidate_id TEXT REFERENCES candidates(id) ON DELETE SET NULL,
+                    level TEXT NOT NULL DEFAULT 'info',
+                    source TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    payload TEXT NOT NULL DEFAULT '{}',
+                    occurred_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+        )
+
+    indexed_tables = {
+        row[0]
+        for row in connection.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()
+    }
+    if "agent_sessions" in indexed_tables:
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_agent_sessions_status ON agent_sessions (status)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_agent_sessions_last_active_at ON agent_sessions (last_active_at)"))
+    if "agent_runs" in indexed_tables:
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_agent_runs_session_status_priority ON agent_runs (session_id, status, priority)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_agent_runs_candidate_status ON agent_runs (candidate_id, status)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_agent_runs_execution_episode_id ON agent_runs (execution_episode_id)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_agent_runs_queue_task_id ON agent_runs (queue_task_id)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_agent_runs_platform_status ON agent_runs (platform, status)"))
+    if "agent_work_items" in indexed_tables:
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_agent_work_items_run_status ON agent_work_items (run_id, status)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_agent_work_items_candidate_status ON agent_work_items (candidate_id, status)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_agent_work_items_dedupe_key ON agent_work_items (dedupe_key)"))
+    if "agent_run_checkpoints" in indexed_tables:
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_agent_run_checkpoints_run_status ON agent_run_checkpoints (run_id, status)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_agent_run_checkpoints_approval_id ON agent_run_checkpoints (approval_id)"))
+    if "agent_runtime_events" in indexed_tables:
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_agent_runtime_events_session_occurred_at ON agent_runtime_events (session_id, occurred_at)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_agent_runtime_events_run_occurred_at ON agent_runtime_events (run_id, occurred_at)"))
+
+
 MIGRATIONS: tuple[SchemaMigration, ...] = (
     SchemaMigration(
         version=1,
@@ -139,6 +503,26 @@ MIGRATIONS: tuple[SchemaMigration, ...] = (
         version=4,
         name="general_runtime_indexes",
         apply=_create_general_runtime_indexes,
+    ),
+    SchemaMigration(
+        version=5,
+        name="extend_skill_schema",
+        apply=_extend_skill_schema,
+    ),
+    SchemaMigration(
+        version=6,
+        name="extend_recruit_agent_state_schema",
+        apply=_extend_recruit_agent_state_schema,
+    ),
+    SchemaMigration(
+        version=7,
+        name="extend_candidate_fact_tables",
+        apply=_extend_candidate_fact_tables,
+    ),
+    SchemaMigration(
+        version=8,
+        name="create_agent_runtime_control_tables",
+        apply=_create_agent_runtime_control_tables,
     ),
 )
 

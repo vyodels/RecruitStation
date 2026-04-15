@@ -31,7 +31,7 @@ class AutonomyLoopService:
             return
         self._stop_event.clear()
         self._next_health_sweep_at = time.monotonic()
-        self._task = asyncio.create_task(self._run(), name="scene-pilot-autonomy-loop")
+        self._task = asyncio.create_task(self._run(), name="recruit-agent-autonomy-loop")
         self.events.publish("info", "autonomy", "Autonomy loop started.")
 
     async def stop(self) -> None:

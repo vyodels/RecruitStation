@@ -6,6 +6,9 @@ import type { DashboardSummary } from "../../lib/types";
 
 interface DashboardViewProps {
   summary: DashboardSummary;
+  onOpenAgentInbox?(): void;
+  onOpenCommunications?(filter?: string, candidateId?: string): void;
+  onOpenEvolution?(section?: string, itemId?: string): void;
 }
 
 function translateDashboardText(value: string): string {
@@ -24,7 +27,7 @@ function translateDashboardText(value: string): string {
     Communication: "沟通",
     Scoring: "评分",
     "Human review": "人工审查",
-    "Workflow node advanced": "工作流节点已推进",
+    "Workflow node advanced": "候选人阶段已推进",
     "Moved Mia Chen into the screening step.": "已将 Mia Chen 移入初筛步骤。",
     "Approval pending": "审批待处理",
     "Resume screening Skill is waiting for review.": "Resume Screening Skill 正在等待人工审查。",
@@ -37,7 +40,7 @@ function translateDashboardText(value: string): string {
     "Review the new initial screening strategy before it can become active.": "在其生效前审查新的初筛策略。",
     "Review the new initial screening strategy before activation.": "在启用前先审查新的初筛策略。",
     "Activate talent pool handoff": "激活人才库交接",
-    "Enables the workflow path from scoring to human review.": "启用从评分到人工审查的工作流路径。",
+    "Enables the workflow path from scoring to human review.": "启用从评分到人工审查的候选人交接路径。",
     "Allow local package inspection command": "允许本地包检查命令",
     "Registers a safe command under whitelist control.": "在白名单控制下注册一个安全命令。",
     bootstrap: "初始化",
@@ -45,7 +48,7 @@ function translateDashboardText(value: string): string {
   return table[value] ?? value;
 }
 
-export function DashboardView({ summary }: DashboardViewProps): JSX.Element {
+export function DashboardView({ summary, onOpenAgentInbox, onOpenCommunications, onOpenEvolution }: DashboardViewProps): JSX.Element {
   const { copy } = useI18n();
   const spend = summary.metrics.find((item) => item.label === "Budget used");
   const localizedMetrics = summary.metrics.map((metric) => ({
@@ -89,15 +92,15 @@ export function DashboardView({ summary }: DashboardViewProps): JSX.Element {
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", flexWrap: "wrap" }}>
           <div>
             <div style={{ color: "rgba(233,239,255,0.7)", fontSize: "12px", letterSpacing: "0.18em", textTransform: "uppercase" }}>
-              {copy("Live command center", "实时指挥中心")}
+              {copy("Recruit Agent command center", "Recruit Agent 指挥中心")}
             </div>
             <h2 style={{ margin: "8px 0 6px", fontSize: "34px", lineHeight: 1.05 }}>
-              {copy("Workflow health and operator signals are visible at a glance.", "工作流健康状态和操作信号一眼可见。")}
+              {copy("Candidate progress and Recruit Agent signals are visible at a glance.", "候选人进度和 Recruit Agent 信号一眼可见。")}
             </h2>
             <p style={{ margin: 0, maxWidth: "760px", color: "rgba(233,239,255,0.78)", lineHeight: 1.6 }}>
               {copy(
-                "The console keeps workflow creation, supervised trials, approvals, reusable Skills, and live operations visible in one place.",
-                "控制台会把工作流创建、受监督试跑、审批、可复用 Skills，以及实时运行情况集中展示在同一个界面里。",
+                "The console keeps candidate progress, runtime confirmations, skill evolution, and live Recruit Agent operations visible in one place.",
+                "控制台把候选人进度、运行时确认、skill 演进和 Recruit Agent 的实时运行情况集中展示在一个界面里。",
               )}
             </p>
           </div>
@@ -105,34 +108,49 @@ export function DashboardView({ summary }: DashboardViewProps): JSX.Element {
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: "14px" }}>
           {localizedMetrics.map((metric) => (
-            <MetricCard key={metric.label} {...metric} />
+            <MetricCard
+              key={metric.label}
+              {...metric}
+              onClick={
+                /人工审批|Manual approvals/i.test(metric.label)
+                  ? () => onOpenAgentInbox?.()
+                  : /回复率|Reply rate/i.test(metric.label)
+                    ? () => onOpenCommunications?.("waiting")
+                    : undefined
+              }
+            />
           ))}
         </div>
       </section>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: "18px", alignItems: "start" }}>
-        <Panel title={copy("Workflow throughput", "工作流吞吐")} eyebrow={copy("Operational throughput", "运行吞吐")} description={copy("Current workflow load and headroom against the active target capacity.", "当前工作流负载与目标容量余量。")}>
+        <Panel title={copy("Candidate throughput", "候选人吞吐")} eyebrow={copy("Operational throughput", "运行吞吐")} description={copy("Current candidate flow and headroom against the active target capacity.", "当前候选人流转情况与目标容量余量。")}>
           <ProgressBars stages={localizedPipeline} />
         </Panel>
-        <Panel title={copy("Live events", "实时事件")} eyebrow={copy("Recent state changes", "最新状态变化")} description={copy("The latest runtime, workflow, and supervision events that matter to an operator.", "对操作员最重要的运行时、工作流与监督事件。")}>
+        <Panel title={copy("Live events", "实时事件")} eyebrow={copy("Recent state changes", "最新状态变化")} description={copy("The latest runtime, candidate, and supervision events that matter to an operator.", "对操作员最重要的运行时、候选人和监督事件。")}>
           <Timeline events={localizedTimeline} />
         </Panel>
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: "18px" }}>
-        <Panel title={copy("Alerts", "告警")} eyebrow={copy("Safety and drift", "安全与漂移")} description={copy("Warnings that should block further automation or trigger a workflow revision review.", "需要阻止继续自动化或触发工作流修订审查的告警。")}>
+        <Panel title={copy("Alerts", "告警")} eyebrow={copy("Safety and drift", "安全与漂移")} description={copy("Warnings that should block further automation or trigger a Recruit Agent review.", "需要阻止继续自动化或触发 Recruit Agent 审查的告警。")}>
           <Timeline events={localizedAlerts} />
         </Panel>
-        <Panel title={copy("Human review queue", "人工审查队列")} eyebrow={copy("Approval gates", "审批关卡")} description={copy("Items waiting for approval before a workflow version, revision suggestion, or skill can become active.", "工作流版本、修订建议或 skill 在生效前等待审批的事项。")}>
+        <Panel title={copy("Human review queue", "人工审查队列")} eyebrow={copy("Approval gates", "审批关卡")} description={copy("Items waiting for approval before a communication, skill change, or evolution decision can become active.", "沟通动作、skill 变更或演进决策在生效前等待审批的事项。")}>
           <div style={{ display: "grid", gap: "12px" }}>
             {localizedApprovals.map((item) => (
-              <article key={item.id} style={{ padding: "14px", borderRadius: "16px", background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)" }}>
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => (item.relatedCandidateId ? onOpenCommunications?.("candidate", item.relatedCandidateId) : onOpenEvolution?.("approvals", item.id))}
+                style={{ padding: "14px", borderRadius: "16px", background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)", textAlign: "left", cursor: "pointer", color: "inherit" }}
+              >
                 <div style={{ display: "flex", justifyContent: "space-between", gap: "8px", alignItems: "start" }}>
                   <strong>{item.title}</strong>
                   <StatusBadge tone={item.status === "pending" ? "warning" : item.status === "approved" ? "positive" : "critical"}>{translateUiToken(item.status, copy)}</StatusBadge>
                 </div>
                 <p style={{ margin: "8px 0 0", color: "rgba(233,239,255,0.7)", fontSize: "13px", lineHeight: 1.5 }}>{item.detail}</p>
-              </article>
+              </button>
             ))}
           </div>
         </Panel>

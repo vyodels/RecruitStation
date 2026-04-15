@@ -1,30 +1,17 @@
 export type WorkspaceTab =
   | "dashboard"
-  | "workflow-management"
+  | "agent-inbox"
+  | "recruit-agent"
   | "workbench"
-  | "skills"
-  | "approvals"
+  | "communications"
+  | "evolution"
   | "settings";
 
 export type ProviderKind = "openai-compatible" | "anthropic";
 export type ApiTransport = "mock" | "http";
 export type HealthStatus = "healthy" | "warning" | "critical";
 export type ApprovalStatus = "pending" | "approved" | "rejected";
-export type CandidateStatus =
-  | "discovered"
-  | "screening"
-  | "pending_communication"
-  | "communicating"
-  | "waiting_reply"
-  | "pending_resume"
-  | "scoring"
-  | "passed_to_talent_pool"
-  | "hr_review"
-  | "team_review"
-  | "interview_scheduled"
-  | "offer"
-  | "rejected"
-  | "cooldown";
+export type CandidateStatus = string;
 
 export interface MetricSummary {
   label: string;
@@ -63,8 +50,150 @@ export interface CandidateRecord {
   summary: string;
   tags: string[];
   resumeAvailable: boolean;
+  stateSnapshot?: CandidateStateSnapshotRecord;
+  contactInfo?: Record<string, unknown>;
+  aiScores?: Record<string, unknown>;
   cooldownUntil?: string;
   lastContactedAt?: string;
+}
+
+export interface CandidateStateSnapshotRecord {
+  currentPhaseKey?: string | null;
+  currentPhaseLabel?: string | null;
+  currentStageKey?: string | null;
+  currentStageLabel?: string | null;
+  contactStatus?: string | null;
+  contactChannels: string[];
+  contactAcquired: boolean;
+  resumeStatus?: string | null;
+  aiAssessmentStatus?: string | null;
+  humanAssessmentStatus?: string | null;
+  operatorFlags: string[];
+  nextRecommendedStages: string[];
+  interviewPlan: Record<string, unknown>;
+  latestNote?: string | null;
+  latestTransitionAt?: string | null;
+  latestTransitionSource?: string | null;
+  snapshotMetadata: Record<string, unknown>;
+}
+
+export interface CandidateStageEventRecord {
+  id: string;
+  candidateId: string;
+  eventType: string;
+  fromStatus?: string | null;
+  toStatus: string;
+  phaseKey?: string | null;
+  phaseLabel?: string | null;
+  stageKey?: string | null;
+  stageLabel?: string | null;
+  actor?: string | null;
+  source: string;
+  note?: string | null;
+  payload: Record<string, unknown>;
+  occurredAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CandidateAssessmentRecord {
+  id: string;
+  candidateId: string;
+  assessmentType: string;
+  stageKey?: string | null;
+  status: string;
+  decision?: string | null;
+  score?: number | null;
+  summary?: string | null;
+  evidenceRefs: Array<unknown>;
+  metadata: Record<string, unknown>;
+  createdBy?: string | null;
+  reviewedBy?: string | null;
+  reviewedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CandidateAssignmentRecord {
+  id: string;
+  candidateId: string;
+  assignee: string;
+  ownerRole: string;
+  status: string;
+  note?: string | null;
+  assignmentMetadata: Record<string, unknown>;
+  assignedAt?: string | null;
+  releasedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ResumeArtifactRecord {
+  id: string;
+  candidateId: string;
+  source: string;
+  artifactType: string;
+  fileName?: string | null;
+  filePath?: string | null;
+  extractedText?: string | null;
+  contactSnapshot: Record<string, unknown>;
+  artifactMetadata: Record<string, unknown>;
+  capturedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CandidateScorecardRecord {
+  id: string;
+  candidateId: string;
+  stageKey?: string | null;
+  source: string;
+  rubricVersion: string;
+  scoreTotal?: number | null;
+  verdict?: string | null;
+  summary?: string | null;
+  dimensionScores: Record<string, unknown>;
+  evidenceRefs: Array<unknown>;
+  scorecardMetadata: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CandidateReviewDecisionRecord {
+  id: string;
+  candidateId: string;
+  stageKey?: string | null;
+  decision: string;
+  rationale?: string | null;
+  decisionSource: string;
+  decidedBy?: string | null;
+  scorecardId?: string | null;
+  reviewMetadata: Record<string, unknown>;
+  decidedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TalentPoolSyncRecord {
+  id: string;
+  candidateId: string;
+  destination: string;
+  status: string;
+  externalRef?: string | null;
+  payloadSnapshot: Record<string, unknown>;
+  errorMessage?: string | null;
+  syncedAt?: string | null;
+  lastAttemptedAt?: string | null;
+  syncMetadata: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface MemoryDisclosureRecord {
+  preview?: string;
+  operatorSummary?: string;
+  modelContext?: string;
+  tiers: Array<Record<string, unknown>>;
 }
 
 export interface WorkflowNodeSummary {
@@ -88,15 +217,27 @@ export interface WorkflowDefinition {
 
 export interface SkillRecord {
   id: string;
+  skillId: string;
   name: string;
+  description?: string;
+  category?: string;
   version: string;
   status: "draft" | "pending_review" | "approved" | "active" | "degraded" | "disabled";
   boundNode: string;
   platform: string;
+  inputSchema?: Record<string, unknown>;
+  outputSchema?: Record<string, unknown>;
+  strategy?: Record<string, unknown>;
+  executionHints?: Record<string, unknown>;
+  healthCheckConfig?: Record<string, unknown>;
+  riskLevel?: string;
+  skillMetadata?: Record<string, unknown>;
   health: HealthStatus;
   lastCheckedAt: string;
   summary: string;
 }
+
+export type ApprovalSurface = "runtime" | "evolution";
 
 export interface ApprovalItem {
   id: string;
@@ -113,6 +254,133 @@ export interface ApprovalItem {
   payload?: Record<string, unknown>;
   notes?: string | null;
   updatedAt?: string;
+  surface: ApprovalSurface;
+  relatedCandidateId?: string | null;
+}
+
+export interface RecruitAgentProfileRecord {
+  id: string;
+  agentKey: string;
+  name: string;
+  status: string;
+  description?: string;
+  isPrimary: boolean;
+  roleDefinition: Record<string, unknown>;
+  promptConfig: Record<string, unknown>;
+  workflowDefinition: Record<string, unknown>;
+  memoryPolicy: Record<string, unknown>;
+  dashboardConfig: Record<string, unknown>;
+  channelConfig: Record<string, unknown>;
+  agentMetadata: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CandidateMemoryRecord {
+  id: string;
+  agentProfileId: string;
+  candidateId: string;
+  status: string;
+  memorySchemaVersion: string;
+  summary?: string;
+  rawContent: Record<string, unknown>;
+  content: Record<string, unknown>;
+  disclosure: MemoryDisclosureRecord;
+  tokenEstimate: number;
+  sourceCount: number;
+  compactedAt?: string | null;
+  compactedReason?: string | null;
+  memoryMetadata: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface JobMemoryRecord {
+  id: string;
+  agentProfileId: string;
+  jdId: string;
+  status: string;
+  memorySchemaVersion: string;
+  summary?: string;
+  rawContent: Record<string, unknown>;
+  content: Record<string, unknown>;
+  disclosure: MemoryDisclosureRecord;
+  tokenEstimate: number;
+  sourceCount: number;
+  compactedAt?: string | null;
+  compactedReason?: string | null;
+  memoryMetadata: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AgentGlobalMemoryRecord {
+  id: string;
+  agentProfileId: string;
+  status: string;
+  memorySchemaVersion: string;
+  summary?: string;
+  rawContent: Record<string, unknown>;
+  content: Record<string, unknown>;
+  disclosure: MemoryDisclosureRecord;
+  tokenEstimate: number;
+  sourceCount: number;
+  compactedAt?: string | null;
+  compactedReason?: string | null;
+  memoryMetadata: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CandidateConversationEntry {
+  id: string;
+  direction: string;
+  content: string;
+  messageType: string;
+  platform: string;
+  metadata?: Record<string, unknown>;
+  timestamp?: string | null;
+}
+
+export interface CandidateThreadRecord {
+  candidate: CandidateRecord;
+  sessionStatus: string;
+  contextSummary?: string;
+  facts: Record<string, unknown>;
+  recentMessages: Array<Record<string, unknown>>;
+  communicationLogs: CandidateConversationEntry[];
+  stateSnapshot: CandidateStateSnapshotRecord;
+  stageEvents: CandidateStageEventRecord[];
+  assessments: CandidateAssessmentRecord[];
+  assignments: CandidateAssignmentRecord[];
+  resumeArtifacts: ResumeArtifactRecord[];
+  scorecards: CandidateScorecardRecord[];
+  reviewDecisions: CandidateReviewDecisionRecord[];
+  syncRecords: TalentPoolSyncRecord[];
+  availableStatuses: string[];
+  runtimeApprovals: ApprovalItem[];
+}
+
+export type EvolutionArtifactKind = "skill_draft" | "prompt_patch" | "memory_policy_patch" | "playbook_patch" | "workflow_patch";
+export type EvolutionArtifactStatus = "draft" | "pending_review" | "approved" | "applied" | "rejected" | "archived";
+
+export interface EvolutionArtifactRecord {
+  id: string;
+  agentProfileId?: string | null;
+  artifactKind: EvolutionArtifactKind;
+  title: string;
+  summary?: string | null;
+  status: EvolutionArtifactStatus;
+  relatedCandidateId?: string | null;
+  relatedSkillId?: string | null;
+  proposedBy?: string | null;
+  reviewedBy?: string | null;
+  reviewedAt?: string | null;
+  appliedAt?: string | null;
+  artifactBody: Record<string, unknown>;
+  artifactMetadata: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface AgentEvent {
@@ -166,6 +434,7 @@ export interface ProviderConfig {
   name: string;
   model: string;
   baseUrl?: string;
+  apiKey?: string;
   enabled: boolean;
   temperature: number;
 }
@@ -189,6 +458,8 @@ export interface SettingsSnapshot {
     account: string;
     cooldownDays: number;
     allowOutboundMessaging: boolean;
+    maxConcurrentRuns: number;
+    bossMaxConcurrentRuns?: number | null;
   };
 }
 

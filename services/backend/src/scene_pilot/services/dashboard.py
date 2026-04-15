@@ -49,7 +49,7 @@ def _workflow_nodes_for_dashboard(config: dict[str, Any]) -> list[dict[str, Any]
                     "kind": "screen",
                     "status": "idle",
                     "owner": "Agent",
-                    "description": "工作流节点。",
+                    "description": "执行节点。",
                 }
             )
             continue
@@ -63,7 +63,7 @@ def _workflow_nodes_for_dashboard(config: dict[str, Any]) -> list[dict[str, Any]
                 "kind": str(raw_node.get("kind") or raw_node.get("task_type") or "screen"),
                 "status": str(raw_node.get("status") or "idle"),
                 "owner": str(raw_node.get("owner") or "Agent"),
-                "description": str(raw_node.get("description") or "工作流节点。"),
+                "description": str(raw_node.get("description") or "执行节点。"),
             }
         )
     return normalized
@@ -84,7 +84,7 @@ class DashboardService:
         health = "warning" if queue_depth > 0 else "healthy"
         return AgentStatusRead(
             status="running" if queue_depth else "idle",
-            active_task="等待队列任务" if not queue_depth else "正在处理已排队的招聘工作流",
+            active_task="等待队列任务" if not queue_depth else "正在处理已排队的招聘任务",
             browser_lock="held" if queue_depth else "free",
             uptime="00:00:00",
             queue_depth=queue_depth,
@@ -112,22 +112,33 @@ class DashboardService:
         pipeline_map = {
             "发现": 0,
             "初筛": 0,
-            "沟通": 0,
-            "评分": 0,
-            "人工审查": 0,
+            "联系方式/沟通": 0,
+            "简历/评估": 0,
+            "面试/结果": 0,
         }
         for candidate in candidates:
             status = candidate.status
-            if status in {"discovered"}:
+            if status in {"discovered", "profile_reviewed"}:
                 pipeline_map["发现"] += 1
-            elif status in {"screening"}:
+            elif status in {"screening", "screening_passed", "screening_rejected"}:
                 pipeline_map["初筛"] += 1
-            elif status in {"pending_communication", "communicating", "waiting_reply", "pending_resume"}:
-                pipeline_map["沟通"] += 1
-            elif status in {"scoring", "passed_to_talent_pool"}:
-                pipeline_map["评分"] += 1
-            elif status in {"hr_review", "team_review"}:
-                pipeline_map["人工审查"] += 1
+            elif status in {"contact_required", "contact_acquired", "pending_communication", "communicating", "waiting_reply"}:
+                pipeline_map["联系方式/沟通"] += 1
+            elif status in {"resume_requested", "resume_received", "scoring", "ai_assessment_completed", "human_assessment_pending", "human_assessment_completed"}:
+                pipeline_map["简历/评估"] += 1
+            elif status in {
+                "waiting_schedule_round_1",
+                "interview_round_1_scheduled",
+                "waiting_schedule_round_2",
+                "interview_round_2_scheduled",
+                "waiting_schedule_final",
+                "interview_final_scheduled",
+                "offer_review",
+                "passed_to_talent_pool",
+                "hr_review",
+                "team_review",
+            }:
+                pipeline_map["面试/结果"] += 1
 
         dashboard_payload: dict[str, Any] = {
             "metrics": [
@@ -139,11 +150,11 @@ class DashboardService:
                     "caption": "已记录到本地 SQLite",
                 },
                 {
-                    "label": "工作流",
+                    "label": "执行编排",
                     "value": str(metrics.workflow_count),
-                    "delta": f"{metrics.by_status.get('passed_to_talent_pool', 0)} 条已通过",
+                    "delta": f"{metrics.by_status.get('passed_to_talent_pool', 0)} 位已进入后续交接",
                     "tone": "neutral",
-                    "caption": "已配置的工作流图",
+                    "caption": "Recruit Agent 当前可用的执行编排",
                 },
                 {
                     "label": "Skills",
@@ -221,7 +232,10 @@ class DashboardService:
                     "nextAction": item.contact_info.get("next_action", "查看候选人并决定下一步动作。"),
                     "summary": item.ai_reasoning or item.online_resume_text or "候选人档案正在等待审查。",
                     "tags": item.contact_info.get("tags", []),
-                    "resumeAvailable": bool(item.resume_path),
+                    "resumeAvailable": bool(item.resume_path or item.online_resume_text),
+                    "stateSnapshot": dict(item.state_snapshot or {}),
+                    "contactInfo": dict(item.contact_info or {}),
+                    "aiScores": dict(item.ai_scores or {}),
                     "cooldownUntil": item.cooldown_until.isoformat() if item.cooldown_until else None,
                     "lastContactedAt": item.last_contacted_at.isoformat() if item.last_contacted_at else None,
                 }
@@ -292,11 +306,11 @@ class DashboardService:
                 "intranetSync": {
                     "enabled": settings.feature_flags.enable_intranet_sync,
                     "baseUrl": _sync_setting(settings, "base_url"),
-                    "apiPath": _sync_setting(settings, "api_path", "/api/scene-pilot/sync"),
+                    "apiPath": _sync_setting(settings, "api_path", "/api/recruit-agent/sync"),
                     "timeoutSeconds": _sync_setting(settings, "timeout_seconds", 10),
                 },
                 "platform": {
-                    "name": "运行时场景画像",
+                    "name": "本地执行配置",
                     "account": _runtime_scene_account(settings),
                     "cooldownDays": settings.provider_config.get("cooldown_days", 30),
                     "allowOutboundMessaging": settings.feature_flags.enable_outbound_messaging,

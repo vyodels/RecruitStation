@@ -7,63 +7,29 @@ import { theme } from "../../lib/theme";
 import { translateUiToken } from "../../lib/uiText";
 import type {
   AgentEvent,
+  AgentGlobalMemoryRecord,
   AgentQueueItem,
-  CompileTaskRequest,
+  CandidateMemoryRecord,
+  CandidateThreadRecord,
   DashboardSummary,
-  RuntimeEnvironmentAssessment,
+  EvolutionArtifactRecord,
+  JobMemoryRecord,
+  RecruitAgentProfileRecord,
   RuntimeEpisodeReplay,
-  RuntimeLearningOutcome,
-  RuntimePlanReplanResult,
   RuntimeWorkspaceData,
+  SettingsSnapshot,
+  SkillRecord,
   SyncBacklogItem,
   SyncStatusSnapshot,
   WorkspaceTab,
 } from "../../lib/types";
-import { ApprovalsView } from "../approvals/ApprovalsView";
-import { HumanAssistDock } from "../approvals/HumanAssistDock";
+import { AgentInboxView } from "../agent-inbox/AgentInboxView";
+import { CommunicationsView } from "../communications/CommunicationsView";
 import { DashboardView } from "../dashboard/DashboardView";
+import { EvolutionView } from "../evolution/EvolutionView";
+import { RecruitAgentView } from "../recruit-agent/RecruitAgentView";
 import { SettingsView } from "../settings/SettingsView";
-import { SkillsView } from "../skills/SkillsView";
-import { WorkflowManagementView } from "../workflow-management/WorkflowManagementView";
 import { WorkbenchView } from "../workbench/WorkbenchView";
-
-function prependUniqueById<T extends { id: string }>(preferred: T[], fallback: T[]): T[] {
-  const seen = new Set<string>();
-  const merged: T[] = [];
-  for (const item of [...preferred, ...fallback]) {
-    if (!item || seen.has(item.id)) {
-      continue;
-    }
-    seen.add(item.id);
-    merged.push(item);
-  }
-  return merged;
-}
-
-function mergeRuntimeWorkspaceData(
-  nextRuntime: RuntimeWorkspaceData,
-  currentRuntime: RuntimeWorkspaceData,
-  lastAssessment: RuntimeEnvironmentAssessment | null,
-  lastReplan: RuntimePlanReplanResult | null,
-): RuntimeWorkspaceData {
-  const assessment = lastAssessment ? [lastAssessment] : [];
-  const replanAssessment = lastReplan?.environmentAssessment ? [lastReplan.environmentAssessment] : [];
-  const replanPatch = lastReplan?.patch ? [lastReplan.patch] : [];
-  const replanPlan = lastReplan ? [lastReplan.executionPlan] : [];
-  const replans = lastReplan ? [lastReplan] : [];
-
-  return {
-    ...nextRuntime,
-    plans: prependUniqueById(replanPlan, prependUniqueById(nextRuntime.plans, currentRuntime.plans)),
-    capabilityDrivers: nextRuntime.capabilityDrivers.length ? nextRuntime.capabilityDrivers : currentRuntime.capabilityDrivers,
-    environmentAssessments: prependUniqueById(
-      assessment,
-      prependUniqueById(replanAssessment, prependUniqueById(nextRuntime.environmentAssessments, currentRuntime.environmentAssessments)),
-    ),
-    patches: prependUniqueById(replanPatch, prependUniqueById(nextRuntime.patches, currentRuntime.patches)),
-    replans: prependUniqueById(replans, prependUniqueById(nextRuntime.replans, currentRuntime.replans)),
-  };
-}
 
 export function DesktopWorkspace(): JSX.Element {
   const { copy } = useI18n();
@@ -71,17 +37,18 @@ export function DesktopWorkspace(): JSX.Element {
   const [summary, setSummary] = useState<DashboardSummary>(desktopMockSnapshot);
   const [runtimeData, setRuntimeData] = useState<RuntimeWorkspaceData>(desktopRuntimeMock);
   const [events, setEvents] = useState<AgentEvent[]>([
-    { id: "stream-001", level: "info", source: "bootstrap", message: copy("Workspace loaded from the local sample snapshot.", "工作区已从本地示例快照加载。"), at: copy("now", "刚刚") },
-    { id: "stream-002", level: "warning", source: "runtime", message: copy("New workflows default into supervised trial mode.", "新工作流默认进入受监督试跑模式。"), at: copy("now", "刚刚") },
+    {
+      id: "stream-001",
+      level: "info",
+      source: "bootstrap",
+      message: copy("Recruit Agent workspace loaded.", "Recruit Agent 工作区已加载。"),
+      at: copy("now", "刚刚"),
+    },
   ]);
   const [refreshing, setRefreshing] = useState(false);
   const [settingsSaving, setSettingsSaving] = useState(false);
-  const [approvalActionId, setApprovalActionId] = useState<string>();
   const [runtimeActionBusy, setRuntimeActionBusy] = useState(false);
-  const [trialTaskId, setTrialTaskId] = useState<string>();
-  const [busyEpisodeId, setBusyEpisodeId] = useState<string>();
-  const [busyPatchId, setBusyPatchId] = useState<string>();
-  const [busyPlanId, setBusyPlanId] = useState<string>();
+  const [approvalActionId, setApprovalActionId] = useState<string>();
   const [selectedEpisodeId, setSelectedEpisodeId] = useState<string>();
   const [selectedReplay, setSelectedReplay] = useState<RuntimeEpisodeReplay | null>(null);
   const [syncStatus, setSyncStatus] = useState<SyncStatusSnapshot>(desktopSyncStatusMock);
@@ -90,21 +57,39 @@ export function DesktopWorkspace(): JSX.Element {
   const [syncingBacklog, setSyncingBacklog] = useState(false);
   const [transport, setTransport] = useState(apiClient.describe().transport);
   const [errorMessage, setErrorMessage] = useState<string>();
-  const [lastOutcome, setLastOutcome] = useState<RuntimeLearningOutcome | null>(null);
-  const [lastAssessment, setLastAssessment] = useState<RuntimeEnvironmentAssessment | null>(
-    desktopRuntimeMock.environmentAssessments[0] ?? null,
-  );
-  const [lastReplan, setLastReplan] = useState<RuntimePlanReplanResult | null>(desktopRuntimeMock.replans[0] ?? null);
-  const [assistOpen, setAssistOpen] = useState(false);
+  const [profile, setProfile] = useState<RecruitAgentProfileRecord | null>(null);
+  const [candidateMemories, setCandidateMemories] = useState<CandidateMemoryRecord[]>([]);
+  const [jobMemories, setJobMemories] = useState<JobMemoryRecord[]>([]);
+  const [globalMemory, setGlobalMemory] = useState<AgentGlobalMemoryRecord | null>(null);
+  const [candidateThreads, setCandidateThreads] = useState<CandidateThreadRecord[]>([]);
+  const [evolutionArtifacts, setEvolutionArtifacts] = useState<EvolutionArtifactRecord[]>([]);
+  const [communicationsFocus, setCommunicationsFocus] = useState<{ candidateId?: string; statusFilter?: string }>({});
+  const [agentInboxFocus, setAgentInboxFocus] = useState<{ filter?: string; itemId?: string }>({});
+  const [evolutionFocus, setEvolutionFocus] = useState<{ section?: string; itemId?: string }>({});
 
   const appendEvent = (event: AgentEvent) => {
-    setEvents((current) => [...current.slice(-39), event]);
+    setEvents((current) => [...current.slice(-49), event]);
   };
 
   const loadWorkspace = async (reason?: string) => {
     setRefreshing(true);
     try {
-      const [nextSummary, nextRuntime, nextAgent, nextSyncStatus, nextSyncBacklog, nextQueueItems, nextApprovals] = await Promise.all([
+      const [
+        nextSummary,
+        nextRuntime,
+        nextAgent,
+        nextSyncStatus,
+        nextSyncBacklog,
+        nextQueueItems,
+        nextApprovals,
+        nextSkills,
+        nextProfile,
+        nextCandidateMemories,
+        nextJobMemories,
+        nextGlobalMemory,
+        nextCandidateThreads,
+        nextEvolutionArtifacts,
+      ] = await Promise.all([
         apiClient.getDashboardSummary(),
         apiClient.getRuntimeWorkspaceData(),
         apiClient.getAgentSnapshot(),
@@ -112,13 +97,32 @@ export function DesktopWorkspace(): JSX.Element {
         apiClient.listSyncBacklog(),
         apiClient.listAgentQueue(),
         apiClient.listApprovals(),
+        apiClient.listSkills(),
+        apiClient.getRecruitAgentProfile(),
+        apiClient.listCandidateMemories(),
+        apiClient.listJobMemories(),
+        apiClient.getAgentGlobalMemory(),
+        apiClient.listCandidateThreads(),
+        apiClient.listEvolutionArtifacts(),
       ]);
+
       startTransition(() => {
-        setSummary({ ...nextSummary, agent: nextAgent, approvals: nextApprovals });
-        setRuntimeData((current) => mergeRuntimeWorkspaceData(nextRuntime, current, lastAssessment, lastReplan));
+        setSummary({
+          ...nextSummary,
+          agent: nextAgent,
+          approvals: nextApprovals,
+          skills: nextSkills,
+        });
+        setRuntimeData(nextRuntime);
         setSyncStatus(nextSyncStatus);
         setSyncBacklog(nextSyncBacklog);
         setQueueItems(nextQueueItems);
+        setProfile(nextProfile);
+        setCandidateMemories(nextCandidateMemories);
+        setJobMemories(nextJobMemories);
+        setGlobalMemory(nextGlobalMemory);
+        setCandidateThreads(nextCandidateThreads);
+        setEvolutionArtifacts(nextEvolutionArtifacts);
       });
       setSelectedEpisodeId((current) => current ?? nextRuntime.episodes[0]?.id);
       setTransport("http");
@@ -135,7 +139,7 @@ export function DesktopWorkspace(): JSX.Element {
     } catch (error) {
       setTransport("mock");
       setSummary(desktopMockSnapshot);
-      setRuntimeData((current) => mergeRuntimeWorkspaceData(desktopRuntimeMock, current, lastAssessment, lastReplan));
+      setRuntimeData(desktopRuntimeMock);
       setSyncStatus(desktopSyncStatusMock);
       setSyncBacklog(desktopSyncBacklogMock);
       setQueueItems(desktopAgentQueueMock);
@@ -145,7 +149,7 @@ export function DesktopWorkspace(): JSX.Element {
         id: `local-error-${Date.now()}`,
         level: "warning",
         source: "desktop",
-        message: copy("Backend unavailable. Using the local sample runtime snapshot.", "本地后端暂时不可用，已切换到本地示例运行时快照。"),
+        message: copy("Backend unavailable. Falling back to the local Recruit Agent mock state.", "本地后端不可用，已切换到本地 Recruit Agent mock 状态。"),
         at: new Date().toISOString(),
       });
     } finally {
@@ -154,49 +158,13 @@ export function DesktopWorkspace(): JSX.Element {
   };
 
   useEffect(() => {
-    let alive = true;
-    void (async () => {
-      try {
-        const [nextSummary, nextRuntime, nextAgent, nextSyncStatus, nextSyncBacklog, nextQueueItems, nextApprovals] = await Promise.all([
-          apiClient.getDashboardSummary(),
-          apiClient.getRuntimeWorkspaceData(),
-          apiClient.getAgentSnapshot(),
-          apiClient.getSyncStatus(),
-          apiClient.listSyncBacklog(),
-          apiClient.listAgentQueue(),
-          apiClient.listApprovals(),
-        ]);
-        if (!alive) {
-          return;
-        }
-        setSummary({ ...nextSummary, agent: nextAgent, approvals: nextApprovals });
-        setRuntimeData((current) => mergeRuntimeWorkspaceData(nextRuntime, current, lastAssessment, lastReplan));
-        setSyncStatus(nextSyncStatus);
-        setSyncBacklog(nextSyncBacklog);
-        setQueueItems(nextQueueItems);
-        setSelectedEpisodeId((current) => current ?? nextRuntime.episodes[0]?.id);
-        setTransport("http");
-        setEvents((current) => [
-          ...current,
-          {
-            id: "stream-live-001",
-            level: "success",
-            source: "api",
-            message: copy("Workspace refreshed from the local backend.", "工作区已从本地后端刷新。"),
-            at: new Date().toISOString(),
-          },
-        ]);
-      } catch {
-        setTransport("mock");
-      }
-    })();
+    void loadWorkspace(copy("Workspace loaded.", "工作区已加载。"));
 
     const interval = window.setInterval(() => {
       void loadWorkspace();
     }, 10000);
 
     return () => {
-      alive = false;
       window.clearInterval(interval);
     };
   }, []);
@@ -218,12 +186,6 @@ export function DesktopWorkspace(): JSX.Element {
     });
     return unsubscribe;
   }, []);
-
-  useEffect(() => {
-    if (summary.approvals.some((approval) => approval.status === "pending")) {
-      setAssistOpen(true);
-    }
-  }, [summary.approvals]);
 
   useEffect(() => {
     const episodeId = selectedEpisodeId;
@@ -249,50 +211,65 @@ export function DesktopWorkspace(): JSX.Element {
     return () => {
       active = false;
     };
-  }, [runtimeData.episodes, selectedEpisodeId]);
+  }, [selectedEpisodeId]);
 
   const counts = useMemo(
     () =>
       ({
-        "workflow-management": runtimeData.taskSpecs.length,
-        workbench: runtimeData.episodes.filter((episode) => /(pending|running|awaiting_review)/i.test(episode.status)).length,
-        skills: summary.skills.filter((skill) => skill.status !== "active").length,
-        approvals: summary.approvals.filter((approval) => approval.status === "pending").length,
+      "recruit-agent": summary.skills.filter((skill) => skill.status !== "active" || skill.health !== "healthy").length,
+        "agent-inbox":
+          summary.approvals.filter((approval) => !approval.relatedCandidateId && approval.status === "pending").length +
+          summary.skills.filter((skill) => skill.status !== "active" || skill.health !== "healthy").length +
+          evolutionArtifacts.filter((artifact) => /(pending|draft|review)/i.test(artifact.status)).length,
+        workbench: summary.candidates.filter((candidate) => !/(rejected|cooldown)/i.test(candidate.status)).length,
+        communications: candidateThreads.filter(
+          (thread) =>
+            thread.runtimeApprovals.some((approval) => approval.status === "pending") ||
+            /(contact_required|contact_acquired|pending_communication|communicating|waiting_reply|resume_requested)/i.test(thread.candidate.status),
+        ).length,
+        evolution:
+          summary.approvals.filter((approval) => approval.surface === "evolution" && approval.status === "pending").length +
+          summary.skills.filter((skill) => skill.status !== "active" || skill.health !== "healthy").length,
       }) satisfies Partial<Record<WorkspaceTab, number>>,
-    [runtimeData, summary],
+    [candidateThreads, evolutionArtifacts, summary],
   );
 
   const sectionMeta = useMemo(
     (): Record<WorkspaceTab, { eyebrow: string; title: string; description: string }> => ({
       dashboard: {
-        eyebrow: copy("ScenePilot", "ScenePilot"),
+        eyebrow: copy("Recruit Agent", "Recruit Agent"),
         title: copy("Overview", "概览"),
-        description: copy("A concise global view of health, approvals, and cross-workflow movement.", "集中查看健康状态、审批情况和跨工作流的整体变化。"),
+        description: copy("A concise view of candidate progress, approvals, and recent agent movement.", "集中查看候选人进度、审批状态和最近的 agent 动作。"),
       },
-      "workflow-management": {
-        eyebrow: copy("Workflow lifecycle", "工作流生命周期"),
-        title: copy("Workflow management", "工作流管理"),
-        description: copy("Create workflows, shape scene profiles, run trials, review revisions, and release reusable versions.", "创建工作流、整理场景画像、执行试跑、审查修订建议，并发布可复用版本。"),
+      "agent-inbox": {
+        eyebrow: copy("Operator chat", "操作员会话"),
+        title: copy("Agent IM", "Agent IM"),
+        description: copy("Handle non-candidate run-time confirmations and blocked flow without leaving the main chat surface.", "在主聊天窗口里处理非候选人的运行时确认和阻塞流。"),
+      },
+      "recruit-agent": {
+        eyebrow: copy("Agent configuration", "Agent 配置"),
+        title: copy("Recruit Agent", "招聘 Agent"),
+        description: copy("Expose role, prompt, workflow, memory, and skill contracts directly to the operator.", "把角色、提示词、工作流、memory 与 skill 契约直接暴露给操作员。"),
       },
       workbench: {
-        eyebrow: copy("Live operations", "实时运营"),
+        eyebrow: copy("Operations", "运行操作"),
         title: copy("Workbench", "工作台"),
-        description: copy("Inspect each workflow and its workflow instances with workflow-specific operational views.", "查看每条工作流及其工作流实例，并进入该工作流的专属工作台视图。"),
+        description: copy("Focus on candidate progress and recent Recruit Agent execution results.", "聚焦候选人进度与最近的 Recruit Agent 执行结果。"),
       },
-      skills: {
-        eyebrow: copy("Skill governance", "Skill 治理"),
-        title: copy("Skills", "Skills"),
-        description: copy("Track Skills approval, health, and evolution across released workflows.", "查看 Skills 在已发布工作流中的审批、健康状态和演进情况。"),
+      communications: {
+        eyebrow: copy("Runtime inbox", "运行时收件箱"),
+        title: copy("Communications", "沟通中心"),
+        description: copy("Manage candidate-scoped threads, confirmations, and communication history without cross-candidate leakage.", "按候选人管理线程、确认和沟通历史，避免跨候选人串线。"),
       },
-      approvals: {
-        eyebrow: copy("Human gates", "人工关卡"),
-        title: copy("Approvals", "审批中心"),
-        description: copy("Review approvals before workflow versions, revision suggestions, or sensitive actions go live.", "在工作流版本、修订建议或敏感动作生效前完成审批。"),
+      evolution: {
+        eyebrow: copy("Self-learning", "自学习演进"),
+        title: copy("Evolution", "自学习/演进"),
+        description: copy("Handle skill degradation, memory compaction, and non-candidate approvals in one place.", "集中处理 skill 退化、memory compact 和非候选人审批。"),
       },
       settings: {
         eyebrow: copy("Local operator settings", "本地操作设置"),
         title: copy("Settings", "设置"),
-        description: copy("Manage providers, local sync behavior, and operator controls for this machine.", "管理本机的 provider、本地同步行为和操作员控制项。"),
+        description: copy("Manage providers, local sync behavior, and desktop approval controls.", "管理 provider、本地同步行为和桌面端审批控制。"),
       },
     }),
     [copy],
@@ -318,7 +295,7 @@ export function DesktopWorkspace(): JSX.Element {
     }
   };
 
-  const handleSaveSettings = async (patch: Partial<DashboardSummary["settings"]>) => {
+  const handleSaveSettings = async (patch: Partial<SettingsSnapshot>) => {
     setSettingsSaving(true);
     try {
       const nextSettings = await apiClient.updateSettings(patch);
@@ -352,227 +329,10 @@ export function DesktopWorkspace(): JSX.Element {
         candidateId: firstCandidate?.id,
         workflowNodeId: "initial_screening",
       });
-      await loadWorkspace(copy(`Queued task ${task.taskType} with depth ${task.queueDepth}.`, `已将任务 ${task.taskType} 放入队列，当前深度为 ${task.queueDepth}。`));
+      await loadWorkspace(copy(`Queued task ${task.taskType}.`, `已将任务 ${task.taskType} 放入队列。`));
     } finally {
       setRuntimeActionBusy(false);
     }
-  };
-
-  const handleCompile = async (request: CompileTaskRequest) => {
-    setRuntimeActionBusy(true);
-    try {
-      const result = await apiClient.compileRuntimeTask(request);
-      setErrorMessage(undefined);
-      appendEvent({
-        id: `compile-${Date.now()}`,
-        level: "success",
-        source: "compiler",
-        message: copy(`Compiled ${result.taskSpec.title} for ${result.domainPack.name}.`, `已为 ${result.domainPack.name} 编译工作流《${result.taskSpec.title}》。`),
-        at: new Date().toISOString(),
-      });
-      await loadWorkspace(copy(`Compiled task ${result.taskSpec.title}.`, `已完成工作流《${result.taskSpec.title}》的编译。`));
-    } catch (error) {
-      const message = error instanceof Error ? error.message : copy("Task compilation failed.", "任务编译失败。");
-      setErrorMessage(message);
-      appendEvent({
-        id: `compile-error-${Date.now()}`,
-        level: "warning",
-        source: "compiler",
-        message,
-        at: new Date().toISOString(),
-      });
-    } finally {
-      setRuntimeActionBusy(false);
-    }
-  };
-
-  const handleLaunchPlan = async (planId: string, taskSpecId: string) => {
-    setBusyPlanId(planId);
-    try {
-      const launched = await apiClient.launchRuntimePlan(planId, taskSpecId, "production");
-      setSelectedEpisodeId(launched.executionEpisode.id);
-      appendEvent({
-        id: `launch-${launched.taskId}`,
-        level: "info",
-        source: "runtime-launch",
-        message: copy(`Queued managed execution ${launched.taskId} for plan ${planId}.`, `已为计划 ${planId} 排入托管运行 ${launched.taskId}。`),
-        at: new Date().toISOString(),
-      });
-      await loadWorkspace(copy(`Queued managed execution ${launched.taskId}.`, `已排入托管运行 ${launched.taskId}。`));
-    } finally {
-      setBusyPlanId(undefined);
-    }
-  };
-
-  const handleCreateTrial = async (taskSpecId: string, executionPlanId: string) => {
-    setTrialTaskId(taskSpecId);
-    try {
-      const episode = await apiClient.createTrialRun(taskSpecId, executionPlanId, "由桌面控制台创建。");
-      appendEvent({
-        id: `trial-${episode.id}`,
-        level: "info",
-        source: "trial",
-        message: copy(`Created supervised trial ${episode.id}.`, `已创建受监督试跑 ${episode.id}。`),
-        at: new Date().toISOString(),
-      });
-      setSelectedEpisodeId(episode.id);
-      await loadWorkspace(copy(`Created trial run ${episode.id}.`, `已创建试跑 ${episode.id}。`));
-    } finally {
-      setTrialTaskId(undefined);
-    }
-  };
-
-  const handleExecuteTrial = async (episodeId: string) => {
-    setBusyEpisodeId(episodeId);
-    try {
-      const outcome = await apiClient.executeTrialRun(episodeId, "由桌面控制台执行。");
-      setLastOutcome(outcome);
-      await loadWorkspace(copy(`Executed trial ${episodeId}.`, `已执行试跑 ${episodeId}。`));
-    } finally {
-      setBusyEpisodeId(undefined);
-    }
-  };
-
-  const handleLearnTrial = async (episodeId: string) => {
-    setBusyEpisodeId(episodeId);
-    try {
-      const outcome = await apiClient.refreshRuntimeLearning(episodeId);
-      setLastOutcome(outcome);
-      await loadWorkspace(copy(`Refreshed learning for trial ${episodeId}.`, `已刷新试跑 ${episodeId} 的学习结果。`));
-    } finally {
-      setBusyEpisodeId(undefined);
-    }
-  };
-
-  const handleConfirmTrial = async (episodeId: string) => {
-    setBusyEpisodeId(episodeId);
-    try {
-      const outcome = await apiClient.confirmTrialRun(episodeId, "经桌面端受监督审查后批准。");
-      setLastOutcome(outcome);
-      await loadWorkspace(copy(`Confirmed trial ${episodeId}.`, `已确认试跑 ${episodeId}。`));
-    } finally {
-      setBusyEpisodeId(undefined);
-    }
-  };
-
-  const handleApprovePatch = async (id: string) => {
-    setBusyPatchId(id);
-    try {
-      await apiClient.approveRuntimePatch(id, "由桌面端修订审查批准。");
-      await loadWorkspace(copy(`Approved patch ${id}.`, `已批准修订建议 ${id}。`));
-    } finally {
-      setBusyPatchId(undefined);
-    }
-  };
-
-  const handleRejectPatch = async (id: string) => {
-    setBusyPatchId(id);
-    try {
-      await apiClient.rejectRuntimePatch(id, "由桌面端修订审查拒绝。");
-      await loadWorkspace(copy(`Rejected patch ${id}.`, `已拒绝修订建议 ${id}。`));
-    } finally {
-      setBusyPatchId(undefined);
-    }
-  };
-
-  const resolveRuntimeSnapshot = (executionPlanId: string, executionEpisodeId?: string) => {
-    if (selectedReplay && selectedReplay.executionPlan?.id === executionPlanId) {
-      return selectedReplay.snapshots[0] ?? null;
-    }
-    if (executionEpisodeId) {
-      return runtimeData.snapshots.find((snapshot) => snapshot.executionEpisodeId === executionEpisodeId) ?? null;
-    }
-    return runtimeData.snapshots.find((snapshot) => snapshot.executionPlanId === executionPlanId) ?? null;
-  };
-
-  const handleAssessEnvironment = async (executionPlanId: string, executionEpisodeId?: string) => {
-    setBusyPlanId(executionPlanId);
-    try {
-      const plan = runtimeData.plans.find((item) => item.id === executionPlanId);
-      const assessment = await apiClient.assessRuntimeEnvironment({
-        taskSpecId: plan?.taskSpecId,
-        executionPlanId,
-        executionEpisodeId,
-        snapshot: resolveRuntimeSnapshot(executionPlanId, executionEpisodeId) ?? undefined,
-      });
-      setLastAssessment(assessment);
-      startTransition(() => {
-        setRuntimeData((current) => ({
-          ...current,
-          environmentAssessments: prependUniqueById([assessment], current.environmentAssessments),
-        }));
-      });
-      appendEvent({
-        id: `assessment-${Date.now()}`,
-        level: assessment.driftSignals.length ? "warning" : "success",
-        source: "scene-assessment",
-        message: copy(`Assessed ${assessment.sceneLabel} for plan ${executionPlanId}.`, `已为计划 ${executionPlanId} 完成场景《${assessment.sceneLabel}》评估。`),
-        at: new Date().toISOString(),
-      });
-    } finally {
-      setBusyPlanId(undefined);
-    }
-  };
-
-  const handleReplanPlan = async (
-    executionPlanId: string,
-    trigger: string,
-    notes?: string,
-    preferredCapabilityKeys?: string[],
-  ) => {
-    setBusyPlanId(executionPlanId);
-    try {
-      const plan = runtimeData.plans.find((item) => item.id === executionPlanId);
-      const result = await apiClient.replanRuntimePlan({
-        executionPlanId,
-        taskSpecId: plan?.taskSpecId,
-        executionEpisodeId: selectedEpisodeId,
-        snapshot: resolveRuntimeSnapshot(executionPlanId, selectedEpisodeId) ?? undefined,
-        trigger,
-        reason: notes,
-        notes,
-        preferredCapabilityKeys,
-      });
-      setLastReplan(result);
-      startTransition(() => {
-        setRuntimeData((current) =>
-          mergeRuntimeWorkspaceData(
-            {
-              ...current,
-              plans: prependUniqueById([result.executionPlan], current.plans),
-              environmentAssessments: result.environmentAssessment
-                ? prependUniqueById([result.environmentAssessment], current.environmentAssessments)
-                : current.environmentAssessments,
-              patches: result.patch ? prependUniqueById([result.patch], current.patches) : current.patches,
-              replans: prependUniqueById([result], current.replans),
-            },
-            current,
-            result.environmentAssessment ?? lastAssessment,
-            result,
-          ),
-        );
-      });
-      appendEvent({
-        id: `replan-${result.id}`,
-        level: result.patch ? "warning" : "success",
-        source: "replanner",
-        message: copy(`Prepared replan ${result.executionPlan.name} from ${executionPlanId}.`, `已基于 ${executionPlanId} 生成重规划《${result.executionPlan.name}》。`),
-        at: new Date().toISOString(),
-      });
-    } finally {
-      setBusyPlanId(undefined);
-    }
-  };
-
-  const handleInspectEpisode = (episodeId: string) => {
-    setSelectedEpisodeId(episodeId);
-    appendEvent({
-      id: `replay-${episodeId}-${Date.now()}`,
-      level: "info",
-      source: "replay",
-      message: copy(`Loaded replay diagnostics for ${episodeId}.`, `已加载 ${episodeId} 的回放诊断信息。`),
-      at: new Date().toISOString(),
-    });
   };
 
   const handleFlushSync = async () => {
@@ -585,35 +345,153 @@ export function DesktopWorkspace(): JSX.Element {
     }
   };
 
+  const handleSaveProfile = async (payload: Partial<RecruitAgentProfileRecord>) => {
+    await apiClient.updateRecruitAgentProfile(payload);
+    await loadWorkspace(copy("Recruit Agent profile saved.", "Recruit Agent 配置已保存。"));
+  };
+
+  const handleUpdateSkill = async (skillId: string, payload: Partial<SkillRecord>) => {
+    await apiClient.updateSkill(skillId, payload);
+    await loadWorkspace(copy("Skill updated.", "Skill 已更新。"));
+  };
+
+  const handleDeleteSkill = async (skillId: string) => {
+    await apiClient.deleteSkill(skillId);
+    await loadWorkspace(copy("Skill deleted.", "Skill 已删除。"));
+  };
+
+  const handleUpdateCandidateMemory = async (candidateId: string, payload: Partial<CandidateMemoryRecord>) => {
+    await apiClient.updateCandidateMemory(candidateId, payload);
+    await loadWorkspace(copy("Candidate memory updated.", "候选人 memory 已更新。"));
+  };
+
+  const handleCompactCandidateMemory = async (candidateId: string) => {
+    await apiClient.compactCandidateMemory(candidateId, "manual_compact", true);
+    await loadWorkspace(copy("Candidate memory compacted.", "候选人 memory 已 compact。"));
+  };
+
+  const handleUpdateJobMemory = async (jdId: string, payload: Partial<JobMemoryRecord>) => {
+    await apiClient.updateJobMemory(jdId, payload);
+    await loadWorkspace(copy("JD memory updated.", "JD memory 已更新。"));
+  };
+
+  const handleCompactJobMemory = async (jdId: string) => {
+    await apiClient.compactJobMemory(jdId, "manual_compact", true);
+    await loadWorkspace(copy("JD memory compacted.", "JD memory 已 compact。"));
+  };
+
+  const handleUpdateGlobalMemory = async (payload: Partial<AgentGlobalMemoryRecord>) => {
+    await apiClient.updateAgentGlobalMemory(payload);
+    await loadWorkspace(copy("Global memory updated.", "全局 memory 已更新。"));
+  };
+
+  const handleCompactGlobalMemory = async () => {
+    await apiClient.compactAgentGlobalMemory("manual_compact", true);
+    await loadWorkspace(copy("Global memory compacted.", "全局 memory 已 compact。"));
+  };
+
+  const handleUpdateEvolutionArtifact = async (artifactId: string, payload: Partial<EvolutionArtifactRecord>) => {
+    await apiClient.updateEvolutionArtifact(artifactId, payload);
+    await loadWorkspace(copy("Evolution artifact updated.", "演进产物已更新。"));
+  };
+
+  const handleCreateThreadEntry = async (candidateId: string, payload: { direction: string; content: string; messageType?: string; platform?: string }) => {
+    await apiClient.createCandidateThreadEntry(candidateId, payload);
+    await loadWorkspace(copy("Conversation entry added.", "沟通记录已追加。"));
+  };
+
+  const handleTransitionCandidateState = async (
+    candidateId: string,
+    payload: {
+      toStatus: string;
+      phaseKey?: string;
+      phaseLabel?: string;
+      stageKey?: string;
+      stageLabel?: string;
+      note?: string;
+      source?: string;
+      actor?: string;
+      metadata?: Record<string, unknown>;
+      interviewRound?: number;
+      contactChannels?: string[];
+    },
+  ) => {
+    await apiClient.transitionCandidateState(candidateId, payload);
+    await loadWorkspace(copy("Candidate state updated.", "候选人状态已更新。"));
+  };
+
+  const handleCreateCandidateAssessment = async (
+    candidateId: string,
+    payload: {
+      assessmentType: string;
+      stageKey?: string;
+      status?: string;
+      decision?: string;
+      score?: number;
+      summary?: string;
+      evidenceRefs?: unknown[];
+      metadata?: Record<string, unknown>;
+      createdBy?: string;
+      reviewedBy?: string;
+    },
+  ) => {
+    await apiClient.createCandidateAssessment(candidateId, payload);
+    await loadWorkspace(copy("Assessment saved.", "评估已保存。"));
+  };
+
+  const openCommunications = (statusFilter?: string, candidateId?: string) => {
+    setCommunicationsFocus({ statusFilter, candidateId });
+    setTab("communications");
+  };
+
+  const openAgentInbox = (filter?: string, itemId?: string) => {
+    setAgentInboxFocus({ filter, itemId });
+    setTab("agent-inbox");
+  };
+
+  const openEvolution = (section?: string, itemId?: string) => {
+    setEvolutionFocus({ section, itemId });
+    setTab("evolution");
+  };
+
   const content = (() => {
     switch (tab) {
       case "dashboard":
-        return <DashboardView summary={summary} />;
-      case "workflow-management":
+        return <DashboardView summary={summary} onOpenAgentInbox={() => openAgentInbox("approvals")} onOpenCommunications={openCommunications} onOpenEvolution={openEvolution} />;
+      case "agent-inbox":
         return (
-          <WorkflowManagementView
-            data={runtimeData}
+          <AgentInboxView
             approvals={summary.approvals}
-            busy={runtimeActionBusy}
-            busyEpisodeId={busyEpisodeId}
-            selectedEpisodeId={selectedEpisodeId}
-            actionPatchId={busyPatchId}
-            busyPlanId={busyPlanId}
-            replay={selectedReplay}
-            lastOutcome={lastOutcome}
-            lastAssessment={lastAssessment}
-            lastReplan={lastReplan}
-            onCompileTask={handleCompile}
-            onLaunchPlan={handleLaunchPlan}
-            onCreateTrialRun={handleCreateTrial}
-            onExecuteTrialRun={handleExecuteTrial}
-            onRefreshLearning={handleLearnTrial}
-            onConfirmTrial={handleConfirmTrial}
-            onInspectEpisode={handleInspectEpisode}
-            onAssessEnvironment={handleAssessEnvironment}
-            onReplanPlan={handleReplanPlan}
-            onApprovePatch={handleApprovePatch}
-            onRejectPatch={handleRejectPatch}
+            skills={summary.skills}
+            artifacts={evolutionArtifacts}
+            events={events}
+            pendingActionId={approvalActionId}
+            requestedFilter={agentInboxFocus.filter}
+            requestedItemId={agentInboxFocus.itemId}
+            onApprove={handleApprove}
+            onReject={handleReject}
+            onOpenCandidate={(candidateId) => openCommunications("candidate", candidateId)}
+            onOpenEvolution={openEvolution}
+          />
+        );
+      case "recruit-agent":
+        return (
+          <RecruitAgentView
+            profile={profile}
+            candidates={summary.candidates}
+            skills={summary.skills}
+            candidateMemories={candidateMemories}
+            jobMemories={jobMemories}
+            globalMemory={globalMemory}
+            onSaveProfile={handleSaveProfile}
+            onUpdateSkill={handleUpdateSkill}
+            onDeleteSkill={handleDeleteSkill}
+            onUpdateCandidateMemory={handleUpdateCandidateMemory}
+            onCompactCandidateMemory={handleCompactCandidateMemory}
+            onUpdateJobMemory={handleUpdateJobMemory}
+            onCompactJobMemory={handleCompactJobMemory}
+            onUpdateGlobalMemory={handleUpdateGlobalMemory}
+            onCompactGlobalMemory={handleCompactGlobalMemory}
           />
         );
       case "workbench":
@@ -633,18 +511,53 @@ export function DesktopWorkspace(): JSX.Element {
             onRunOnce={handleRunOnce}
             onQueueScreeningTask={handleQueueScreeningTask}
             onFlushSync={handleFlushSync}
-            onSelectEpisode={handleInspectEpisode}
+            onSelectEpisode={setSelectedEpisodeId}
+            onOpenCommunications={openCommunications}
+            onOpenAgentInbox={() => openAgentInbox("approvals")}
           />
         );
-      case "skills":
-        return <SkillsView skills={summary.skills} />;
-      case "approvals":
+      case "communications":
         return (
-          <ApprovalsView
-            approvals={summary.approvals}
+          <CommunicationsView
+            profile={profile}
+            threads={candidateThreads}
+            preferredCandidateId={communicationsFocus.candidateId}
+            preferredStatusFilter={communicationsFocus.statusFilter}
             pendingActionId={approvalActionId}
             onApprove={handleApprove}
             onReject={handleReject}
+            onCreateEntry={handleCreateThreadEntry}
+            onTransitionState={handleTransitionCandidateState}
+            onCreateAssessment={handleCreateCandidateAssessment}
+          />
+        );
+      case "evolution":
+        return (
+          <EvolutionView
+            profile={profile}
+            candidates={summary.candidates}
+            approvals={summary.approvals}
+            skills={summary.skills}
+            artifacts={evolutionArtifacts}
+            candidateMemories={candidateMemories}
+            jobMemories={jobMemories}
+            globalMemory={globalMemory}
+            pendingActionId={approvalActionId}
+            requestedSection={evolutionFocus.section}
+            requestedItemId={evolutionFocus.itemId}
+            onApprove={handleApprove}
+            onReject={handleReject}
+            onSaveProfile={handleSaveProfile}
+            onUpdateSkill={handleUpdateSkill}
+            onDeleteSkill={handleDeleteSkill}
+            onUpdateCandidateMemory={handleUpdateCandidateMemory}
+            onCompactCandidateMemory={handleCompactCandidateMemory}
+            onUpdateJobMemory={handleUpdateJobMemory}
+            onCompactJobMemory={handleCompactJobMemory}
+            onUpdateGlobalMemory={handleUpdateGlobalMemory}
+            onCompactGlobalMemory={handleCompactGlobalMemory}
+            onUpdateArtifact={handleUpdateEvolutionArtifact}
+            onOpenCandidate={(candidateId) => openCommunications("candidate", candidateId)}
           />
         );
       case "settings":
@@ -660,8 +573,7 @@ export function DesktopWorkspace(): JSX.Element {
         minHeight: "100vh",
         display: "grid",
         gridTemplateColumns: "248px minmax(0, 1fr)",
-        background:
-          "linear-gradient(180deg, #0a101a 0%, #0d1320 100%)",
+        background: "linear-gradient(180deg, #0a101a 0%, #0d1320 100%)",
         color: theme.colors.text,
       }}
     >
@@ -695,14 +607,6 @@ export function DesktopWorkspace(): JSX.Element {
           {content}
         </div>
       </main>
-      <HumanAssistDock
-        approvals={summary.approvals}
-        pendingActionId={approvalActionId}
-        isOpen={assistOpen}
-        onToggle={() => setAssistOpen((current) => !current)}
-        onApprove={handleApprove}
-        onReject={handleReject}
-      />
     </div>
   );
 }

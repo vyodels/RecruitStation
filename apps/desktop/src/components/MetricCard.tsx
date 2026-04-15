@@ -8,17 +8,21 @@ interface MetricCardProps {
   delta: string;
   tone: "positive" | "neutral" | "warning";
   caption: string;
+  onClick?: () => void;
 }
 
-export function MetricCard({ label, value, delta, tone, caption }: MetricCardProps): JSX.Element {
+export function MetricCard({ label, value, delta, tone, caption, onClick }: MetricCardProps): JSX.Element {
   return (
     <article
+      onClick={onClick}
       style={{
         background: "rgba(255,255,255,0.03)",
         border: `1px solid ${theme.colors.border}`,
         borderRadius: theme.radius.lg,
         padding: "16px",
         minWidth: 0,
+        cursor: onClick ? "pointer" : "default",
+        transition: "border-color 120ms ease, transform 120ms ease, background 120ms ease",
       }}
     >
       <div style={{ display: "flex", justifyContent: "space-between", gap: "12px", alignItems: "start" }}>
@@ -32,4 +36,3 @@ export function MetricCard({ label, value, delta, tone, caption }: MetricCardPro
     </article>
   );
 }
-

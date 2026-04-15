@@ -14,7 +14,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run the ScenePilot backend")
+    parser = argparse.ArgumentParser(description="Run the Recruit Agent backend")
     parser.add_argument("--host", default=None)
     parser.add_argument("--port", type=int, default=None)
     parser.add_argument("--data-dir", default=None)

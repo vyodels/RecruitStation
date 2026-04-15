@@ -11,19 +11,36 @@ from scene_pilot.core.settings import AppSettings
 from scene_pilot.db.base import utcnow
 from scene_pilot.models import (
     AgentLearning,
+    AgentGlobalMemory,
+    AgentRun,
+    AgentRunCheckpoint,
+    AgentRuntimeEvent,
+    AgentSession,
+    AgentWorkItem,
     ApprovalItem,
     AppSetting,
     Candidate,
+    CandidateAssessment,
+    CandidateAssignment,
+    CandidateMemory,
+    CandidateReviewDecision,
+    CandidateScorecard,
     CandidateSession,
+    CandidateStageEvent,
     CommunicationLog,
     DecisionLog,
     EnvironmentSnapshot,
+    EvolutionArtifact,
     ExecutionEpisode,
     ExecutionPlan,
+    JobMemory,
+    RecruitAgentProfile,
+    ResumeArtifact,
     Skill,
     SyncBacklogEntry,
     TaskSpec,
     TaskQueueItem,
+    TalentPoolSyncRecord,
     Workflow,
     WorkflowPatch,
     WorkflowTemplate,
@@ -110,6 +127,16 @@ class CandidateRepository(BaseRepository[Candidate]):
         stmt = select(Candidate).where(Candidate.platform_candidate_id == candidate_id)
         return self.session.scalars(stmt).first()
 
+    def update_state_snapshot(self, candidate: Candidate, *, status: str | None = None, snapshot: dict[str, Any] | None = None) -> Candidate:
+        if status is not None:
+            candidate.status = status
+        if snapshot is not None:
+            candidate.state_snapshot = snapshot
+        candidate.updated_at = utcnow()
+        self.session.commit()
+        self.session.refresh(candidate)
+        return candidate
+
 
 class CandidateSessionRepository(BaseRepository[CandidateSession]):
     model = CandidateSession
@@ -154,6 +181,142 @@ class CandidateSessionRepository(BaseRepository[CandidateSession]):
 class CommunicationLogRepository(BaseRepository[CommunicationLog]):
     model = CommunicationLog
 
+    def by_candidate(self, candidate_id: str, limit: int = 100, offset: int = 0) -> list[CommunicationLog]:
+        stmt = (
+            select(CommunicationLog)
+            .where(CommunicationLog.candidate_id == candidate_id)
+            .order_by(CommunicationLog.timestamp.asc(), CommunicationLog.id.asc())
+            .offset(offset)
+            .limit(limit)
+        )
+        return list(self.session.scalars(stmt).all())
+
+
+class CandidateStageEventRepository(BaseRepository[CandidateStageEvent]):
+    model = CandidateStageEvent
+
+    def by_candidate(self, candidate_id: str, limit: int = 200, offset: int = 0) -> list[CandidateStageEvent]:
+        stmt = (
+            select(CandidateStageEvent)
+            .where(CandidateStageEvent.candidate_id == candidate_id)
+            .order_by(CandidateStageEvent.occurred_at.asc(), CandidateStageEvent.id.asc())
+            .offset(offset)
+            .limit(limit)
+        )
+        return list(self.session.scalars(stmt).all())
+
+    def latest_for_candidate(self, candidate_id: str) -> CandidateStageEvent | None:
+        stmt = (
+            select(CandidateStageEvent)
+            .where(CandidateStageEvent.candidate_id == candidate_id)
+            .order_by(CandidateStageEvent.occurred_at.desc(), CandidateStageEvent.id.desc())
+        )
+        return self.session.scalars(stmt).first()
+
+
+class CandidateAssessmentRepository(BaseRepository[CandidateAssessment]):
+    model = CandidateAssessment
+
+    def by_candidate(self, candidate_id: str, limit: int = 50, offset: int = 0) -> list[CandidateAssessment]:
+        stmt = (
+            select(CandidateAssessment)
+            .where(CandidateAssessment.candidate_id == candidate_id)
+            .order_by(CandidateAssessment.created_at.desc(), CandidateAssessment.id.desc())
+            .offset(offset)
+            .limit(limit)
+        )
+        return list(self.session.scalars(stmt).all())
+
+
+class CandidateAssignmentRepository(BaseRepository[CandidateAssignment]):
+    model = CandidateAssignment
+
+    def by_candidate(self, candidate_id: str, limit: int = 50, offset: int = 0) -> list[CandidateAssignment]:
+        stmt = (
+            select(CandidateAssignment)
+            .where(CandidateAssignment.candidate_id == candidate_id)
+            .order_by(CandidateAssignment.assigned_at.desc(), CandidateAssignment.id.desc())
+            .offset(offset)
+            .limit(limit)
+        )
+        return list(self.session.scalars(stmt).all())
+
+
+class ResumeArtifactRepository(BaseRepository[ResumeArtifact]):
+    model = ResumeArtifact
+
+    def by_candidate(self, candidate_id: str, limit: int = 50, offset: int = 0) -> list[ResumeArtifact]:
+        stmt = (
+            select(ResumeArtifact)
+            .where(ResumeArtifact.candidate_id == candidate_id)
+            .order_by(ResumeArtifact.captured_at.desc(), ResumeArtifact.id.desc())
+            .offset(offset)
+            .limit(limit)
+        )
+        return list(self.session.scalars(stmt).all())
+
+
+class CandidateScorecardRepository(BaseRepository[CandidateScorecard]):
+    model = CandidateScorecard
+
+    def by_candidate(self, candidate_id: str, limit: int = 100, offset: int = 0) -> list[CandidateScorecard]:
+        stmt = (
+            select(CandidateScorecard)
+            .where(CandidateScorecard.candidate_id == candidate_id)
+            .order_by(CandidateScorecard.created_at.desc(), CandidateScorecard.id.desc())
+            .offset(offset)
+            .limit(limit)
+        )
+        return list(self.session.scalars(stmt).all())
+
+
+class CandidateReviewDecisionRepository(BaseRepository[CandidateReviewDecision]):
+    model = CandidateReviewDecision
+
+    def by_candidate(self, candidate_id: str, limit: int = 100, offset: int = 0) -> list[CandidateReviewDecision]:
+        stmt = (
+            select(CandidateReviewDecision)
+            .where(CandidateReviewDecision.candidate_id == candidate_id)
+            .order_by(CandidateReviewDecision.decided_at.desc(), CandidateReviewDecision.id.desc())
+            .offset(offset)
+            .limit(limit)
+        )
+        return list(self.session.scalars(stmt).all())
+
+
+class TalentPoolSyncRecordRepository(BaseRepository[TalentPoolSyncRecord]):
+    model = TalentPoolSyncRecord
+
+    def by_candidate(self, candidate_id: str, limit: int = 50, offset: int = 0) -> list[TalentPoolSyncRecord]:
+        stmt = (
+            select(TalentPoolSyncRecord)
+            .where(TalentPoolSyncRecord.candidate_id == candidate_id)
+            .order_by(TalentPoolSyncRecord.created_at.desc(), TalentPoolSyncRecord.id.desc())
+            .offset(offset)
+            .limit(limit)
+        )
+        return list(self.session.scalars(stmt).all())
+
+
+class EvolutionArtifactRepository(BaseRepository[EvolutionArtifact]):
+    model = EvolutionArtifact
+
+    def list_filtered(
+        self,
+        *,
+        artifact_kind: str | None = None,
+        status: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[EvolutionArtifact]:
+        stmt = select(EvolutionArtifact)
+        if artifact_kind:
+            stmt = stmt.where(EvolutionArtifact.artifact_kind == artifact_kind)
+        if status:
+            stmt = stmt.where(EvolutionArtifact.status == status)
+        stmt = stmt.order_by(EvolutionArtifact.created_at.desc(), EvolutionArtifact.id.desc()).offset(offset).limit(limit)
+        return list(self.session.scalars(stmt).all())
+
 
 class WorkflowRunRepository(BaseRepository[WorkflowRun]):
     model = WorkflowRun
@@ -169,6 +332,232 @@ class WorkflowRunRepository(BaseRepository[WorkflowRun]):
             .order_by(WorkflowRun.created_at.desc(), WorkflowRun.id.desc())
         )
         return self.session.scalars(stmt).first()
+
+
+class RecruitAgentProfileRepository(BaseRepository[RecruitAgentProfile]):
+    model = RecruitAgentProfile
+
+    def by_agent_key(self, agent_key: str) -> RecruitAgentProfile | None:
+        stmt = select(RecruitAgentProfile).where(RecruitAgentProfile.agent_key == agent_key)
+        return self.session.scalars(stmt).first()
+
+    def primary(self) -> RecruitAgentProfile | None:
+        stmt = (
+            select(RecruitAgentProfile)
+            .where(RecruitAgentProfile.is_primary.is_(True))
+            .order_by(RecruitAgentProfile.updated_at.desc(), RecruitAgentProfile.id.asc())
+        )
+        return self.session.scalars(stmt).first()
+
+
+class CandidateMemoryRepository(BaseRepository[CandidateMemory]):
+    model = CandidateMemory
+
+    def by_agent_and_candidate(self, *, agent_profile_id: str, candidate_id: str) -> CandidateMemory | None:
+        stmt = select(CandidateMemory).where(
+            CandidateMemory.agent_profile_id == agent_profile_id,
+            CandidateMemory.candidate_id == candidate_id,
+        )
+        return self.session.scalars(stmt).first()
+
+    def list_for_agent(self, agent_profile_id: str, limit: int = 100, offset: int = 0) -> list[CandidateMemory]:
+        stmt = (
+            select(CandidateMemory)
+            .where(CandidateMemory.agent_profile_id == agent_profile_id)
+            .order_by(CandidateMemory.updated_at.desc(), CandidateMemory.id.asc())
+            .offset(offset)
+            .limit(limit)
+        )
+        return list(self.session.scalars(stmt).all())
+
+
+class JobMemoryRepository(BaseRepository[JobMemory]):
+    model = JobMemory
+
+    def by_agent_and_jd(self, *, agent_profile_id: str, jd_id: str) -> JobMemory | None:
+        stmt = select(JobMemory).where(
+            JobMemory.agent_profile_id == agent_profile_id,
+            JobMemory.jd_id == jd_id,
+        )
+        return self.session.scalars(stmt).first()
+
+    def list_for_agent(self, agent_profile_id: str, limit: int = 100, offset: int = 0) -> list[JobMemory]:
+        stmt = (
+            select(JobMemory)
+            .where(JobMemory.agent_profile_id == agent_profile_id)
+            .order_by(JobMemory.updated_at.desc(), JobMemory.id.asc())
+            .offset(offset)
+            .limit(limit)
+        )
+        return list(self.session.scalars(stmt).all())
+
+
+class AgentGlobalMemoryRepository(BaseRepository[AgentGlobalMemory]):
+    model = AgentGlobalMemory
+
+    def by_agent(self, agent_profile_id: str) -> AgentGlobalMemory | None:
+        stmt = select(AgentGlobalMemory).where(AgentGlobalMemory.agent_profile_id == agent_profile_id)
+        return self.session.scalars(stmt).first()
+
+
+class AgentSessionRepository(BaseRepository[AgentSession]):
+    model = AgentSession
+
+    def by_agent_and_key(self, *, agent_profile_id: str, session_key: str = "primary") -> AgentSession | None:
+        stmt = select(AgentSession).where(
+            AgentSession.agent_profile_id == agent_profile_id,
+            AgentSession.session_key == session_key,
+        )
+        return self.session.scalars(stmt).first()
+
+
+class AgentRunRepository(BaseRepository[AgentRun]):
+    model = AgentRun
+
+    def list_for_session(self, session_id: str, limit: int = 100, offset: int = 0) -> list[AgentRun]:
+        stmt = (
+            select(AgentRun)
+            .where(AgentRun.session_id == session_id)
+            .order_by(AgentRun.created_at.desc(), AgentRun.id.desc())
+            .offset(offset)
+            .limit(limit)
+        )
+        return list(self.session.scalars(stmt).all())
+
+    def list_filtered(
+        self,
+        *,
+        session_id: str | None = None,
+        status: str | None = None,
+        lane: str | None = None,
+        candidate_id: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[AgentRun]:
+        stmt = select(AgentRun)
+        if session_id is not None:
+            stmt = stmt.where(AgentRun.session_id == session_id)
+        if status is not None:
+            stmt = stmt.where(AgentRun.status == status)
+        if lane is not None:
+            stmt = stmt.where(AgentRun.lane == lane)
+        if candidate_id is not None:
+            stmt = stmt.where(AgentRun.candidate_id == candidate_id)
+        stmt = stmt.order_by(AgentRun.created_at.desc(), AgentRun.id.desc()).offset(offset).limit(limit)
+        return list(self.session.scalars(stmt).all())
+
+    def by_queue_task_id(self, queue_task_id: str) -> AgentRun | None:
+        stmt = select(AgentRun).where(AgentRun.queue_task_id == queue_task_id).order_by(AgentRun.created_at.desc(), AgentRun.id.desc())
+        return self.session.scalars(stmt).first()
+
+    def latest_open_for_candidate(
+        self,
+        *,
+        session_id: str,
+        candidate_id: str,
+        lane: str = "candidate",
+    ) -> AgentRun | None:
+        stmt = (
+            select(AgentRun)
+            .where(
+                AgentRun.session_id == session_id,
+                AgentRun.candidate_id == candidate_id,
+                AgentRun.lane == lane,
+                AgentRun.status.in_(("queued", "running", "waiting_human", "waiting_candidate", "blocked", "resumable")),
+            )
+            .order_by(AgentRun.updated_at.desc(), AgentRun.id.desc())
+        )
+        return self.session.scalars(stmt).first()
+
+    def running_count(self, *, session_id: str, platform: str | None = None) -> int:
+        stmt = select(func.count()).select_from(AgentRun).where(
+            AgentRun.session_id == session_id,
+            AgentRun.status == "running",
+        )
+        if platform is not None:
+            stmt = stmt.where(AgentRun.platform == platform)
+        return int(self.session.scalar(stmt) or 0)
+
+    def conflicting_candidate_run(
+        self,
+        *,
+        session_id: str,
+        candidate_id: str,
+        exclude_run_id: str | None = None,
+    ) -> AgentRun | None:
+        stmt = (
+            select(AgentRun)
+            .where(
+                AgentRun.session_id == session_id,
+                AgentRun.candidate_id == candidate_id,
+                AgentRun.status.in_(("running", "waiting_human", "waiting_candidate", "blocked")),
+            )
+            .order_by(AgentRun.updated_at.desc(), AgentRun.id.desc())
+        )
+        if exclude_run_id is not None:
+            stmt = stmt.where(AgentRun.id != exclude_run_id)
+        return self.session.scalars(stmt).first()
+
+
+class AgentWorkItemRepository(BaseRepository[AgentWorkItem]):
+    model = AgentWorkItem
+
+    def by_queue_task_id(self, queue_task_id: str) -> AgentWorkItem | None:
+        stmt = select(AgentWorkItem).where(AgentWorkItem.queue_task_id == queue_task_id)
+        return self.session.scalars(stmt).first()
+
+    def list_for_run(self, run_id: str, limit: int = 100, offset: int = 0) -> list[AgentWorkItem]:
+        stmt = (
+            select(AgentWorkItem)
+            .where(AgentWorkItem.run_id == run_id)
+            .order_by(AgentWorkItem.created_at.asc(), AgentWorkItem.id.asc())
+            .offset(offset)
+            .limit(limit)
+        )
+        return list(self.session.scalars(stmt).all())
+
+
+class AgentRunCheckpointRepository(BaseRepository[AgentRunCheckpoint]):
+    model = AgentRunCheckpoint
+
+    def open_for_run(self, run_id: str) -> AgentRunCheckpoint | None:
+        stmt = (
+            select(AgentRunCheckpoint)
+            .where(AgentRunCheckpoint.run_id == run_id, AgentRunCheckpoint.status == "open")
+            .order_by(AgentRunCheckpoint.created_at.desc(), AgentRunCheckpoint.id.desc())
+        )
+        return self.session.scalars(stmt).first()
+
+    def by_approval(self, approval_id: str) -> AgentRunCheckpoint | None:
+        stmt = select(AgentRunCheckpoint).where(AgentRunCheckpoint.approval_id == approval_id)
+        return self.session.scalars(stmt).first()
+
+    def list_open(self, *, session_id: str | None = None, limit: int = 100, offset: int = 0) -> list[AgentRunCheckpoint]:
+        stmt = select(AgentRunCheckpoint).where(AgentRunCheckpoint.status == "open")
+        if session_id is not None:
+            stmt = stmt.where(AgentRunCheckpoint.session_id == session_id)
+        stmt = stmt.order_by(AgentRunCheckpoint.created_at.desc(), AgentRunCheckpoint.id.desc()).offset(offset).limit(limit)
+        return list(self.session.scalars(stmt).all())
+
+
+class AgentRuntimeEventRepository(BaseRepository[AgentRuntimeEvent]):
+    model = AgentRuntimeEvent
+
+    def recent(
+        self,
+        *,
+        session_id: str | None = None,
+        run_id: str | None = None,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> list[AgentRuntimeEvent]:
+        stmt = select(AgentRuntimeEvent)
+        if session_id is not None:
+            stmt = stmt.where(AgentRuntimeEvent.session_id == session_id)
+        if run_id is not None:
+            stmt = stmt.where(AgentRuntimeEvent.run_id == run_id)
+        stmt = stmt.order_by(AgentRuntimeEvent.occurred_at.desc(), AgentRuntimeEvent.id.desc()).offset(offset).limit(limit)
+        return list(self.session.scalars(stmt).all())
 
 
 class TaskSpecRepository(BaseRepository[TaskSpec]):

@@ -1,169 +1,43 @@
-# ScenePilot Handoff
+# Recruit Agent Handoff
 
-## What This Project Is
+## 当前结论
 
-ScenePilot is a local-first desktop automation runtime.
+`2026-04-15` 之后，这个仓库的有效产品方向已经收束为 `Recruit Agent`，不再把自己定义成早期执行控制台。
 
-It is not a recruiting product with fixed site integrations.
-Recruiting remains the first domain pack, but the product core is:
+当前主语是：
 
-- `Task Compiler`
-- `Planner / Replanner`
-- `Supervised Trial & Learning`
-- `ReAct-like Executor`
+- 招聘 Agent 配置
+- 候选人进度与沟通确认
+- Candidate / JD / Global memory
+- skill 管理与自学习演进治理
 
-Concrete sites, internal systems, desktop apps, and tools are all `runtime scenes`.
+底层仍保留 runtime、plan、episode 等执行内核，但它们已经下沉为实现层，不再作为顶层产品对象。
 
-## Current State
+## 当前已完成
 
-As of `2026-04-15`, the current local refactor wave is complete.
+- 桌面导航已改为 `概览 / 招聘 Agent / 工作台 / 沟通中心 / 自学习/演进 / 设置`
+- `RecruitAgentProfile`、隔离 memory、skill 管理、候选人线程与演进审批已经落地
+- 工作台已围绕候选人进度和 agent 运行结果重构
+- 旧的编排中心化桌面页面已从前端主产品面中清理
+- 后端仍保留兼容执行内核，但显示名称和文档已经转到 `Recruit Agent`
 
-Completed:
-
-- project renamed to `ScenePilot`
-- Python package renamed to `scene_pilot`
-- root workspace renamed to `scene-pilot`
-- desktop product name / app id / package names updated
-- env var prefix updated to `SCENE_PILOT_`
-- `Task Compiler` upgraded to `LLM-first structured semantic compiler`
-- `Planner / Replanner` converged on scene-driven runtime replanning
-- `ReAct-like Executor` deepened with step-level tool preferences and runtime execution prompt
-- `Capability Drivers` expanded and wired into planning and execution
-- `Learning Loop` hardened with replay, patch approval/apply, template candidate approval, skill health checks, and single-machine governance
-- local queue / replay / diagnostics / runtime launch flow working in the desktop control plane
-- desktop information architecture reorganized around workflow lifecycle:
-  - `概览`
-  - `工作流管理`
-  - `工作台`
-  - `审批中心`
-  - `Skills`
-  - `设置`
-- user-facing terminology updated:
-  - `domain pack` -> `场景画像`
-  - `task` -> `工作流`
-  - `task instance` -> `工作流实例`
-- formal recruiting workflow validation completed against the live local provider
-  - compile path used `llm_structured`
-  - supervised trial succeeded
-  - trial confirmation promoted an active workflow version
-  - production execution now stops at `waiting_human` / `awaiting_review` when no live browser snapshot is available
-  - previous false `timeout / Token budget exceeded` behavior is fixed
-
-Verified locally:
-
-- `python3 -m pytest services/backend/tests -q`
-- `npm run desktop:typecheck`
-- `npm run desktop:build`
-
-## Latest Key Commits
-
-- `e0b3f5d` `refactor: rename project to scenepilot`
-- `0261dd6` `feat: converge runtime planner and executor`
-- `003fd06` `feat: harden runtime compiler and queue governance`
-- `f495857` `feat: deepen runtime browser scene planning`
-- `52051c0` `feat: publish runtime compiler contract`
-- `b1d35e1` `feat: reorganize workflow lifecycle workspace`
-- `896cb7d` `feat: refine workflow console and validation gating`
-
-## What Is Not Pending As Core Dev Work
-
-These are no longer valid backlog items:
-
-- pre-integrating `Boss`
-- pre-integrating any specific website
-- growing the core runtime around fixed site workflows
-
-Correct interpretation:
-
-- `Boss`, GitHub, intranet systems, news sites, tool directories, and other apps are runtime scenes
-- the runtime should approach them through `capability drivers + environment model + supervised trial + learning loop`
-
-## Remaining Work
-
-No mandatory local code gap remains for the current wave.
-
-Remaining items are external or later-stage:
-
-- real `Anthropic` environment validation
-- Apple signing / notarization credentials and release run
-- final validation against the real intranet environment
-
-## Most Recent Validation Outcome
-
-The most recent formal validation target was the recruiting workflow.
-
-What was verified:
-
-- natural language request -> workflow compile
-- compile used the live local OpenAI-compatible provider
-- trial run -> review -> version activation
-- production launch through the queue
-- managed execution preflight gating
-
-Important outcome:
-
-- if production execution lacks a live browser/environment snapshot, the runtime now stops early and requests human review
-- it no longer proceeds into the executor loop and wastes tokens
-- a blocked-task approval is created for desktop review
-
-## Resume Checklist On Another Machine
-
-1. Clone the repository to any path you want.
-2. Install dependencies.
-3. Run backend tests.
-4. Run desktop typecheck/build.
-5. If you need a local OpenAI-compatible provider, configure it via `SCENE_PILOT_...` env vars or `/api/settings`.
-6. For the current recruiting validation flow, ensure the backend settings point at the local provider and then run a supervised trial before production launch.
-
-Recommended verification commands:
-
-```bash
-python3 -m pytest services/backend/tests -q
-npm install --ignore-scripts
-npm run desktop:typecheck
-npm run desktop:build
-```
-
-Backend dev entry:
-
-```bash
-cd services/backend
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .[dev]
-uvicorn scene_pilot.server:create_app --reload --factory
-```
-
-Desktop dev entry:
-
-```bash
-npm install --ignore-scripts
-npm run desktop:dev
-```
-
-## Local Provider Note
-
-A local OpenAI-compatible provider was validated during development:
-
-- base URL: `http://127.0.0.1:8317/v1`
-- model: `gpt-5.4`
-
-No secret is stored in the repository.
-
-If you want to resume with a local provider, set it locally through environment variables or the settings API/UI.
-
-## Naming And Path Notes
-
-- repo workspace name: `scene-pilot`
-- Python package: `scene_pilot`
-- desktop product name: `ScenePilot`
-- old `recruit-agent` / `recruit_agent` naming should be treated as historical only
-
-## Primary Files To Read First
+## 继续接手时先看
 
 - [README.md](../README.md)
 - [Plan.md](../Plan.md)
-- [docs/general-automation-runtime.md](./general-automation-runtime.md)
-- [services/backend/src/scene_pilot/services/runtime.py](../services/backend/src/scene_pilot/services/runtime.py)
-- [services/backend/src/scene_pilot/runtime/agent_loop.py](../services/backend/src/scene_pilot/runtime/agent_loop.py)
 - [apps/desktop/src/features/workspace/DesktopWorkspace.tsx](../apps/desktop/src/features/workspace/DesktopWorkspace.tsx)
+- [apps/desktop/src/features/recruit-agent/RecruitAgentView.tsx](../apps/desktop/src/features/recruit-agent/RecruitAgentView.tsx)
+- [apps/desktop/src/features/communications/CommunicationsView.tsx](../apps/desktop/src/features/communications/CommunicationsView.tsx)
+- [services/backend/src/scene_pilot/services/recruit_agent.py](../services/backend/src/scene_pilot/services/recruit_agent.py)
+- [services/backend/src/scene_pilot/api/routers/recruit_agent.py](../services/backend/src/scene_pilot/api/routers/recruit_agent.py)
+
+## 验证命令
+
+```bash
+python3 -m pytest services/backend/tests -q
+npm run desktop:typecheck
+```
+
+## 历史说明
+
+仓库的实现目录结构沿用当前工程布局，但对外 CLI、桌面启动入口和环境变量前缀已经统一切到 `recruit-agent` / `RECRUIT_AGENT_`。

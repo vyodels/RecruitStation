@@ -2,7 +2,7 @@
   "name": "apps-desktop",
   "private": true,
   "version": "0.1.0",
-  "description": "Local-first desktop control plane for ScenePilot",
+  "description": "Local-first desktop workspace for Recruit Agent",
   "author": "Codex",
   "type": "module",
   "main": "dist-electron/main.js",

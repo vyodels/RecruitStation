@@ -13,7 +13,7 @@ def test_autonomy_loop_disabled_by_default(tmp_path):
     app = create_app(
         AppSettings(
             data_dir=str(tmp_path / "data"),
-            database_url=f"sqlite:///{tmp_path / 'scene-pilot.db'}",
+            database_url=f"sqlite:///{tmp_path / 'recruit-agent.db'}",
         )
     )
 
@@ -27,7 +27,7 @@ def test_autonomy_loop_processes_enqueued_task_when_enabled(tmp_path):
     app = create_app(
         AppSettings(
             data_dir=str(tmp_path / "data"),
-            database_url=f"sqlite:///{tmp_path / 'scene-pilot.db'}",
+            database_url=f"sqlite:///{tmp_path / 'recruit-agent.db'}",
             feature_flags=FeatureFlags(enable_autonomy=True),
         )
     )
@@ -99,7 +99,7 @@ def test_autonomy_loop_runs_periodic_skill_health_sweep(tmp_path):
     app = create_app(
         AppSettings(
             data_dir=str(tmp_path / "data"),
-            database_url=f"sqlite:///{tmp_path / 'scene-pilot.db'}",
+            database_url=f"sqlite:///{tmp_path / 'recruit-agent.db'}",
             feature_flags=FeatureFlags(enable_autonomy=True, enable_skill_health_autonomy=True),
             skill_health_autonomy_interval_seconds=1,
         )
