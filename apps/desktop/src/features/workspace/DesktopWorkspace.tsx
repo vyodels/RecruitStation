@@ -1,6 +1,7 @@
 import React, { startTransition, useEffect, useMemo, useState } from "react";
-import { Sidebar, TopBar } from "../../components";
+import { Panel, SectionTabs, Sidebar, StatusBadge, TopBar } from "../../components";
 import { apiClient } from "../../lib/api";
+import { formatCompactDate } from "../../lib/format";
 import { useI18n } from "../../lib/i18n";
 import { theme } from "../../lib/theme";
 import { translateUiToken } from "../../lib/uiText";
@@ -60,6 +61,340 @@ const emptySettings: SettingsSnapshot = {
   },
 };
 
+function resolveMacroStage(status: string, stageKey: string, resumeAvailable: boolean): string {
+  const fingerprint = `${status} ${stageKey}`.toLowerCase();
+  if (/(rejected|cooldown|archive)/i.test(fingerprint)) {
+    return "Archived";
+  }
+  if (/(offer|decision|hired|accepted|final)/i.test(fingerprint)) {
+    return "Decision";
+  }
+  if (/(interview|schedule)/i.test(fingerprint)) {
+    return "Interview";
+  }
+  if (resumeAvailable || /(resume|profile|attachment)/i.test(fingerprint)) {
+    return "Resume";
+  }
+  if (/(contact|reply|message|communicat|outreach)/i.test(fingerprint)) {
+    return "Outreach";
+  }
+  if (/(review|screen|assessment|probe|score)/i.test(fingerprint)) {
+    return "Review";
+  }
+  return "New";
+}
+
+function macroStageTone(stage: string): "positive" | "neutral" | "warning" | "critical" {
+  if (stage === "Archived") {
+    return "critical";
+  }
+  if (stage === "Decision" || stage === "Interview") {
+    return "positive";
+  }
+  if (stage === "Review" || stage === "Outreach" || stage === "Resume") {
+    return "warning";
+  }
+  return "neutral";
+}
+
+function ImportCenterSurface({
+  candidates,
+  goals,
+  traces,
+  onCreateGoal,
+  onOpenCommunications,
+}: {
+  candidates: DashboardSummary["candidates"];
+  goals: GoalSpecRecord[];
+  traces: ExecutionTraceRecord[];
+  onCreateGoal?(payload: {
+    title: string;
+    goalText: string;
+    goalKind?: string;
+    summary?: string;
+    constraints?: Record<string, unknown>;
+    successCriteria?: Record<string, unknown>;
+    contextHints?: Record<string, unknown>;
+    trialBudget?: Record<string, unknown>;
+    runPreferences?: Record<string, unknown>;
+    priority?: number;
+  }): void;
+  onOpenCommunications?(filter?: string, candidateId?: string): void;
+}): JSX.Element {
+  const { copy } = useI18n();
+  const stagedCandidates = candidates.filter((candidate) => !/(rejected|cooldown)/i.test(candidate.status));
+  const importQueue = goals.filter((goal) => /(import|extract|capture|resume|candidate|sourcing|zhipin)/i.test(`${goal.title} ${goal.goalText} ${goal.summary ?? ""}`)).slice(0, 6);
+  const executionNotes = traces
+    .filter((trace) => /(candidate|resume|import|source)/i.test(`${trace.title} ${trace.summary ?? ""}`))
+    .slice(0, 5);
+
+  return (
+    <div style={{ display: "grid", gap: "16px" }}>
+      <Panel
+        title={copy("Import Center", "导入中心")}
+        eyebrow={copy("Source and stage", "来源与入库")}
+        description={copy(
+          "Capture active sourcing pages, stage imported candidates, and keep resume acquisition visible before records move deeper into the funnel.",
+          "采集当前 sourcing 页面、暂存导入候选人，并在候选人进入后续漏斗前清晰展示简历获取状态。",
+        )}
+        actions={
+          <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+            <button
+              type="button"
+              onClick={() =>
+                onCreateGoal?.({
+                  title: copy("Capture current sourcing page", "采集当前 sourcing 页面"),
+                  goalText: copy(
+                    "Inspect the currently active sourcing page, extract visible candidate records, and stage them for recruiter review without mutating the source site.",
+                    "检查当前激活的 sourcing 页面，提取可见候选人记录，并在不改动来源站点的前提下把它们暂存到招聘审阅队列。",
+                  ),
+                  summary: copy("Create a staged import batch from the active sourcing page.", "从当前 sourcing 页面创建一个候选人暂存批次。"),
+                  runPreferences: { initial_stage: "candidate_discovery" },
+                  priority: 180,
+                })
+              }
+              style={{
+                border: `1px solid ${theme.colors.accent}`,
+                borderRadius: "var(--radius-sm)",
+                background: theme.colors.accent,
+                color: "var(--text-inverse)",
+                padding: "8px 14px",
+                cursor: "pointer",
+                fontWeight: 600,
+              }}
+            >
+              {copy("Capture page", "采集页面")}
+            </button>
+            <button
+              type="button"
+              onClick={() =>
+                onCreateGoal?.({
+                  title: copy("Request one resume artifact", "请求一份简历制品"),
+                  goalText: copy(
+                    "Collect one candidate resume artifact from the current sourcing workflow and save it into local structured storage for recruiter review.",
+                    "从当前 sourcing 工作流中收集 1 份候选人简历制品，并保存到本地结构化存储，供招聘方审阅。",
+                  ),
+                  summary: copy("Acquire one resume artifact and store it locally.", "获取 1 份简历制品并存入本地。"),
+                  runPreferences: { initial_stage: "resume_collection" },
+                  priority: 160,
+                })
+              }
+              style={{
+                border: "1px solid var(--border-input)",
+                borderRadius: "var(--radius-sm)",
+                background: "var(--bg-card)",
+                color: "var(--text-primary)",
+                padding: "8px 14px",
+                cursor: "pointer",
+                fontWeight: 500,
+              }}
+            >
+              {copy("Request resume", "请求简历")}
+            </button>
+          </div>
+        }
+      >
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: "12px" }}>
+          <article style={{ padding: "14px", borderRadius: "var(--radius-md)", background: "var(--bg-hover)", border: "1px solid var(--border-line)" }}>
+            <div style={{ fontSize: "13px", color: "var(--text-secondary)" }}>{copy("Staged candidates", "暂存候选人")}</div>
+            <div style={{ marginTop: "6px", fontSize: "28px", fontWeight: 600, color: "var(--text-primary)" }}>{stagedCandidates.length}</div>
+            <div style={{ marginTop: "6px", fontSize: "13px", color: "var(--text-secondary)" }}>
+              {copy("Ready for recruiter review and triage.", "已准备好进入招聘方审阅与分流。")}
+            </div>
+          </article>
+          <article style={{ padding: "14px", borderRadius: "var(--radius-md)", background: "var(--bg-hover)", border: "1px solid var(--border-line)" }}>
+            <div style={{ fontSize: "13px", color: "var(--text-secondary)" }}>{copy("Open import tasks", "进行中的导入任务")}</div>
+            <div style={{ marginTop: "6px", fontSize: "28px", fontWeight: 600, color: "var(--text-primary)" }}>{importQueue.length}</div>
+            <div style={{ marginTop: "6px", fontSize: "13px", color: "var(--text-secondary)" }}>
+              {copy("Recent capture, extraction, and resume acquisition requests.", "最近的采集、提取和简历获取请求。")}
+            </div>
+          </article>
+          <article style={{ padding: "14px", borderRadius: "var(--radius-md)", background: "var(--bg-hover)", border: "1px solid var(--border-line)" }}>
+            <div style={{ fontSize: "13px", color: "var(--text-secondary)" }}>{copy("Resume-ready records", "已有简历记录")}</div>
+            <div style={{ marginTop: "6px", fontSize: "28px", fontWeight: 600, color: "var(--text-primary)" }}>{candidates.filter((candidate) => candidate.resumeAvailable).length}</div>
+            <div style={{ marginTop: "6px", fontSize: "13px", color: "var(--text-secondary)" }}>
+              {copy("Candidates with visible resume artifacts already stored.", "已经可见并落库简历制品的候选人。")}
+            </div>
+          </article>
+        </div>
+      </Panel>
+
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.2fr) minmax(320px, 0.8fr)", gap: "16px" }}>
+        <Panel
+          title={copy("Staging Queue", "暂存队列")}
+          eyebrow={copy("Recruiter review", "招聘方审阅")}
+          description={copy("Candidates recently captured or enriched before they move into the main pipeline.", "最近完成采集或补充资料、等待进入主漏斗的候选人。")}
+        >
+          <div style={{ display: "grid", gap: "10px" }}>
+            {stagedCandidates.slice(0, 6).map((candidate) => (
+              <button
+                key={candidate.id}
+                type="button"
+                onClick={() => onOpenCommunications?.("candidate", candidate.id)}
+                style={{
+                  textAlign: "left",
+                  padding: "14px",
+                  borderRadius: "var(--radius-md)",
+                  border: "1px solid var(--border-line)",
+                  background: "var(--bg-card)",
+                  cursor: "pointer",
+                }}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between", gap: "10px", alignItems: "start" }}>
+                  <div>
+                    <div style={{ fontWeight: 600, color: "var(--text-primary)" }}>{candidate.name}</div>
+                    <div style={{ marginTop: "4px", fontSize: "13px", color: "var(--text-secondary)" }}>
+                      {candidate.title} · {candidate.jdTitle} · {candidate.location}
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", justifyContent: "end" }}>
+                    <StatusBadge tone={macroStageTone(resolveMacroStage(candidate.status, candidate.stageKey, candidate.resumeAvailable))}>
+                      {resolveMacroStage(candidate.status, candidate.stageKey, candidate.resumeAvailable)}
+                    </StatusBadge>
+                    {candidate.resumeAvailable ? <StatusBadge tone="positive">{copy("resume ready", "已有简历")}</StatusBadge> : null}
+                  </div>
+                </div>
+                <div style={{ marginTop: "8px", fontSize: "13px", color: "var(--text-regular)", lineHeight: 1.6 }}>{candidate.nextAction}</div>
+              </button>
+            ))}
+          </div>
+        </Panel>
+        <Panel
+          title={copy("Recent import activity", "最近导入动态")}
+          eyebrow={copy("Execution notes", "执行记录")}
+          description={copy("Latest capture and import execution notes that affect the sourcing funnel.", "影响 sourcing 漏斗的最新采集与导入执行记录。")}
+        >
+          <div style={{ display: "grid", gap: "10px" }}>
+            {importQueue.map((goal) => (
+              <article key={goal.id} style={{ padding: "12px 0", borderBottom: "1px solid var(--border-line)" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: "8px", alignItems: "start" }}>
+                  <div style={{ fontWeight: 600, color: "var(--text-primary)" }}>{goal.title}</div>
+                  <StatusBadge tone={/completed|approved/i.test(goal.status) ? "positive" : /failed|rejected/i.test(goal.status) ? "critical" : "warning"}>
+                    {translateUiToken(goal.status, copy)}
+                  </StatusBadge>
+                </div>
+                <div style={{ marginTop: "6px", fontSize: "13px", color: "var(--text-secondary)", lineHeight: 1.6 }}>
+                  {goal.summary || goal.goalText}
+                </div>
+                <div style={{ marginTop: "6px", fontSize: "12px", color: "var(--text-placeholder)" }}>{formatCompactDate(goal.updatedAt)}</div>
+              </article>
+            ))}
+            {executionNotes.map((trace) => (
+              <article key={trace.id} style={{ padding: "12px 0", borderBottom: "1px solid var(--border-line)" }}>
+                <div style={{ fontWeight: 600, color: "var(--text-primary)" }}>{trace.title}</div>
+                <div style={{ marginTop: "6px", fontSize: "13px", color: "var(--text-secondary)", lineHeight: 1.6 }}>
+                  {trace.summary || copy("Execution note captured for recruiter review.", "已记录一条供招聘方查看的执行说明。")}
+                </div>
+              </article>
+            ))}
+          </div>
+        </Panel>
+      </div>
+    </div>
+  );
+}
+
+function JdWorkspaceSurface({
+  candidates,
+  onOpenCommunications,
+}: {
+  candidates: DashboardSummary["candidates"];
+  onOpenCommunications?(filter?: string, candidateId?: string): void;
+}): JSX.Element {
+  const { copy } = useI18n();
+  const jdGroups = Object.entries(
+    candidates.reduce<Record<string, DashboardSummary["candidates"]>>((accumulator, candidate) => {
+      const key = candidate.jdTitle || copy("Unassigned role", "未分配岗位");
+      accumulator[key] = [...(accumulator[key] ?? []), candidate];
+      return accumulator;
+    }, {}),
+  ).sort((left, right) => right[1].length - left[1].length);
+
+  return (
+    <div style={{ display: "grid", gap: "16px" }}>
+      <Panel
+        title={copy("JD Workspace", "岗位工作区")}
+        eyebrow={copy("Role-centered view", "岗位中心视角")}
+        description={copy(
+          "Review pipeline volume, stage mix, and recruiter next actions by role without opening raw runtime diagnostics.",
+          "以岗位为中心查看漏斗规模、阶段分布和下一步动作，而不暴露原始 runtime 诊断信息。",
+        )}
+      >
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: "12px" }}>
+          {jdGroups.slice(0, 4).map(([jdTitle, jdCandidates]) => {
+            const macroCounts = jdCandidates.reduce<Record<string, number>>((accumulator, candidate) => {
+              const stage = resolveMacroStage(candidate.status, candidate.stageKey, candidate.resumeAvailable);
+              accumulator[stage] = (accumulator[stage] ?? 0) + 1;
+              return accumulator;
+            }, {});
+            return (
+              <article key={jdTitle} style={{ padding: "14px", borderRadius: "var(--radius-md)", background: "var(--bg-card)", border: "1px solid var(--border-line)" }}>
+                <div style={{ fontWeight: 600, color: "var(--text-primary)" }}>{jdTitle}</div>
+                <div style={{ marginTop: "6px", fontSize: "13px", color: "var(--text-secondary)" }}>
+                  {copy(`${jdCandidates.length} candidates in this funnel.`, `该漏斗下共有 ${jdCandidates.length} 位候选人。`)}
+                </div>
+                <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", marginTop: "10px" }}>
+                  {Object.entries(macroCounts).map(([label, count]) => (
+                    <StatusBadge key={label} tone={macroStageTone(label)}>
+                      {label} · {count}
+                    </StatusBadge>
+                  ))}
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      </Panel>
+
+      <div style={{ display: "grid", gap: "12px" }}>
+        {jdGroups.map(([jdTitle, jdCandidates]) => (
+          <Panel
+            key={jdTitle}
+            title={jdTitle}
+            eyebrow={copy("Role funnel", "岗位漏斗")}
+            description={copy("Candidates currently grouped under this role.", "当前归属到该岗位的候选人。")}
+          >
+            <div style={{ display: "grid", gap: "10px" }}>
+              {jdCandidates.map((candidate) => {
+                const macroStage = resolveMacroStage(candidate.status, candidate.stageKey, candidate.resumeAvailable);
+                return (
+                  <button
+                    key={candidate.id}
+                    type="button"
+                    onClick={() => onOpenCommunications?.("candidate", candidate.id)}
+                    style={{
+                      textAlign: "left",
+                      padding: "14px",
+                      borderRadius: "var(--radius-md)",
+                      border: "1px solid var(--border-line)",
+                      background: "var(--bg-card)",
+                      cursor: "pointer",
+                    }}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: "10px", alignItems: "start" }}>
+                      <div>
+                        <div style={{ fontWeight: 600, color: "var(--text-primary)" }}>{candidate.name}</div>
+                        <div style={{ marginTop: "4px", fontSize: "13px", color: "var(--text-secondary)" }}>
+                          {candidate.title} · {candidate.location}
+                        </div>
+                      </div>
+                      <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", justifyContent: "end" }}>
+                        <StatusBadge tone={macroStageTone(macroStage)}>{macroStage}</StatusBadge>
+                        <StatusBadge tone="neutral">{copy(`score ${candidate.matchScore}`, `分数 ${candidate.matchScore}`)}</StatusBadge>
+                      </div>
+                    </div>
+                    <div style={{ marginTop: "8px", fontSize: "13px", color: "var(--text-regular)", lineHeight: 1.6 }}>{candidate.nextAction}</div>
+                  </button>
+                );
+              })}
+            </div>
+          </Panel>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 const emptyAgent: AgentSnapshot = {
   status: "idle",
   activeTask: "waiting_for_backend",
@@ -107,7 +442,7 @@ const emptySyncStatus: SyncStatusSnapshot = {
 
 export function DesktopWorkspace(): JSX.Element {
   const { copy } = useI18n();
-  const [tab, setTab] = useState<WorkspaceTab>("dashboard");
+  const [tab, setTab] = useState<WorkspaceTab>("home");
   const [summary, setSummary] = useState<DashboardSummary>(emptySummary);
   const [runtimeData, setRuntimeData] = useState<RuntimeWorkspaceData>(emptyRuntime);
   const [events, setEvents] = useState<AgentEvent[]>([
@@ -147,6 +482,7 @@ export function DesktopWorkspace(): JSX.Element {
   const [communicationsFocus, setCommunicationsFocus] = useState<{ candidateId?: string; statusFilter?: string }>({});
   const [agentInboxFocus, setAgentInboxFocus] = useState<{ filter?: string; itemId?: string }>({});
   const [evolutionFocus, setEvolutionFocus] = useState<{ section?: string; itemId?: string }>({});
+  const [aiReviewSection, setAiReviewSection] = useState<"queue" | "changes">("queue");
 
   const appendEvent = (event: AgentEvent) => {
     setEvents((current) => [...current.slice(-49), event]);
@@ -312,60 +648,73 @@ export function DesktopWorkspace(): JSX.Element {
   const counts = useMemo(
     () =>
       ({
-      "recruit-agent": summary.skills.filter((skill) => skill.status !== "active" || skill.health !== "healthy").length,
-        "agent-inbox":
+        "ai-strategy": summary.skills.filter((skill) => skill.status !== "active" || skill.health !== "healthy").length,
+        "ai-review":
           operatorInteractions.filter((item) => !item.candidateId && item.status === "pending").length +
           summary.skills.filter((skill) => skill.status !== "active" || skill.health !== "healthy").length +
           evolutionArtifacts.filter((artifact) => /(pending|draft|review)/i.test(artifact.status)).length,
-        workbench: summary.candidates.filter((candidate) => !/(rejected|cooldown)/i.test(candidate.status)).length,
+        candidates: summary.candidates.filter((candidate) => !/(rejected|cooldown)/i.test(candidate.status)).length,
         communications: candidateThreads.filter(
           (thread) =>
             thread.runtimeInteractions.some((interaction) => interaction.status === "pending") ||
             /(contact_required|contact_acquired|pending_communication|communicating|waiting_reply|resume_requested)/i.test(thread.candidate.status),
         ).length,
-        evolution:
-          summary.approvals.filter((approval) => approval.surface === "evolution" && approval.status === "pending").length +
-          summary.skills.filter((skill) => skill.status !== "active" || skill.health !== "healthy").length,
+        "import-center": goals.filter((goal) => /(import|extract|capture|resume|candidate|sourcing|zhipin)/i.test(`${goal.title} ${goal.goalText} ${goal.summary ?? ""}`)).length,
+        "jd-workspace": new Set(summary.candidates.map((candidate) => candidate.jdTitle || copy("Unassigned role", "未分配岗位"))).size,
       }) satisfies Partial<Record<WorkspaceTab, number>>,
-    [candidateThreads, evolutionArtifacts, operatorInteractions, summary],
+    [candidateThreads, copy, evolutionArtifacts, goals, operatorInteractions, summary],
   );
 
   const sectionMeta = useMemo(
     (): Record<WorkspaceTab, { eyebrow: string; title: string; description: string }> => ({
-      dashboard: {
-        eyebrow: copy("Recruit Agent", "Recruit Agent"),
-        title: copy("Overview", "概览"),
-        description: copy("A concise view of candidate progress, approvals, and recent agent movement.", "集中查看候选人进度、审批状态和最近的 agent 动作。"),
+      home: {
+        eyebrow: copy("Today", "今日工作"),
+        title: copy("Home", "首页"),
+        description: copy("Start from recruiter queues, blocked items, and the next actions that matter today.", "从招聘待办、阻塞事项和今天最重要的下一步动作开始。"),
       },
-      "agent-inbox": {
-        eyebrow: copy("Operator chat", "操作员会话"),
-        title: copy("Agent IM", "Agent IM"),
-        description: copy("Handle non-candidate run-time confirmations and blocked flow without leaving the main chat surface.", "在主聊天窗口里处理非候选人的运行时确认和阻塞流。"),
+      candidates: {
+        eyebrow: copy("Candidate pipeline", "候选人漏斗"),
+        title: copy("Candidates", "候选人"),
+        description: copy("Review, triage, and progress active candidates through the hiring workflow.", "在招聘工作流中审阅、分流并推进活跃候选人。"),
       },
-      "recruit-agent": {
-        eyebrow: copy("Agent configuration", "Agent 配置"),
-        title: copy("Recruit Agent", "招聘 Agent"),
-        description: copy("Expose role, prompt, execution blueprint, memory, and skill contracts directly to the operator.", "把角色、提示词、执行蓝图、memory 与 skill 契约直接暴露给操作员。"),
+      "import-center": {
+        eyebrow: copy("Source operations", "来源作业"),
+        title: copy("Import Center", "导入中心"),
+        description: copy("Capture active sourcing pages, stage imports, and keep resume acquisition visible.", "采集当前 sourcing 页面、暂存导入结果，并清晰展示简历获取状态。"),
       },
-      workbench: {
-        eyebrow: copy("Operations", "运行操作"),
-        title: copy("Workbench", "工作台"),
-        description: copy("Focus on candidate progress and recent Recruit Agent execution results.", "聚焦候选人进度与最近的 Recruit Agent 执行结果。"),
+      "jd-workspace": {
+        eyebrow: copy("Role-centered view", "岗位中心视角"),
+        title: copy("JD Workspace", "岗位工作区"),
+        description: copy("Track funnel health, notes, and next actions by role.", "以岗位为中心查看漏斗健康度、策略笔记和下一步动作。"),
       },
       communications: {
-        eyebrow: copy("Runtime inbox", "运行时收件箱"),
+        eyebrow: copy("Candidate cockpit", "候选人驾驶舱"),
         title: copy("Communications", "沟通中心"),
-        description: copy("Manage candidate-scoped threads, confirmations, and communication history without cross-candidate leakage.", "按候选人管理线程、确认和沟通历史，避免跨候选人串线。"),
+        description: copy("Keep communication history, resume facts, assessments, and next recommended actions in one candidate view.", "在单一候选人视图中整合沟通历史、简历事实、评估和下一步建议。"),
       },
-      evolution: {
-        eyebrow: copy("Self-learning", "自学习演进"),
-        title: copy("Evolution", "自学习/演进"),
-        description: copy("Handle skill degradation, memory compaction, and non-candidate approvals in one place.", "集中处理 skill 退化、memory compact 和非候选人审批。"),
+      "ai-review": {
+        eyebrow: copy("Review operations", "审查作业"),
+        title: copy("AI Review Center", "AI 审阅中心"),
+        description: copy(
+          "Review AI suggestions, blocked automation, and strategy changes without mixing them into candidate conversations.",
+          "把 AI 建议、受阻自动化和策略变更放在独立审查面，不混入候选人沟通流程。",
+        ),
+      },
+      "ai-strategy": {
+        eyebrow: copy("Strategy workspace", "策略工作台"),
+        title: copy("AI Strategy", "AI 策略"),
+        description: copy(
+          "Define recruiting strategy, memory boundaries, and automation rules for the workspace.",
+          "为当前工作台定义招聘策略、记忆边界和自动化规则。",
+        ),
       },
       settings: {
-        eyebrow: copy("Local operator settings", "本地操作设置"),
+        eyebrow: copy("Tools and connections", "工具与连接"),
         title: copy("Settings", "设置"),
-        description: copy("Manage providers, local sync behavior, and desktop approval controls.", "管理 provider、本地同步行为和桌面端审批控制。"),
+        description: copy(
+          "Configure model access, external tools, sync preferences, and local review rules.",
+          "配置模型接入、外部工具、同步偏好和本地复核规则。",
+        ),
       },
     }),
     [copy],
@@ -657,42 +1006,68 @@ export function DesktopWorkspace(): JSX.Element {
     setTab("communications");
   };
 
-  const openAgentInbox = (filter?: string, itemId?: string) => {
+  const openAiReview = (filter?: string, itemId?: string) => {
+    setAiReviewSection("queue");
     setAgentInboxFocus({ filter, itemId });
-    setTab("agent-inbox");
+    setTab("ai-review");
   };
 
   const openEvolution = (section?: string, itemId?: string) => {
+    setAiReviewSection("changes");
     setEvolutionFocus({ section, itemId });
-    setTab("evolution");
+    setTab("ai-review");
   };
 
   const content = (() => {
     switch (tab) {
-      case "dashboard":
-        return <DashboardView summary={summary} onOpenAgentInbox={() => openAgentInbox("all")} onOpenCommunications={openCommunications} onOpenEvolution={openEvolution} />;
-      case "agent-inbox":
+      case "home":
         return (
-          <AgentInboxView
-            interactions={operatorInteractions}
-            approvals={summary.approvals}
-            skills={summary.skills}
-            artifacts={evolutionArtifacts}
+          <DashboardView
+            summary={summary}
+            onOpenCandidates={() => setTab("candidates")}
+            onOpenImportCenter={() => setTab("import-center")}
+            onOpenJdWorkspace={() => setTab("jd-workspace")}
+            onOpenCommunications={() => openCommunications("active")}
+            onOpenAiReview={() => openAiReview("all")}
+            onOpenAiStrategy={() => setTab("ai-strategy")}
+          />
+        );
+      case "candidates":
+        return (
+          <WorkbenchView
+            summary={summary}
+            data={runtimeData}
+            agent={summary.agent}
             events={events}
+            selectedEpisodeId={selectedEpisodeId}
+            replay={selectedReplay}
+            syncStatus={syncStatus}
+            syncBacklog={syncBacklog}
+            queueItems={queueItems}
             goals={goals}
             traces={executionTraces}
             graphs={executionGraphs}
-            pendingActionId={approvalActionId}
-            requestedFilter={agentInboxFocus.filter}
-            requestedItemId={agentInboxFocus.itemId}
-            onApprove={handleApprove}
-            onReject={handleReject}
-            onResolveInteraction={handleResolveInteraction}
-            onOpenCandidate={(candidateId) => openCommunications("candidate", candidateId)}
-            onOpenEvolution={openEvolution}
+            runningAction={runtimeActionBusy}
+            syncingAction={syncingBacklog}
+            onOpenCommunications={openCommunications}
+            onOpenImportCenter={() => setTab("import-center")}
+            onOpenJdWorkspace={() => setTab("jd-workspace")}
+            onOpenAiReview={() => openAiReview("all")}
           />
         );
-      case "recruit-agent":
+      case "import-center":
+        return (
+          <ImportCenterSurface
+            candidates={summary.candidates}
+            goals={goals}
+            traces={executionTraces}
+            onCreateGoal={handleCreateGoal}
+            onOpenCommunications={openCommunications}
+          />
+        );
+      case "jd-workspace":
+        return <JdWorkspaceSurface candidates={summary.candidates} onOpenCommunications={openCommunications} />;
+      case "ai-strategy":
         return (
           <RecruitAgentView
             profile={profile}
@@ -712,32 +1087,6 @@ export function DesktopWorkspace(): JSX.Element {
             onCompactGlobalMemory={handleCompactGlobalMemory}
           />
         );
-      case "workbench":
-        return (
-          <WorkbenchView
-            summary={summary}
-            data={runtimeData}
-            agent={summary.agent}
-            events={events}
-            selectedEpisodeId={selectedEpisodeId}
-            replay={selectedReplay}
-            syncStatus={syncStatus}
-            syncBacklog={syncBacklog}
-            queueItems={queueItems}
-            goals={goals}
-            traces={executionTraces}
-            graphs={executionGraphs}
-            runningAction={runtimeActionBusy}
-            syncingAction={syncingBacklog}
-            onRunOnce={handleRunOnce}
-            onQueueScreeningTask={handleQueueScreeningTask}
-            onCreateGoal={handleCreateGoal}
-            onFlushSync={handleFlushSync}
-            onSelectEpisode={setSelectedEpisodeId}
-            onOpenCommunications={openCommunications}
-            onOpenAgentInbox={() => openAgentInbox("all")}
-          />
-        );
       case "communications":
         return (
           <CommunicationsView
@@ -753,34 +1102,77 @@ export function DesktopWorkspace(): JSX.Element {
             onCreateAssessment={handleCreateCandidateAssessment}
           />
         );
-      case "evolution":
+      case "ai-review":
         return (
-          <EvolutionView
-            profile={profile}
-            candidates={summary.candidates}
-            approvals={summary.approvals}
-            skills={summary.skills}
-            artifacts={evolutionArtifacts}
-            candidateMemories={candidateMemories}
-            jobMemories={jobMemories}
-            globalMemory={globalMemory}
-            pendingActionId={approvalActionId}
-            requestedSection={evolutionFocus.section}
-            requestedItemId={evolutionFocus.itemId}
-            onApprove={handleApprove}
-            onReject={handleReject}
-            onSaveProfile={handleSaveProfile}
-            onUpdateSkill={handleUpdateSkill}
-            onDeleteSkill={handleDeleteSkill}
-            onUpdateCandidateMemory={handleUpdateCandidateMemory}
-            onCompactCandidateMemory={handleCompactCandidateMemory}
-            onUpdateJobMemory={handleUpdateJobMemory}
-            onCompactJobMemory={handleCompactJobMemory}
-            onUpdateGlobalMemory={handleUpdateGlobalMemory}
-            onCompactGlobalMemory={handleCompactGlobalMemory}
-            onUpdateArtifact={handleUpdateEvolutionArtifact}
-            onOpenCandidate={(candidateId) => openCommunications("candidate", candidateId)}
-          />
+          <div style={{ display: "grid", gap: "16px" }}>
+            <SectionTabs
+              items={[
+                {
+                  key: "queue",
+                  label: copy("Review queue", "审阅队列"),
+                  detail: copy("Approvals, operator interactions, and blocked work.", "审批、人工介入项和阻塞任务。"),
+                  count:
+                    operatorInteractions.filter((item) => !item.candidateId && item.status === "pending").length +
+                    summary.approvals.filter((approval) => approval.status === "pending").length,
+                },
+                {
+                  key: "changes",
+                  label: copy("AI changes", "AI 变更"),
+                  detail: copy("Skill health, memory refresh, and change proposals.", "Skill 健康、Memory 刷新和变更提案。"),
+                  count: evolutionArtifacts.filter((artifact) => /(pending|draft|review)/i.test(artifact.status)).length,
+                },
+              ]}
+              active={aiReviewSection}
+              onChange={(key) => setAiReviewSection(key as "queue" | "changes")}
+            />
+            {aiReviewSection === "queue" ? (
+              <AgentInboxView
+                interactions={operatorInteractions}
+                approvals={summary.approvals}
+                skills={summary.skills}
+                artifacts={evolutionArtifacts}
+                events={events}
+                goals={goals}
+                traces={executionTraces}
+                graphs={executionGraphs}
+                pendingActionId={approvalActionId}
+                requestedFilter={agentInboxFocus.filter}
+                requestedItemId={agentInboxFocus.itemId}
+                onApprove={handleApprove}
+                onReject={handleReject}
+                onResolveInteraction={handleResolveInteraction}
+                onOpenCandidate={(candidateId) => openCommunications("candidate", candidateId)}
+                onOpenEvolution={openEvolution}
+              />
+            ) : (
+              <EvolutionView
+                profile={profile}
+                candidates={summary.candidates}
+                approvals={summary.approvals}
+                skills={summary.skills}
+                artifacts={evolutionArtifacts}
+                candidateMemories={candidateMemories}
+                jobMemories={jobMemories}
+                globalMemory={globalMemory}
+                pendingActionId={approvalActionId}
+                requestedSection={evolutionFocus.section}
+                requestedItemId={evolutionFocus.itemId}
+                onApprove={handleApprove}
+                onReject={handleReject}
+                onSaveProfile={handleSaveProfile}
+                onUpdateSkill={handleUpdateSkill}
+                onDeleteSkill={handleDeleteSkill}
+                onUpdateCandidateMemory={handleUpdateCandidateMemory}
+                onCompactCandidateMemory={handleCompactCandidateMemory}
+                onUpdateJobMemory={handleUpdateJobMemory}
+                onCompactJobMemory={handleCompactJobMemory}
+                onUpdateGlobalMemory={handleUpdateGlobalMemory}
+                onCompactGlobalMemory={handleCompactGlobalMemory}
+                onUpdateArtifact={handleUpdateEvolutionArtifact}
+                onOpenCandidate={(candidateId) => openCommunications("candidate", candidateId)}
+              />
+            )}
+          </div>
         );
       case "settings":
         return (
@@ -807,8 +1199,8 @@ export function DesktopWorkspace(): JSX.Element {
       style={{
         minHeight: "100vh",
         display: "grid",
-        gridTemplateColumns: "248px minmax(0, 1fr)",
-        background: "linear-gradient(180deg, #0a101a 0%, #0d1320 100%)",
+        gridTemplateColumns: "280px minmax(0, 1fr)",
+        background: "var(--bg-page)",
         color: theme.colors.text,
       }}
     >
@@ -824,14 +1216,14 @@ export function DesktopWorkspace(): JSX.Element {
           onRefresh={() => void loadWorkspace(copy("Manual refresh completed.", "已完成手动刷新。"))}
           refreshing={refreshing}
         />
-        <div style={{ padding: "0 22px 22px", minWidth: 0, display: "grid", gap: "18px" }}>
+        <div style={{ padding: "20px", minWidth: 0, display: "grid", gap: "16px" }}>
           {errorMessage ? (
             <div
               style={{
-                borderRadius: "16px",
-                border: "1px solid rgba(255,122,122,0.18)",
-                background: "rgba(255,122,122,0.08)",
-                color: "#ffdede",
+                borderRadius: "var(--radius-md)",
+                border: "1px solid var(--danger)",
+                background: "var(--danger-soft)",
+                color: "var(--danger)",
                 padding: "12px 14px",
                 fontSize: "13px",
               }}

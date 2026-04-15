@@ -1,8 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Panel, StatusBadge, TopTabPage } from "../../components";
+import { StatusBadge } from "../../components";
 import { formatCompactDate } from "../../lib/format";
 import { useI18n } from "../../lib/i18n";
-import { theme } from "../../lib/theme";
 import type {
   AgentGlobalMemoryRecord,
   CandidateMemoryRecord,
@@ -14,6 +13,104 @@ import type {
 
 type RecruitAgentTab = "profile" | "blueprint" | "context" | "memory" | "skills";
 type MemoryTargetKey = `candidate:${string}` | `job:${string}` | "global";
+
+const theme = {
+  colors: {
+    background: "var(--bg-page)",
+    panel: "var(--bg-card)",
+    border: "var(--border-line)",
+    text: "var(--text-primary)",
+    muted: "var(--text-secondary)",
+    positive: "var(--success)",
+    warning: "var(--warning)",
+    critical: "var(--danger)",
+    accent: "var(--brand-primary)",
+    accentSoft: "var(--brand-primary-soft)",
+  },
+  radius: {
+    xl: "var(--radius-lg)",
+    lg: "var(--radius-md)",
+    md: "var(--radius-sm)",
+    sm: "var(--radius-xs)",
+  },
+  shadow: "var(--shadow-pop)",
+} as const;
+
+interface PanelProps {
+  title?: string;
+  eyebrow?: string;
+  description?: string;
+  actions?: React.ReactNode;
+  children: React.ReactNode;
+  dense?: boolean;
+}
+
+function Panel({ title, eyebrow, description, actions, children, dense }: PanelProps): JSX.Element {
+  return (
+    <section
+      style={{
+        background: theme.colors.panel,
+        border: `1px solid ${theme.colors.border}`,
+        borderRadius: theme.radius.xl,
+        padding: dense ? "var(--space-4)" : "var(--space-5)",
+      }}
+    >
+      {(title || eyebrow || description || actions) && (
+        <header style={{ display: "flex", alignItems: "start", justifyContent: "space-between", gap: "var(--space-4)", marginBottom: "var(--space-4)" }}>
+          <div style={{ minWidth: 0 }}>
+            {eyebrow ? <div style={{ color: theme.colors.accent, fontSize: "12px", letterSpacing: "0.12em", textTransform: "uppercase", fontWeight: 600 }}>{eyebrow}</div> : null}
+            {title ? <h2 style={{ margin: "6px 0 4px", fontSize: "16px", lineHeight: 1.4, fontWeight: 600, color: theme.colors.text }}>{title}</h2> : null}
+            {description ? <p style={{ margin: 0, color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>{description}</p> : null}
+          </div>
+          {actions ? <div style={{ flexShrink: 0 }}>{actions}</div> : null}
+        </header>
+      )}
+      {children}
+    </section>
+  );
+}
+
+interface TopTabPageProps {
+  items: Array<{ key: string; label: string }>;
+  active: string;
+  onChange(key: string): void;
+  children: React.ReactNode;
+}
+
+function TopTabPage({ items, active, onChange, children }: TopTabPageProps): JSX.Element {
+  return (
+    <div style={{ display: "grid", gap: "var(--space-4)", minWidth: 0 }}>
+      <div style={{ position: "sticky", top: "76px", zIndex: 12, alignSelf: "stretch", background: "rgba(245,246,248,0.96)", border: `1px solid ${theme.colors.border}`, borderRadius: theme.radius.xl, padding: "6px", backdropFilter: "blur(10px)" }}>
+        <div style={{ display: "flex", gap: "6px", overflowX: "auto" }}>
+          {items.map((item) => {
+            const selected = item.key === active;
+            return (
+              <button
+                key={item.key}
+                type="button"
+                onClick={() => onChange(item.key)}
+                style={{
+                  border: "none",
+                  borderRadius: theme.radius.sm,
+                  borderBottom: `2px solid ${selected ? "var(--brand-primary)" : "transparent"}`,
+                  background: selected ? "var(--brand-primary-soft)" : "transparent",
+                  color: theme.colors.text,
+                  cursor: "pointer",
+                  padding: "10px 14px",
+                  fontWeight: selected ? 600 : 500,
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {item.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+      <div style={{ display: "grid", gap: "var(--space-4)", minWidth: 0 }}>{children}</div>
+    </div>
+  );
+}
 
 interface RecruitAgentViewProps {
   profile: RecruitAgentProfileRecord | null;
@@ -35,35 +132,35 @@ interface RecruitAgentViewProps {
 
 const inputStyle: React.CSSProperties = {
   width: "100%",
-  borderRadius: "12px",
+  borderRadius: theme.radius.sm,
   border: `1px solid ${theme.colors.border}`,
-  background: "rgba(7,12,22,0.9)",
+  background: theme.colors.panel,
   color: theme.colors.text,
-  padding: "10px 12px",
-  fontSize: "14px",
+  padding: "9px 10px",
+  fontSize: "13px",
 };
 
 const textAreaStyle: React.CSSProperties = {
   width: "100%",
   minHeight: "120px",
-  borderRadius: "16px",
+  borderRadius: theme.radius.md,
   border: `1px solid ${theme.colors.border}`,
-  background: "rgba(7,12,22,0.9)",
+  background: theme.colors.panel,
   color: theme.colors.text,
-  padding: "12px 14px",
+  padding: "10px 12px",
   fontSize: "13px",
-  lineHeight: 1.7,
+  lineHeight: 1.6,
   resize: "vertical",
 };
 
 const buttonStyle: React.CSSProperties = {
   border: `1px solid ${theme.colors.border}`,
-  borderRadius: "12px",
-  background: "rgba(255,255,255,0.04)",
+  borderRadius: theme.radius.sm,
+  background: theme.colors.panel,
   color: theme.colors.text,
-  padding: "9px 12px",
+  padding: "8px 12px",
   cursor: "pointer",
-  fontWeight: 700,
+  fontWeight: 600,
 };
 
 function stringifyJson(value: unknown): string {
@@ -572,9 +669,9 @@ export function RecruitAgentView({
   const profileContent = (
     <div style={{ display: "grid", gap: "18px" }}>
       <Panel
-        title={profile?.name ?? copy("Recruit Agent", "Recruit Agent")}
-        eyebrow={copy("Identity and prompt", "身份与提示词")}
-        description={copy("Expose agent identity, role, tone, duties, and prompt slots as structured fields instead of hiding them behind raw JSON.", "把 agent 身份、职责、口吻和提示词槽位用结构化字段外露，而不是只藏在原始 JSON 里。")}
+        title={copy("AI Strategy", "AI 策略")}
+        eyebrow={copy("Role and scope", "角色与边界")}
+        description={copy("Define the recruiting voice, role, duties, and prompt sources as structured fields.", "用结构化字段定义招聘语气、角色、职责和提示来源。")}
         actions={
           <div style={{ display: "flex", gap: "8px" }}>
             <StatusBadge tone={profile?.isPrimary ? "positive" : "neutral"}>{profile?.status ?? "draft"}</StatusBadge>
@@ -585,11 +682,11 @@ export function RecruitAgentView({
         <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: "18px" }}>
           <div style={{ display: "grid", gap: "12px" }}>
             <label style={{ display: "grid", gap: "6px" }}>
-              <span>{copy("Description", "说明")}</span>
+              <span>{copy("Overview", "概述")}</span>
               <textarea value={descriptionDraft} onChange={(event) => setDescriptionDraft(event.target.value)} style={{ ...textAreaStyle, minHeight: "88px" }} />
             </label>
             <label style={{ display: "grid", gap: "6px" }}>
-              <span>{copy("Identity", "身份")}</span>
+              <span>{copy("Role identity", "角色身份")}</span>
               <input value={identityDraft} onChange={(event) => setIdentityDraft(event.target.value)} style={inputStyle} />
             </label>
             <label style={{ display: "grid", gap: "6px" }}>
@@ -597,52 +694,52 @@ export function RecruitAgentView({
               <textarea value={positioningDraft} onChange={(event) => setPositioningDraft(event.target.value)} style={{ ...textAreaStyle, minHeight: "88px" }} />
             </label>
             <label style={{ display: "grid", gap: "6px" }}>
-              <span>{copy("Duties", "职责")}</span>
+              <span>{copy("Responsibilities", "职责")}</span>
               <textarea value={dutiesDraft} onChange={(event) => setDutiesDraft(event.target.value)} style={textAreaStyle} />
             </label>
             <label style={{ display: "grid", gap: "6px" }}>
-              <span>{copy("Tone", "口吻")}</span>
+              <span>{copy("Voice", "语气")}</span>
               <input value={toneDraft} onChange={(event) => setToneDraft(event.target.value)} style={inputStyle} />
             </label>
           </div>
 
           <div style={{ display: "grid", gap: "12px" }}>
             <label style={{ display: "grid", gap: "6px" }}>
-              <span>{copy("Boundaries", "边界")}</span>
+              <span>{copy("Guardrails", "护栏")}</span>
               <textarea value={boundariesDraft} onChange={(event) => setBoundariesDraft(event.target.value)} style={textAreaStyle} />
             </label>
             <label style={{ display: "grid", gap: "6px" }}>
-              <span>{copy("Success criteria", "成功标准")}</span>
+              <span>{copy("Success signals", "成功信号")}</span>
               <textarea value={successCriteriaDraft} onChange={(event) => setSuccessCriteriaDraft(event.target.value)} style={textAreaStyle} />
             </label>
             <label style={{ display: "grid", gap: "6px" }}>
-              <span>{copy("Forbidden actions", "禁止事项")}</span>
+              <span>{copy("Never-do list", "禁止事项")}</span>
               <textarea value={forbiddenActionsDraft} onChange={(event) => setForbiddenActionsDraft(event.target.value)} style={textAreaStyle} />
             </label>
             <label style={{ display: "grid", gap: "6px" }}>
-              <span>{copy("System prompt", "系统提示词")}</span>
+              <span>{copy("Core prompt", "核心提示词")}</span>
               <textarea value={systemPromptDraft} onChange={(event) => setSystemPromptDraft(event.target.value)} style={textAreaStyle} />
             </label>
             <label style={{ display: "grid", gap: "6px" }}>
-              <span>{copy("Context slots", "上下文槽位")}</span>
+              <span>{copy("Context sources", "上下文来源")}</span>
               <input value={contextSlotsDraft} onChange={(event) => setContextSlotsDraft(event.target.value)} style={inputStyle} placeholder={copy("candidate_memory, job_memory, candidate_thread", "candidate_memory, job_memory, candidate_thread")} />
             </label>
           </div>
         </div>
       </Panel>
 
-      <Panel title={copy("Advanced config", "高级配置")} eyebrow={copy("Operator visible", "对用户可见")} description={copy("Dashboard, channel, and metadata remain editable, but as secondary advanced controls.", "看板、渠道和元数据仍可编辑，但退到次级高级配置区。")}>
+      <Panel title={copy("Supporting configuration", "辅助配置")} eyebrow={copy("Secondary settings", "次级设置")} description={copy("Workspace, channel, and metadata remain editable as supporting controls.", "工作区、渠道和元数据仍可作为辅助配置继续编辑。")}>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: "18px" }}>
           <label style={{ display: "grid", gap: "6px" }}>
-            <span>{copy("Dashboard config JSON", "看板配置 JSON")}</span>
+            <span>{copy("Workspace config JSON", "工作区配置 JSON")}</span>
             <textarea value={dashboardDraft} onChange={(event) => setDashboardDraft(event.target.value)} style={textAreaStyle} />
           </label>
           <label style={{ display: "grid", gap: "6px" }}>
-            <span>{copy("Channel config JSON", "渠道配置 JSON")}</span>
+            <span>{copy("Delivery config JSON", "消息配置 JSON")}</span>
             <textarea value={channelDraft} onChange={(event) => setChannelDraft(event.target.value)} style={textAreaStyle} />
           </label>
           <label style={{ display: "grid", gap: "6px" }}>
-            <span>{copy("Agent metadata JSON", "Agent 元数据 JSON")}</span>
+            <span>{copy("Strategy metadata JSON", "策略元数据 JSON")}</span>
             <textarea value={metadataDraft} onChange={(event) => setMetadataDraft(event.target.value)} style={textAreaStyle} />
           </label>
         </div>
@@ -653,10 +750,10 @@ export function RecruitAgentView({
   const blueprintContent = (
     <div style={{ display: "grid", gap: "18px" }}>
       <Panel
-        title={copy("Execution blueprint and state machine", "执行蓝图与状态机")}
+        title={copy("Strategy map", "策略地图")}
         eyebrow={copy("Adaptive stages", "自适应阶段")}
-        description={copy("The operator edits stage groups and adaptive stages here. They explain goal-driven execution, but no longer hard-code the runtime path.", "这里编辑的是阶段组和自适应阶段，用来解释目标驱动执行，但不再硬编码运行时路径。")}
-        actions={<button type="button" onClick={() => void handleSaveProfile()} style={buttonStyle}>{copy("Save blueprint", "保存执行蓝图")}</button>}
+        description={copy("Define the stage groups and adaptive stages the strategy follows.", "定义策略在各阶段组和自适应阶段中的推进方式。")}
+        actions={<button type="button" onClick={() => void handleSaveProfile()} style={buttonStyle}>{copy("Save strategy map", "保存策略地图")}</button>}
       >
         <div style={{ display: "grid", gap: "14px" }}>
           <div style={{ display: "grid", gridTemplateColumns: "220px minmax(0, 1fr)", gap: "12px", alignItems: "start" }}>
@@ -708,14 +805,14 @@ export function RecruitAgentView({
                   </div>
                 );
               })}
-              {!blueprintStageGroups.length ? <div style={{ color: theme.colors.muted, fontSize: "13px" }}>{copy("Blueprint JSON is invalid or missing stage groups.", "执行蓝图 JSON 无效，或缺少阶段组。")}</div> : null}
+              {!blueprintStageGroups.length ? <div style={{ color: theme.colors.muted, fontSize: "13px" }}>{copy("Strategy map JSON is invalid or missing stage groups.", "策略地图 JSON 无效，或缺少阶段组。")}</div> : null}
             </div>
           </div>
           <div style={{ display: "grid", gap: "10px" }}>
             <div style={{ display: "grid", gridTemplateColumns: "180px 140px 120px minmax(0, 1fr)", gap: "8px", color: theme.colors.muted, fontSize: "12px" }}>
               <span>{copy("Stage", "阶段")}</span>
               <span>{copy("Task type", "任务类型")}</span>
-              <span>{copy("Requires skill", "依赖 skill")}</span>
+              <span>{copy("Needs skill", "需要 skill")}</span>
               <span>{copy("Purpose / next stage", "用途 / 下一步")}</span>
             </div>
             {blueprintStages.map((node, nodeIndex) => {
@@ -742,14 +839,14 @@ export function RecruitAgentView({
           <details>
             <summary style={{ cursor: "pointer", color: theme.colors.muted, fontSize: "12px" }}>{copy("Advanced JSON editor", "高级 JSON 编辑器")}</summary>
             <label style={{ display: "grid", gap: "6px", marginTop: "10px" }}>
-              <span>{copy("Execution blueprint JSON", "执行蓝图 JSON")}</span>
+              <span>{copy("Strategy map JSON", "策略地图 JSON")}</span>
               <textarea value={playbookJsonDraft} onChange={(event) => setPlaybookJsonDraft(event.target.value)} style={{ ...textAreaStyle, minHeight: "260px" }} />
             </label>
           </details>
         </div>
       </Panel>
 
-      <Panel title={copy("Memory policy", "Memory 策略")} eyebrow={copy("Layered compaction", "分层压缩")} description={copy("All memory keeps raw content, operator disclosure, and model disclosure. Auto compact triggers when context exceeds the configured threshold.", "所有 memory 都同时保留原始层、操作员披露层和模型披露层。上下文超过阈值时自动 compact。")}>
+      <Panel title={copy("Memory policy", "记忆策略")} eyebrow={copy("Layered compaction", "分层压缩")} description={copy("All memory keeps a summary, an internal view, and a model-facing view. Auto compaction runs when the configured threshold is exceeded.", "所有 memory 都同时保留摘要层、内部视图层和模型可见层。超过阈值时自动压缩。")}>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: "18px" }}>
           <article style={{ display: "grid", gap: "10px" }}>
             <strong>{copy("Candidate memory", "候选人记忆")}</strong>
@@ -791,7 +888,7 @@ export function RecruitAgentView({
 
   const memoryContent = (
     <div style={{ display: "grid", gridTemplateColumns: "320px minmax(0, 1fr)", gap: "18px" }}>
-      <Panel title={copy("Memory registry", "Memory 注册表")} eyebrow={copy("Strict isolation", "严格隔离")} description={copy("Candidate memory and JD memory stay isolated. The UI now exposes raw, operator, and model disclosure layers progressively.", "Candidate memory 和 JD memory 保持隔离。界面现在按层级渐进披露 raw、operator、model 三层内容。")}>
+      <Panel title={copy("Memory workspace", "记忆工作区")} eyebrow={copy("Strict isolation", "严格隔离")} description={copy("Candidate memory and JD memory stay isolated. The UI reveals summary, internal view, and model-facing view in order.", "Candidate memory 和 JD memory 保持隔离。界面按顺序展示摘要、内部视图和模型可见视图。")}>
         <div style={{ display: "grid", gap: "10px" }}>
           {memoryTargets.map((item) => (
             <button
@@ -803,7 +900,7 @@ export function RecruitAgentView({
                 textAlign: "left",
                 borderRadius: "14px",
                 border: `1px solid ${selectedMemoryKey === item.key ? "rgba(122,167,255,0.36)" : theme.colors.border}`,
-                background: selectedMemoryKey === item.key ? "rgba(122,167,255,0.12)" : "rgba(255,255,255,0.03)",
+                background: selectedMemoryKey === item.key ? "var(--brand-primary-soft)" : "var(--bg-page)",
                 color: theme.colors.text,
                 padding: "12px 13px",
               }}
@@ -818,7 +915,7 @@ export function RecruitAgentView({
       <Panel
         title={selectedMemory ? (selectedMemory.kind === "candidate" ? candidateNameById.get(selectedMemory.record.candidateId) ?? selectedMemory.record.candidateId : selectedMemory.kind === "job" ? selectedMemory.record.jdId : copy("Global memory", "全局记忆")) : copy("Memory detail", "Memory 详情")}
         eyebrow={copy("Progressive disclosure", "渐进式披露")}
-        description={copy("Raw evidence remains preserved. Compact content and model-ready disclosure are editable separately.", "原始证据会被保留。compact 后内容和模型可用披露层可以独立编辑。")}
+        description={copy("Raw evidence remains preserved. The compacted content and model-ready view are editable separately.", "原始证据会被保留。压缩内容和模型可用视图可以独立编辑。")}
         actions={
           <div style={{ display: "flex", gap: "8px" }}>
             <button type="button" onClick={() => void handleCompactMemory()} style={buttonStyle} disabled={!selectedMemory}>{copy("Compact", "执行 compact")}</button>
@@ -838,15 +935,15 @@ export function RecruitAgentView({
               <textarea value={memorySummaryDraft} onChange={(event) => setMemorySummaryDraft(event.target.value)} style={{ ...textAreaStyle, minHeight: "88px" }} />
             </label>
             <label style={{ display: "grid", gap: "6px" }}>
-              <span>{copy("Preview disclosure", "预览披露层")}</span>
+              <span>{copy("Recruiter preview", "招聘视图")}</span>
               <input value={memoryDisclosurePreviewDraft} onChange={(event) => setMemoryDisclosurePreviewDraft(event.target.value)} style={inputStyle} />
             </label>
             <label style={{ display: "grid", gap: "6px" }}>
-              <span>{copy("Operator disclosure", "操作员披露层")}</span>
+              <span>{copy("Internal summary", "内部摘要")}</span>
               <textarea value={memoryDisclosureOperatorDraft} onChange={(event) => setMemoryDisclosureOperatorDraft(event.target.value)} style={{ ...textAreaStyle, minHeight: "88px" }} />
             </label>
             <label style={{ display: "grid", gap: "6px" }}>
-              <span>{copy("Model disclosure", "模型披露层")}</span>
+              <span>{copy("Model view", "模型视图")}</span>
               <textarea value={memoryDisclosureModelDraft} onChange={(event) => setMemoryDisclosureModelDraft(event.target.value)} style={{ ...textAreaStyle, minHeight: "120px" }} />
             </label>
             <details>
@@ -854,7 +951,7 @@ export function RecruitAgentView({
               <textarea value={memoryCompactDraft} onChange={(event) => setMemoryCompactDraft(event.target.value)} style={{ ...textAreaStyle, minHeight: "220px", marginTop: "10px" }} />
             </details>
             <details>
-              <summary style={{ cursor: "pointer", color: theme.colors.muted }}>{copy("Show raw content JSON", "查看原始内容 JSON")}</summary>
+              <summary style={{ cursor: "pointer", color: theme.colors.muted }}>{copy("Show raw record JSON", "查看原始记录 JSON")}</summary>
               <textarea value={memoryRawDraft} onChange={(event) => setMemoryRawDraft(event.target.value)} style={{ ...textAreaStyle, minHeight: "220px", marginTop: "10px" }} />
             </details>
           </div>
@@ -868,9 +965,9 @@ export function RecruitAgentView({
   const contextContent = (
     <div style={{ display: "grid", gap: "18px" }}>
       <Panel
-        title={copy("Context assembler policy", "上下文装配策略")}
+        title={copy("Context policy", "上下文策略")}
         eyebrow={copy("Code first, user configurable", "代码优先，用户可配")}
-        description={copy("Hard constraints stay in code. This page only adjusts preference, budget, and optional LLM rerank behavior for legal fragments.", "硬边界仍然由代码控制。这个页面只调整合法片段范围内的偏好、预算和可选的 LLM 辅助重排。")}
+        description={copy("Hard constraints stay in code. This page only adjusts preference, budget, and optional LLM rerank behavior for allowed fragments.", "硬边界仍然由代码控制。这个页面只调整允许片段范围内的偏好、预算和可选的 LLM 辅助重排。")}
         actions={<button type="button" onClick={() => void handleSaveContextPolicy()} style={buttonStyle}>{copy("Save policy", "保存策略")}</button>}
       >
         <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: "12px" }}>
@@ -900,7 +997,7 @@ export function RecruitAgentView({
       <Panel
         title={copy("Lane preference", "Lane 偏好")}
         eyebrow={copy("Per-lane priority", "按 lane 配置优先级")}
-        description={copy("Candidate lane and agent lane can prefer different fragment classes. Hard safety boundaries still remain enforced in code.", "candidate lane 和 agent lane 可以偏好不同的片段类型，但硬安全边界仍然由代码强制执行。")}
+        description={copy("Candidate lane and strategy lane can prefer different fragment classes. Hard safety boundaries still remain enforced in code.", "候选人 lane 和策略 lane 可以偏好不同的片段类型，但硬安全边界仍然由代码强制执行。")}
       >
         <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: "18px" }}>
           <div style={{ display: "grid", gap: "12px" }}>
@@ -915,7 +1012,7 @@ export function RecruitAgentView({
             </label>
           </div>
           <div style={{ display: "grid", gap: "12px" }}>
-            <strong>{copy("Agent lane", "Agent lane")}</strong>
+            <strong>{copy("Strategy lane", "策略 lane")}</strong>
             <label style={{ display: "grid", gap: "6px" }}>
               <span>{copy("Must include", "必须包含")}</span>
               <textarea value={agentMustIncludeDraft} onChange={(event) => setAgentMustIncludeDraft(event.target.value)} style={{ ...textAreaStyle, minHeight: "110px" }} />
@@ -943,7 +1040,7 @@ export function RecruitAgentView({
 
   const skillContent = (
     <div style={{ display: "grid", gridTemplateColumns: "320px minmax(0, 1fr)", gap: "18px" }}>
-      <Panel title={copy("Skill registry", "Skill 注册表")} eyebrow={copy("Manageable contracts", "可管理契约")} description={copy("Skills remain viewable, editable, and removable. The UI shows a lighter operator view first, then full schemas under details.", "skill 保持可查看、可修改、可删除。界面先展示轻量操作员视图，再在详情中展示完整 schema。")}>
+      <Panel title={copy("Skill library", "Skill 库")} eyebrow={copy("Editable items", "可编辑项")} description={copy("Skills remain viewable, editable, and removable. The UI shows a short summary first, then full schemas under details.", "skill 保持可查看、可修改、可删除。界面先展示简短摘要，再在详情中展示完整 schema。")}>
         <div style={{ display: "grid", gap: "10px" }}>
           {skills.map((skill) => (
             <button
@@ -955,7 +1052,7 @@ export function RecruitAgentView({
                 textAlign: "left",
                 borderRadius: "14px",
                 border: `1px solid ${selectedSkillId === skill.id ? "rgba(122,167,255,0.36)" : theme.colors.border}`,
-                background: selectedSkillId === skill.id ? "rgba(122,167,255,0.12)" : "rgba(255,255,255,0.03)",
+                background: selectedSkillId === skill.id ? "var(--brand-primary-soft)" : "var(--bg-page)",
                 color: theme.colors.text,
                 padding: "12px 13px",
               }}
@@ -975,7 +1072,7 @@ export function RecruitAgentView({
       <Panel
         title={selectedSkill?.name ?? copy("Skill detail", "Skill 详情")}
         eyebrow={copy("Progressive disclosure", "渐进式披露")}
-        description={selectedSkill?.summary ?? copy("Select a skill to inspect its operator view, strategy, and full schema.", "选择一个 skill 查看操作员视图、策略和完整 schema。")}
+        description={selectedSkill?.summary ?? copy("Select a skill to inspect its summary, strategy, and full schema.", "选择一个 skill 查看摘要、策略和完整 schema。")}
         actions={
           selectedSkill ? (
             <div style={{ display: "flex", gap: "8px" }}>
@@ -1014,7 +1111,7 @@ export function RecruitAgentView({
               <textarea value={skillStrategyDraft} onChange={(event) => setSkillStrategyDraft(event.target.value)} style={textAreaStyle} />
             </label>
             <label style={{ display: "grid", gap: "6px" }}>
-              <span>{copy("Execution hints JSON", "执行提示 JSON")}</span>
+              <span>{copy("Guidance JSON", "指导 JSON")}</span>
               <textarea value={skillExecutionHintsDraft} onChange={(event) => setSkillExecutionHintsDraft(event.target.value)} style={textAreaStyle} />
             </label>
             <label style={{ display: "grid", gap: "6px" }}>
@@ -1041,19 +1138,19 @@ export function RecruitAgentView({
   );
 
   return (
-    <div style={{ display: "grid", gap: "18px" }}>
+    <div style={{ display: "grid", gap: "var(--space-5)", minWidth: 0, background: theme.colors.background, padding: "var(--space-5)", borderRadius: theme.radius.xl }}>
       {errorMessage ? (
-        <div style={{ borderRadius: "16px", border: "1px solid rgba(255,122,122,0.18)", background: "rgba(255,122,122,0.08)", color: "#ffdede", padding: "12px 14px", fontSize: "13px" }}>
+        <div style={{ borderRadius: theme.radius.xl, border: `1px solid ${theme.colors.critical}`, background: "rgba(255,77,79,0.08)", color: theme.colors.critical, padding: "12px 14px", fontSize: "13px" }}>
           {errorMessage}
         </div>
       ) : null}
       <TopTabPage
         items={[
-          { key: "profile", label: copy("Profile", "身份设定") },
-          { key: "blueprint", label: copy("Blueprint", "执行蓝图") },
-          { key: "context", label: copy("Context", "上下文策略") },
-          { key: "memory", label: copy("Memory", "记忆管理") },
-          { key: "skills", label: copy("Skills", "Skill 管理") },
+          { key: "profile", label: copy("Strategy brief", "策略概览") },
+          { key: "blueprint", label: copy("Strategy", "策略") },
+          { key: "context", label: copy("Context", "上下文") },
+          { key: "memory", label: copy("Memory", "记忆") },
+          { key: "skills", label: copy("Skills", "技能") },
         ]}
         active={tab}
         onChange={(next) => setTab(next as RecruitAgentTab)}

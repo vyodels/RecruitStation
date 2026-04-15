@@ -1,8 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Panel, StatusBadge } from "../../components";
+import { StatusBadge } from "../../components";
 import { formatCompactDate } from "../../lib/format";
 import { useI18n } from "../../lib/i18n";
-import { theme } from "../../lib/theme";
 import { translateUiToken } from "../../lib/uiText";
 import type {
   AgentEvent,
@@ -81,14 +80,70 @@ interface AgentInboxViewProps {
   onOpenEvolution(section?: string, itemId?: string): void;
 }
 
+const theme = {
+  colors: {
+    background: "var(--bg-page)",
+    panel: "var(--bg-card)",
+    border: "var(--border-line)",
+    text: "var(--text-primary)",
+    muted: "var(--text-secondary)",
+    positive: "var(--success)",
+    warning: "var(--warning)",
+    critical: "var(--danger)",
+    accent: "var(--brand-primary)",
+    accentSoft: "var(--brand-primary-soft)",
+  },
+  radius: {
+    xl: "var(--radius-lg)",
+    lg: "var(--radius-md)",
+    md: "var(--radius-sm)",
+    sm: "var(--radius-xs)",
+  },
+  shadow: "var(--shadow-pop)",
+} as const;
+
+interface PanelProps {
+  title?: string;
+  eyebrow?: string;
+  description?: string;
+  actions?: React.ReactNode;
+  children: React.ReactNode;
+  dense?: boolean;
+}
+
+function Panel({ title, eyebrow, description, actions, children, dense }: PanelProps): JSX.Element {
+  return (
+    <section
+      style={{
+        background: theme.colors.panel,
+        border: `1px solid ${theme.colors.border}`,
+        borderRadius: theme.radius.xl,
+        padding: dense ? "var(--space-4)" : "var(--space-5)",
+      }}
+    >
+      {(title || eyebrow || description || actions) && (
+        <header style={{ display: "flex", alignItems: "start", justifyContent: "space-between", gap: "var(--space-4)", marginBottom: "var(--space-4)" }}>
+          <div style={{ minWidth: 0 }}>
+            {eyebrow ? <div style={{ color: theme.colors.accent, fontSize: "12px", letterSpacing: "0.12em", textTransform: "uppercase", fontWeight: 600 }}>{eyebrow}</div> : null}
+            {title ? <h2 style={{ margin: "6px 0 4px", fontSize: "16px", lineHeight: 1.4, fontWeight: 600, color: theme.colors.text }}>{title}</h2> : null}
+            {description ? <p style={{ margin: 0, color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>{description}</p> : null}
+          </div>
+          {actions ? <div style={{ flexShrink: 0 }}>{actions}</div> : null}
+        </header>
+      )}
+      {children}
+    </section>
+  );
+}
+
 const buttonStyle: React.CSSProperties = {
   border: `1px solid ${theme.colors.border}`,
-  borderRadius: "10px",
-  background: "rgba(255,255,255,0.04)",
+  borderRadius: theme.radius.sm,
+  background: theme.colors.panel,
   color: theme.colors.text,
-  padding: "8px 10px",
+  padding: "8px 12px",
   cursor: "pointer",
-  fontWeight: 700,
+  fontWeight: 600,
 };
 
 function toneFromSkill(skill: SkillRecord): "positive" | "neutral" | "warning" | "critical" {
@@ -150,6 +205,26 @@ function humanizeLabel(value: string): string {
     .replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
+function presentRecruitingText(text: string, copy: (en: string, zh: string) => string): string {
+  const cleaned = text
+    .trim()
+    .replace(/^Promote\s+/i, copy("Review ", "复核 "))
+    .replace(/^Patch\s+/i, copy("Change request: ", "变更请求："))
+    .replace(/^Resume blocked task:\s*/i, copy("Blocked workflow: ", "受阻流程："))
+    .replace(/^Review template candidate for\s*/i, copy("Candidate review: ", "候选人待复核："))
+    .replace(/^Goal intake failed to compile an executable plan:\s*/i, copy("Plan generation failed: ", "计划生成失败："))
+    .replace(/^Trial execution diverged while handling web_scene\.?\s*/i, copy("Needs a manual review before reuse. ", "本次尝试需要人工复核后再复用。"))
+    .replace(/^Skill strategy managed by Recruit Agent\.?\s*/i, copy("Managed by the workspace strategy. ", "由工作台策略统一管理。"))
+    .replace(/\bresolved\b/gi, copy("reviewed", "已处理"))
+    .replace(/\bapproved\b/gi, copy("approved", "已批准"))
+    .replace(/\bPlan:\s*[a-f0-9-]+/gi, "")
+    .replace(/\bEpisode:\s*[a-f0-9-]+/gi, "")
+    .replace(/\s*·\s*/g, " · ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return cleaned || copy("System update", "系统更新");
+}
+
 export function AgentInboxView({
   interactions,
   approvals,
@@ -179,14 +254,14 @@ export function AgentInboxView({
         .map<InteractionInboxItem>((interaction) => ({
           key: `interaction:${interaction.id}`,
           kind: "interaction",
-          title: interaction.title,
-          detail: interaction.agentPrompt,
+          title: presentRecruitingText(interaction.title, copy),
+          detail: presentRecruitingText(interaction.agentPrompt, copy),
           at: interaction.updatedAt ?? interaction.surfacedAt,
           tone: toneFromInteraction(interaction),
           interaction,
           candidateId: interaction.candidateId,
         })),
-    [interactions],
+    [copy, interactions],
   );
 
   const runtimeItems = useMemo<ApprovalInboxItem[]>(
@@ -196,14 +271,14 @@ export function AgentInboxView({
         .map<ApprovalInboxItem>((approval) => ({
           key: `approval:${approval.id}`,
           kind: "approval",
-          title: approval.title,
-          detail: approval.detail,
+          title: presentRecruitingText(approval.title, copy),
+          detail: presentRecruitingText(approval.detail, copy),
           at: approval.updatedAt ?? approval.createdAt,
           tone: toneFromApproval(approval),
           approval,
           candidateId: approval.relatedCandidateId,
         })),
-    [approvals],
+    [approvals, copy],
   );
 
   const skillItems = useMemo<SkillInboxItem[]>(
@@ -213,13 +288,13 @@ export function AgentInboxView({
         .map<SkillInboxItem>((skill) => ({
           key: `skill:${skill.id}`,
           kind: "skill",
-          title: skill.name,
-          detail: skill.summary,
+          title: presentRecruitingText(skill.name, copy),
+          detail: presentRecruitingText(skill.summary, copy),
           at: skill.lastCheckedAt,
           tone: toneFromSkill(skill),
           skill,
         })),
-    [skills],
+    [copy, skills],
   );
 
   const artifactItems = useMemo<ArtifactInboxItem[]>(
@@ -229,13 +304,13 @@ export function AgentInboxView({
         .map<ArtifactInboxItem>((artifact) => ({
           key: `artifact:${artifact.id}`,
           kind: "artifact",
-          title: artifact.title,
-          detail: artifact.summary ?? artifact.artifactKind,
+          title: presentRecruitingText(artifact.title, copy),
+          detail: presentRecruitingText(artifact.summary ?? artifact.artifactKind, copy),
           at: artifact.updatedAt,
           tone: toneFromArtifact(artifact),
           artifact,
         })),
-    [artifacts],
+    [artifacts, copy],
   );
 
   const items = useMemo(() => {
@@ -292,23 +367,54 @@ export function AgentInboxView({
   const latestGoal = goals[0] ?? null;
   const latestTrace = traces[0] ?? null;
   const latestGraph = graphs[0] ?? null;
+  const summaryMetrics: Array<{
+    label: string;
+    value: number;
+    note: string;
+    tone: "positive" | "warning";
+  }> = [
+    { label: copy("Candidate actions", "候选人动作"), value: pendingInteractions, note: copy("Pending confirmations or follow-ups that need a decision.", "需要决策的待确认或待跟进事项。"), tone: pendingInteractions ? "warning" : "positive" },
+    { label: copy("Review requests", "审查请求"), value: pendingApprovals, note: copy("Items ready to approve, reject, or route onward.", "可批准、拒绝或转交的事项。"), tone: pendingApprovals ? "warning" : "positive" },
+    { label: copy("Skill health", "Skill 健康"), value: degradedSkills, note: copy("Skills that need a closer look before the next run.", "下一轮运行前需要再看一眼的 skill。"), tone: degradedSkills ? "warning" : "positive" },
+    { label: copy("Artifacts", "产物"), value: pendingArtifacts, note: copy("Drafts and review items waiting to be finalized.", "等待定稿的草稿和审查项。"), tone: pendingArtifacts ? "warning" : "positive" },
+  ];
 
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "280px minmax(0, 1fr) 320px", gap: "16px", minWidth: 0 }}>
+    <div style={{ display: "grid", gap: "var(--space-5)", minWidth: 0, background: theme.colors.background, padding: "var(--space-5)", borderRadius: theme.radius.xl }}>
+      <Panel
+        title={copy("AI Review Center", "AI 审查中心")}
+        eyebrow={copy("Recruiter-facing review", "招聘侧审查")}
+        description={copy("Pending confirmations, candidate notes, and strategy artifacts stay in one review surface.", "待确认事项、候选人备注和策略产物都留在同一个审查面里。")}
+      >
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: "var(--space-3)" }}>
+          {summaryMetrics.map((metric) => (
+            <div key={metric.label} style={{ border: `1px solid ${theme.colors.border}`, borderRadius: theme.radius.xl, padding: "var(--space-4)", background: "linear-gradient(180deg, #FFFFFF 0%, #F9FBFC 100%)" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: "8px", alignItems: "start" }}>
+                <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.4 }}>{metric.label}</div>
+                <StatusBadge tone={metric.tone}>{metric.value}</StatusBadge>
+              </div>
+              <div style={{ marginTop: "8px", fontSize: "22px", lineHeight: 1.2, fontWeight: 600, color: theme.colors.text }}>{metric.value}</div>
+              <div style={{ marginTop: "6px", color: theme.colors.muted, fontSize: "12px", lineHeight: 1.6 }}>{metric.note}</div>
+            </div>
+          ))}
+        </div>
+      </Panel>
+
+      <div style={{ display: "grid", gridTemplateColumns: "300px minmax(0, 1fr) 340px", gap: "var(--space-4)", minWidth: 0 }}>
       <Panel
         dense
-        title={copy("Agent IM", "Agent IM")}
-        eyebrow={copy("Runtime orchestration", "运行编排")}
-        description={copy("Run-time confirmations, degraded skills, and evolution drafts are handled here without mixing candidate chat.", "这里处理运行时确认、skill 异常和演进草稿，不混入候选人聊天。")}
+        title={copy("Review queue", "审查队列")}
+        eyebrow={copy("Queue and filters", "队列与筛选")}
+        description={copy("Use this list to route confirmations, approvals, skills, and artifacts without leaving the review surface.", "通过这里分流确认、审批、skill 和产物，不必离开审查面。")}
       >
         <div style={{ display: "grid", gap: "8px" }}>
           {[
             { key: "all", label: copy("All", "全部"), count: items.length },
-            { key: "interactions", label: copy("Interactions", "确认/介入"), count: pendingInteractions },
-            { key: "approvals", label: copy("Legacy approvals", "兼容审批"), count: pendingApprovals },
-            { key: "permissions", label: copy("Permissions", "权限"), count: runtimeItems.filter((item) => /(system_command|permission|command)/i.test(item.approval.targetType ?? item.approval.kind ?? "")).length },
-            { key: "skills", label: copy("Skills", "Skills"), count: degradedSkills },
-            { key: "artifacts", label: copy("Artifacts", "演进产物"), count: pendingArtifacts },
+            { key: "interactions", label: copy("Candidate actions", "候选人动作"), count: pendingInteractions },
+            { key: "approvals", label: copy("Policy exceptions", "策略例外"), count: pendingApprovals },
+            { key: "permissions", label: copy("System permissions", "系统权限"), count: runtimeItems.filter((item) => /(system_command|permission|command)/i.test(item.approval.targetType ?? item.approval.kind ?? "")).length },
+            { key: "skills", label: copy("Skill rules", "Skill 规则"), count: degradedSkills },
+            { key: "artifacts", label: copy("Review artifacts", "审查产物"), count: pendingArtifacts },
           ].map((entry) => (
             <button
               key={entry.key}
@@ -323,7 +429,7 @@ export function AgentInboxView({
                 padding: "9px 10px",
                 borderRadius: "10px",
                 border: `1px solid ${filter === entry.key ? "rgba(122,167,255,0.34)" : theme.colors.border}`,
-                background: filter === entry.key ? "rgba(122,167,255,0.10)" : "rgba(255,255,255,0.02)",
+                background: filter === entry.key ? "var(--brand-primary-soft)" : "var(--bg-page)",
                 color: theme.colors.text,
                 cursor: "pointer",
               }}
@@ -346,7 +452,7 @@ export function AgentInboxView({
                 padding: "10px 11px",
                 borderRadius: "10px",
                 border: `1px solid ${selected?.key === item.key ? "rgba(122,167,255,0.34)" : theme.colors.border}`,
-                background: selected?.key === item.key ? "rgba(122,167,255,0.10)" : "rgba(255,255,255,0.02)",
+                background: selected?.key === item.key ? "var(--brand-primary-soft)" : "var(--bg-page)",
                 color: theme.colors.text,
                 cursor: "pointer",
               }}
@@ -372,12 +478,12 @@ export function AgentInboxView({
 
       <Panel
         dense
-        title={selected?.title ?? copy("Inbox detail", "收件箱详情")}
-        eyebrow={copy("Operator chat", "操作员会话")}
+        title={selected?.title ?? copy("Review detail", "审查详情")}
+        eyebrow={copy("Decision surface", "决策面")}
         description={
           selected
-            ? copy("You can approve, reject, or route the issue without leaving this chat surface.", "你可以直接在这个会话面里批准、拒绝或跳转处理，而不用离开当前页面。")
-            : copy("Select an item from the left list.", "从左侧列表选择一项。")
+            ? copy("Approve, reject, resolve, or route the item from the same screen.", "你可以在同一屏里批准、拒绝、处理或转交。")
+            : copy("Select an item from the queue.", "从队列中选择一项。")
         }
       >
         {selected ? (
@@ -393,8 +499,8 @@ export function AgentInboxView({
                   justifySelf: "start",
                 }}
               >
-                <div style={{ color: theme.colors.muted, fontSize: "12px", marginBottom: "6px" }}>{copy("Recruit Agent", "Recruit Agent")} · {formatCompactDate(selected.at)}</div>
-                <div style={{ lineHeight: 1.65 }}>{selected.detail}</div>
+                <div style={{ color: theme.colors.muted, fontSize: "12px", marginBottom: "6px" }}>{copy("AI Review Center", "AI 审查中心")} · {formatCompactDate(selected.at)}</div>
+                <div style={{ lineHeight: 1.65 }}>{presentRecruitingText(selected.detail, copy)}</div>
               </div>
               <div
                 style={{
@@ -402,16 +508,16 @@ export function AgentInboxView({
                   borderRadius: "16px",
                   padding: "12px 13px",
                   border: `1px solid ${theme.colors.border}`,
-                  background: "rgba(255,255,255,0.03)",
+                  background: "var(--bg-page)",
                   justifySelf: "end",
                 }}
               >
                 <div style={{ color: theme.colors.muted, fontSize: "12px", marginBottom: "6px" }}>{copy("Operator options", "操作选项")}</div>
                 <div style={{ lineHeight: 1.65 }}>
                   {selected.kind === "interaction"
-                    ? copy("These options are generated for the current runtime block. Confirm one here, or add your own comment to steer the next attempt.", "这些选项是当前运行时阻塞下生成的可执行选择。你可以直接确认，也可以补充意见来纠偏下一次尝试。")
+                    ? copy("These options are generated for the current review context. Confirm one here, or add your own comment to steer the next attempt.", "这些选项是当前审查上下文下生成的可执行选择。你可以直接确认，也可以补充意见来纠偏下一次尝试。")
                     : selected.kind === "approval"
-                    ? copy("This request can be resolved directly here. Use Evolution only when you need a full diff or history.", "这条请求可以直接在这里处理。只有需要查看完整 diff 或历史版本时才进入 Evolution。")
+                    ? copy("This request can be resolved directly here. Use Evolution only when you need the underlying strategy details or history.", "这条请求可以直接在这里处理。只有需要查看底层策略细节或历史记录时才进入 Evolution。")
                     : selected.kind === "skill"
                       ? copy("The skill is visible and manageable, but structural edits belong in Evolution.", "这个 skill 的状态已经暴露出来，但结构化修改仍建议在 Evolution 中完成。")
                       : copy("This evolution artifact can be reviewed in detail inside Evolution, but you do not have to leave the current IM surface just to see why it appeared.", "这个演进产物可以在 Evolution 中细审，但你不需要为了知道它为什么出现而离开当前 IM 面。")}
@@ -452,7 +558,7 @@ export function AgentInboxView({
                   {copy("Reject here", "直接拒绝")}
                 </button>
                 <button type="button" onClick={() => onOpenEvolution("approvals", selected.approval.id)} style={buttonStyle}>
-                  {copy("Open in Evolution", "去 Evolution 审查")}
+                  {copy("Open strategy view", "打开策略视图")}
                 </button>
               </div>
             ) : null}
@@ -460,7 +566,7 @@ export function AgentInboxView({
             {selected.kind === "artifact" ? (
               <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
                 <button type="button" onClick={() => onOpenEvolution("inbox", selected.artifact.id)} style={buttonStyle}>
-                  {copy("Review in Evolution", "去 Evolution 审查")}
+                  {copy("Review in strategy view", "在策略视图中审查")}
                 </button>
                 {selected.artifact.relatedCandidateId ? (
                   <button type="button" onClick={() => onOpenCandidate(selected.artifact.relatedCandidateId!)} style={buttonStyle}>
@@ -473,7 +579,7 @@ export function AgentInboxView({
             {selected.kind === "skill" ? (
               <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
                 <button type="button" onClick={() => onOpenEvolution("skills", selected.skill.id)} style={buttonStyle}>
-                  {copy("Manage in Evolution", "去 Evolution 管理")}
+                  {copy("Manage in strategy view", "在策略视图中管理")}
                 </button>
               </div>
             ) : null}
@@ -511,29 +617,29 @@ export function AgentInboxView({
             </div>
           </div>
         ) : (
-          <div style={{ color: theme.colors.muted }}>{copy("No pending Agent IM items.", "当前没有待处理的 Agent IM 项。")}</div>
+          <div style={{ color: theme.colors.muted }}>{copy("No pending review items.", "当前没有待处理的审查项。")}</div>
         )}
       </Panel>
 
-      <Panel dense title={copy("Signals", "旁路信号")} eyebrow={copy("Recent context", "最近上下文")} description={copy("Signals stay dense. The right rail is for scope, risk, and fast routing, not for a pile of large cards.", "右侧只放范围、风险和快速跳转，不堆大卡片。")}>
+      <Panel dense title={copy("Context rail", "上下文侧栏")} eyebrow={copy("Recent context", "最近上下文")} description={copy("Keep the right rail short: scope, risk, recent goals, and the latest trace snapshot.", "右侧只保留范围、风险、最近目标和最新 trace 快照。")}>
         <div style={{ display: "grid", gap: "10px" }}>
           {latestGoal ? (
             <div style={{ display: "grid", gap: "6px", fontSize: "13px" }}>
               <div style={{ fontSize: "12px", color: theme.colors.muted, textTransform: "uppercase", letterSpacing: "0.12em" }}>{copy("Latest goal", "最近目标")}</div>
-              <strong>{latestGoal.title}</strong>
-              <div style={{ color: theme.colors.muted, lineHeight: 1.5 }}>{latestGoal.summary ?? latestGoal.goalText}</div>
+              <strong>{presentRecruitingText(latestGoal.title, copy)}</strong>
+              <div style={{ color: theme.colors.muted, lineHeight: 1.5 }}>{presentRecruitingText(latestGoal.summary ?? latestGoal.goalText, copy)}</div>
             </div>
           ) : null}
           {latestTrace ? (
             <div style={{ display: "grid", gap: "6px", fontSize: "13px" }}>
               <div style={{ fontSize: "12px", color: theme.colors.muted, textTransform: "uppercase", letterSpacing: "0.12em" }}>{copy("Latest trace", "最近轨迹")}</div>
-              <div>{latestTrace.summary ?? latestTrace.status}</div>
+              <div>{presentRecruitingText(latestTrace.summary ?? latestTrace.status, copy)}</div>
             </div>
           ) : null}
           {latestGraph?.renderedText ? (
             <div style={{ display: "grid", gap: "6px", fontSize: "12px" }}>
               <div style={{ fontSize: "12px", color: theme.colors.muted, textTransform: "uppercase", letterSpacing: "0.12em" }}>{copy("Graph projection", "执行图投影")}</div>
-              <pre style={{ margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-word", fontSize: "12px", lineHeight: 1.5, color: "rgba(233,239,255,0.78)" }}>
+              <pre style={{ margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-word", fontSize: "12px", lineHeight: 1.5, color: theme.colors.text }}>
                 {latestGraph.renderedText}
               </pre>
             </div>
@@ -575,6 +681,7 @@ export function AgentInboxView({
           </div>
         </div>
       </Panel>
+      </div>
     </div>
   );
 }

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Panel, StatusBadge } from "../../components";
+import { StatusBadge } from "../../components";
 import { useI18n } from "../../lib/i18n";
 import { translateUiToken } from "../../lib/uiText";
 import type { McpPresetTemplateRecord, McpServerRecord, ProviderConfig, SettingsSnapshot } from "../../lib/types";
@@ -57,27 +57,83 @@ interface SettingsViewProps {
   onHealthcheckMcpServer(serverId: string): Promise<void> | void;
 }
 
+const theme = {
+  colors: {
+    background: "var(--bg-page)",
+    panel: "var(--bg-card)",
+    border: "var(--border-line)",
+    text: "var(--text-primary)",
+    muted: "var(--text-secondary)",
+    positive: "var(--success)",
+    warning: "var(--warning)",
+    critical: "var(--danger)",
+    accent: "var(--brand-primary)",
+    accentSoft: "var(--brand-primary-soft)",
+  },
+  radius: {
+    xl: "var(--radius-lg)",
+    lg: "var(--radius-md)",
+    md: "var(--radius-sm)",
+    sm: "var(--radius-xs)",
+  },
+  shadow: "var(--shadow-pop)",
+} as const;
+
+interface PanelProps {
+  title?: string;
+  eyebrow?: string;
+  description?: string;
+  actions?: React.ReactNode;
+  children: React.ReactNode;
+  dense?: boolean;
+}
+
+function Panel({ title, eyebrow, description, actions, children, dense }: PanelProps): JSX.Element {
+  return (
+    <section
+      style={{
+        background: theme.colors.panel,
+        border: `1px solid ${theme.colors.border}`,
+        borderRadius: theme.radius.xl,
+        padding: dense ? "var(--space-4)" : "var(--space-5)",
+      }}
+    >
+      {(title || eyebrow || description || actions) && (
+        <header style={{ display: "flex", alignItems: "start", justifyContent: "space-between", gap: "var(--space-4)", marginBottom: "var(--space-4)" }}>
+          <div style={{ minWidth: 0 }}>
+            {eyebrow ? <div style={{ color: theme.colors.accent, fontSize: "12px", letterSpacing: "0.12em", textTransform: "uppercase", fontWeight: 600 }}>{eyebrow}</div> : null}
+            {title ? <h2 style={{ margin: "6px 0 4px", fontSize: "16px", lineHeight: 1.4, fontWeight: 600, color: theme.colors.text }}>{title}</h2> : null}
+            {description ? <p style={{ margin: 0, color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>{description}</p> : null}
+          </div>
+          {actions ? <div style={{ flexShrink: 0 }}>{actions}</div> : null}
+        </header>
+      )}
+      {children}
+    </section>
+  );
+}
+
 function translateSettingLabel(value: string): string {
   const table: Record<string, string> = {
     "Recruiting scene profile": "招聘场景配置",
-    "Runtime scene profile": "内部执行配置",
-    "Primary OpenAI API": "主 OpenAI 接口",
-    "Fallback Anthropic": "备用 Anthropic 接口",
+    "Runtime scene profile": "招聘策略配置",
+    "Primary OpenAI API": "主模型接口",
+    "Fallback Anthropic": "备用模型接口",
   };
   return table[value] ?? value;
 }
 
 const inputStyle = {
   width: "100%",
-  borderRadius: "12px",
-  border: "1px solid rgba(255,255,255,0.12)",
-  background: "rgba(255,255,255,0.03)",
-  color: "inherit",
-  padding: "10px 12px",
+  borderRadius: theme.radius.sm,
+  border: `1px solid ${theme.colors.border}`,
+  background: theme.colors.panel,
+  color: theme.colors.text,
+  padding: "9px 10px",
 } as const;
 
 const providerHintStyle = {
-  color: "rgba(233,239,255,0.6)",
+  color: theme.colors.muted,
   fontSize: "12px",
   lineHeight: 1.6,
 } as const;
@@ -86,8 +142,8 @@ function providerHostExample(kind: ProviderConfig["kind"]): { example: string; n
   if (kind === "anthropic") {
     return {
       example: "https://api.anthropic.com",
-      noteEn: "Only fill the host/base URL. Do not include a concrete endpoint path. Anthropic stays config-only for now.",
-      noteZh: "只填写 host/base URL，不要填写具体接口路径。Anthropic 结构先保留，内部调用后续再接。",
+      noteEn: "Only fill the host/base URL. Do not include a concrete endpoint path.",
+      noteZh: "只填写 host/base URL，不要填写具体接口路径。",
     };
   }
   return {
@@ -157,17 +213,17 @@ export function SettingsView({
   } as const;
 
   return (
-    <div style={{ display: "grid", gap: "18px", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))" }}>
-      <Panel title={copy("Execution settings", "执行设置")} eyebrow={copy("Local-first", "本地优先")} description={copy("Base workspace settings and safety gates.", "工作台基础设置与安全控制。")}>
+    <div style={{ display: "grid", gap: "var(--space-5)", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", minWidth: 0, background: theme.colors.background, padding: "var(--space-5)", borderRadius: theme.radius.xl }}>
+      <Panel title={copy("Workspace settings", "工作台设置")} eyebrow={copy("Local-first", "本地优先")} description={copy("Core workspace settings and review gates.", "工作台核心设置与复核门控。")}>
         <div style={{ display: "grid", gap: "10px" }}>
-          <StatusBadge tone={draft.desktopApprovalsOnly ? "warning" : "neutral"}>{draft.desktopApprovalsOnly ? copy("desktop approvals only", "仅桌面审批") : copy("mixed approvals", "混合审批")}</StatusBadge>
+          <StatusBadge tone={draft.desktopApprovalsOnly ? "warning" : "neutral"}>{draft.desktopApprovalsOnly ? copy("desktop review only", "仅桌面复核") : copy("mixed review mode", "混合复核模式")}</StatusBadge>
           <StatusBadge tone={draft.intranetEnabled ? "positive" : "neutral"}>{draft.intranetEnabled ? copy("intranet sync enabled", "已启用内网同步") : copy("no intranet sync", "未启用内网同步")}</StatusBadge>
           <StatusBadge tone={draft.skillHealthAutonomyEnabled ? "positive" : "neutral"}>
             {draft.skillHealthAutonomyEnabled
-              ? copy(`skill health autonomy every ${draft.skillHealthAutonomyIntervalSeconds}s`, `skill health 巡检每 ${draft.skillHealthAutonomyIntervalSeconds} 秒执行一次`)
-              : copy("skill health autonomy idle", "skill health 巡检未启用")}
+              ? copy(`review checks every ${draft.skillHealthAutonomyIntervalSeconds}s`, `复核检查每 ${draft.skillHealthAutonomyIntervalSeconds} 秒执行一次`)
+              : copy("review checks idle", "复核检查未启用")}
           </StatusBadge>
-          <div style={{ color: "rgba(233,239,255,0.72)", fontSize: "13px" }}>
+          <div style={{ color: theme.colors.muted, fontSize: "13px" }}>
             {copy("Locale", "语言区域")} {draft.locale} · {copy("Timezone", "时区")} {draft.timezone}
           </div>
           <label style={{ display: "flex", alignItems: "center", gap: "10px", fontSize: "14px" }}>
@@ -184,7 +240,7 @@ export function SettingsView({
               checked={draft.desktopApprovalsOnly}
               onChange={(event) => setDraft((current) => ({ ...current, desktopApprovalsOnly: event.target.checked }))}
             />
-            {copy("Keep approvals desktop-only", "审批仅在桌面端完成")}
+            {copy("Keep reviews desktop-only", "复核仅在桌面端完成")}
           </label>
           <label style={{ display: "flex", alignItems: "center", gap: "10px", fontSize: "14px" }}>
             <input
@@ -197,10 +253,10 @@ export function SettingsView({
                 }))
               }
             />
-            {copy("Enable periodic skill health autonomy", "启用周期性 skill health 巡检")}
+            {copy("Enable periodic review checks", "启用周期性复核检查")}
           </label>
-          <label style={{ display: "grid", gap: "6px", fontSize: "13px", color: "rgba(233,239,255,0.72)" }}>
-            {copy("Skill health autonomy interval (seconds)", "skill health 巡检间隔（秒）")}
+          <label style={{ display: "grid", gap: "6px", fontSize: "13px", color: theme.colors.muted }}>
+            {copy("Review check interval (seconds)", "复核检查间隔（秒）")}
             <input
               type="number"
               min={1}
@@ -216,9 +272,9 @@ export function SettingsView({
           </label>
         </div>
       </Panel>
-      <Panel title={copy("Platform profile", "平台配置")} eyebrow={translateSettingLabel(draft.platform.name)} description={copy("Current platform account and contact policy.", "当前平台账号与联络策略。")}>
+      <Panel title={copy("Recruiting profile", "招聘配置")} eyebrow={translateSettingLabel(draft.platform.name)} description={copy("Current recruiting account and contact policy.", "当前招聘账号与联络策略。")}>
         <div style={{ display: "grid", gap: "10px" }}>
-          <label style={{ display: "grid", gap: "6px", fontSize: "13px", color: "rgba(233,239,255,0.72)" }}>
+          <label style={{ display: "grid", gap: "6px", fontSize: "13px", color: theme.colors.muted }}>
             {copy("Account", "账号")}
             <input
               type="text"
@@ -232,7 +288,7 @@ export function SettingsView({
               style={inputStyle}
             />
           </label>
-          <label style={{ display: "grid", gap: "6px", fontSize: "13px", color: "rgba(233,239,255,0.72)" }}>
+          <label style={{ display: "grid", gap: "6px", fontSize: "13px", color: theme.colors.muted }}>
             {copy("Cooldown days", "冷却天数")}
             <input
               type="number"
@@ -250,8 +306,8 @@ export function SettingsView({
               style={inputStyle}
             />
           </label>
-          <label style={{ display: "grid", gap: "6px", fontSize: "13px", color: "rgba(233,239,255,0.72)" }}>
-            {copy("Max concurrent AgentRuns", "最大并发 AgentRun")}
+          <label style={{ display: "grid", gap: "6px", fontSize: "13px", color: theme.colors.muted }}>
+            {copy("Max concurrent sessions", "最大并发会话")}
             <input
               type="number"
               min={1}
@@ -269,7 +325,7 @@ export function SettingsView({
             />
           </label>
           <StatusBadge tone={draft.platform.allowOutboundMessaging ? "positive" : "warning"}>
-            {draft.platform.allowOutboundMessaging ? copy("outbound messaging on", "允许外发消息") : copy("outbound messaging gated", "外发消息受控")}
+            {draft.platform.allowOutboundMessaging ? copy("outreach enabled", "外联已启用") : copy("outreach gated", "外联受控")}
           </StatusBadge>
           <label style={{ display: "flex", alignItems: "center", gap: "10px", fontSize: "14px" }}>
             <input
@@ -282,16 +338,16 @@ export function SettingsView({
                 }))
               }
             />
-            {copy("Allow outbound messaging", "允许外发消息")}
+            {copy("Allow outreach messages", "允许外联消息")}
           </label>
         </div>
       </Panel>
-      <Panel title={copy("Providers", "模型提供方")} eyebrow={copy("LLM routing", "LLM 路由")} description={copy("Provider preferences and deployment targets.", "模型提供方偏好与部署目标。")}>
+      <Panel title={copy("Model endpoints", "模型接口")} eyebrow={copy("Model routing", "模型路由")} description={copy("Endpoint preferences and local deployment targets.", "接口偏好与本地部署目标。")}>
         <div style={{ display: "grid", gap: "10px" }}>
           {draft.providers.map((provider, index) => {
             const hint = providerHostExample(provider.kind);
             return (
-              <article key={provider.name} style={{ padding: "14px", borderRadius: "16px", background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)" }}>
+              <article key={provider.name} style={{ padding: "14px", borderRadius: theme.radius.xl, background: "var(--bg-page)", border: `1px solid ${theme.colors.border}` }}>
                 <div style={{ display: "flex", justifyContent: "space-between", gap: "8px" }}>
                   <strong>{translateSettingLabel(provider.name)}</strong>
                   <StatusBadge tone={provider.enabled ? "positive" : "neutral"}>{translateUiToken(provider.kind.replace(/-/g, "_"), copy)}</StatusBadge>
@@ -303,9 +359,9 @@ export function SettingsView({
                       checked={provider.enabled}
                       onChange={(event) => updateProvider(index, { enabled: event.target.checked })}
                     />
-                    {copy("Enable this provider", "启用该提供方")}
+                    {copy("Enable this endpoint", "启用该接口")}
                   </label>
-                  <label style={{ display: "grid", gap: "6px", fontSize: "13px", color: "rgba(233,239,255,0.72)" }}>
+                  <label style={{ display: "grid", gap: "6px", fontSize: "13px", color: theme.colors.muted }}>
                     {copy("Model", "模型")}
                     <input
                       type="text"
@@ -315,7 +371,7 @@ export function SettingsView({
                       placeholder={provider.kind === "anthropic" ? "claude-sonnet-4" : "gpt-5.4"}
                     />
                   </label>
-                  <label style={{ display: "grid", gap: "6px", fontSize: "13px", color: "rgba(233,239,255,0.72)" }}>
+                  <label style={{ display: "grid", gap: "6px", fontSize: "13px", color: theme.colors.muted }}>
                     {copy("Host / Base URL", "Host / Base URL")}
                     <input
                       type="text"
@@ -329,8 +385,8 @@ export function SettingsView({
                     </span>
                     <span style={providerHintStyle}>{copy(hint.noteEn, hint.noteZh)}</span>
                   </label>
-                  <label style={{ display: "grid", gap: "6px", fontSize: "13px", color: "rgba(233,239,255,0.72)" }}>
-                    {copy("Request timeout (seconds)", "请求超时（秒）")}
+                  <label style={{ display: "grid", gap: "6px", fontSize: "13px", color: theme.colors.muted }}>
+                    {copy("Response wait time (seconds)", "响应等待时间（秒）")}
                     <input
                       type="number"
                       min={1}
@@ -345,13 +401,13 @@ export function SettingsView({
                     />
                     <span style={providerHintStyle}>
                       {copy(
-                        "Long-running compile and tool-planning calls should have more headroom. Streamed providers keep the connection alive while tokens arrive.",
-                        "长耗时的编译与工具规划调用需要更大的等待预算；支持流式的 provider 会在 token 到达时持续保持连接。",
+                        "Long-running strategy, review, and tool-planning calls should have more headroom. Streamed providers keep the connection alive while tokens arrive.",
+                        "长耗时的策略、复核和工具规划调用需要更大的等待预算；支持流式的 provider 会在 token 到达时持续保持连接。",
                       )}
                     </span>
                   </label>
-                  <label style={{ display: "grid", gap: "6px", fontSize: "13px", color: "rgba(233,239,255,0.72)" }}>
-                    {copy("API key", "API Key")}
+                  <label style={{ display: "grid", gap: "6px", fontSize: "13px", color: theme.colors.muted }}>
+                    {copy("Access key", "访问密钥")}
                     <input
                       type="password"
                       value={provider.apiKey ?? ""}
@@ -374,16 +430,16 @@ export function SettingsView({
         </div>
       </Panel>
       <Panel
-        title={copy("MCP registry", "MCP 注册中心")}
-        eyebrow={copy("External capabilities", "外部能力")}
+        title={copy("Tool connections", "工具连接")}
+        eyebrow={copy("Connected tools", "连接工具")}
         description={copy(
-          "Register real MCP servers, install presets, and expose external tools to the Recruit Agent runtime.",
-          "注册真实 MCP 服务、安装预置模板，并把外部工具暴露给 Recruit Agent runtime。",
+          "Register external tools, install presets, and make them available in the workspace.",
+          "注册外部工具、安装预置模板，并让它们可在工作台中使用。",
         )}
       >
         <div style={{ display: "grid", gap: "14px" }}>
           <div style={{ display: "grid", gap: "8px" }}>
-            <strong style={{ fontSize: "13px" }}>{copy("Preset templates", "预置模板")}</strong>
+            <strong style={{ fontSize: "13px" }}>{copy("Connection templates", "连接模板")}</strong>
             {mcpPresets.map((preset) => (
               <div key={preset.key} style={{ ...compactRowStyle, gridTemplateColumns: "minmax(0, 1.1fr) minmax(0, 1.4fr) auto" }}>
                 <div>
@@ -391,7 +447,7 @@ export function SettingsView({
                   <div style={providerHintStyle}>{preset.description}</div>
                 </div>
                 <div style={providerHintStyle}>
-                  {copy("Endpoint example", "示例地址")} {preset.endpointExample}
+                  {copy("Example endpoint", "示例地址")} {preset.endpointExample}
                 </div>
                 <button
                   type="button"
@@ -410,7 +466,7 @@ export function SettingsView({
             ))}
           </div>
           <div style={{ display: "grid", gap: "8px" }}>
-            <strong style={{ fontSize: "13px" }}>{copy("Registered servers", "已注册服务")}</strong>
+            <strong style={{ fontSize: "13px" }}>{copy("Saved connections", "已保存连接")}</strong>
             {mcpServers.length ? (
               mcpServers.map((server) => {
                 const serverDraft = serverDrafts[server.id] ?? {
@@ -419,7 +475,7 @@ export function SettingsView({
                   enabled: server.enabled,
                 };
                 return (
-                  <div key={server.id} style={{ display: "grid", gap: "8px", padding: "10px 12px", border: "1px solid rgba(255,255,255,0.08)", borderRadius: "14px" }}>
+                  <div key={server.id} style={{ display: "grid", gap: "8px", padding: "10px 12px", border: `1px solid ${theme.colors.border}`, borderRadius: theme.radius.md, background: "var(--bg-page)" }}>
                     <div style={compactRowStyle}>
                       <input
                         type="text"
@@ -454,7 +510,7 @@ export function SettingsView({
                             }))
                           }
                         />
-                        {copy("enabled", "启用")}
+                        {copy("on", "开启")}
                       </label>
                       <StatusBadge tone={server.healthStatus === "healthy" ? "positive" : server.healthStatus === "unhealthy" ? "critical" : "warning"}>
                         {server.healthStatus}
@@ -478,7 +534,7 @@ export function SettingsView({
                           onClick={() => onHealthcheckMcpServer(server.id)}
                           style={{ ...inputStyle, cursor: "pointer", padding: "8px 12px", width: "auto" }}
                         >
-                          {copy("Health check", "健康检查")}
+                          {copy("Check status", "检查状态")}
                         </button>
                         <button
                           type="button"
@@ -497,11 +553,11 @@ export function SettingsView({
                 );
               })
             ) : (
-              <div style={providerHintStyle}>{copy("No MCP servers registered yet.", "当前还没有注册任何 MCP 服务。")}</div>
+              <div style={providerHintStyle}>{copy("No tool connections yet.", "当前还没有工具连接。")}</div>
             )}
           </div>
           <div style={{ display: "grid", gap: "8px" }}>
-            <strong style={{ fontSize: "13px" }}>{copy("Custom MCP server", "新增自定义 MCP")}</strong>
+            <strong style={{ fontSize: "13px" }}>{copy("Add custom connection", "新增自定义连接")}</strong>
             <div style={{ display: "grid", gap: "8px", gridTemplateColumns: "repeat(2, minmax(0, 1fr))" }}>
               <input
                 type="text"
@@ -519,7 +575,7 @@ export function SettingsView({
               />
               <input
                 type="text"
-                placeholder={copy("Endpoint", "连接地址")}
+                placeholder={copy("Connection endpoint", "连接地址")}
                 value={customServer.endpoint}
                 onChange={(event) => setCustomServer((current) => ({ ...current, endpoint: event.target.value }))}
                 style={inputStyle}
@@ -572,7 +628,7 @@ export function SettingsView({
                 }}
                 style={{ ...inputStyle, cursor: "pointer", padding: "8px 12px", width: "auto" }}
               >
-                {copy("Create MCP server", "创建 MCP 服务")}
+                {copy("Add connection", "创建连接")}
               </button>
             </div>
           </div>
@@ -592,13 +648,13 @@ export function SettingsView({
             }
             disabled={saving}
             style={{
-              border: "1px solid rgba(255,255,255,0.12)",
-              borderRadius: "12px",
-              background: "rgba(122,167,255,0.18)",
-              color: "#eef3ff",
+              border: `1px solid ${theme.colors.accent}`,
+              borderRadius: theme.radius.sm,
+              background: "var(--brand-primary-soft)",
+              color: theme.colors.text,
               padding: "10px 14px",
               cursor: "pointer",
-              fontWeight: 700,
+              fontWeight: 600,
             }}
           >
             {saving ? copy("Saving...", "保存中...") : copy("Save settings", "保存设置")}

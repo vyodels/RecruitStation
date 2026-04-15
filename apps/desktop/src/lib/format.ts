@@ -1,9 +1,31 @@
+function parseDateCandidate(value: string): Date | null {
+  const direct = new Date(value);
+  if (!Number.isNaN(direct.getTime())) {
+    return direct;
+  }
+
+  const normalized = value
+    .trim()
+    .replace(" ", "T")
+    .replace(/(\.\d{3})\d+/, "$1");
+
+  const fallback = new Date(normalized);
+  if (!Number.isNaN(fallback.getTime())) {
+    return fallback;
+  }
+
+  return null;
+}
+
 export function formatPercent(value: number): string {
   return `${Math.round(value)}%`;
 }
 
 export function formatCompactDate(iso: string): string {
-  const date = new Date(iso);
+  const date = parseDateCandidate(iso);
+  if (!date) {
+    return iso;
+  }
   return new Intl.DateTimeFormat("en-US", {
     month: "short",
     day: "numeric",
@@ -26,4 +48,3 @@ export function clampText(text: string, limit = 120): string {
   }
   return `${text.slice(0, limit - 1)}...`;
 }
-

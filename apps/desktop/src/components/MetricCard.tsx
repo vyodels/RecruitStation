@@ -1,5 +1,4 @@
 import React from "react";
-import { theme } from "../lib/theme";
 import { StatusBadge } from "./StatusBadge";
 
 interface MetricCardProps {
@@ -12,27 +11,31 @@ interface MetricCardProps {
 }
 
 export function MetricCard({ label, value, delta, tone, caption, onClick }: MetricCardProps): JSX.Element {
+  const interactive = Boolean(onClick);
+
   return (
     <article
+      className={`metric-card${interactive ? " metric-card--clickable" : ""}`}
+      role={interactive ? "button" : undefined}
+      tabIndex={interactive ? 0 : undefined}
       onClick={onClick}
-      style={{
-        background: "rgba(255,255,255,0.03)",
-        border: `1px solid ${theme.colors.border}`,
-        borderRadius: theme.radius.lg,
-        padding: "16px",
-        minWidth: 0,
-        cursor: onClick ? "pointer" : "default",
-        transition: "border-color 120ms ease, transform 120ms ease, background 120ms ease",
-      }}
+      onKeyDown={
+        interactive
+          ? (event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                onClick?.();
+              }
+            }
+          : undefined
+      }
     >
-      <div style={{ display: "flex", justifyContent: "space-between", gap: "12px", alignItems: "start" }}>
-        <div>
-          <div style={{ color: theme.colors.muted, fontSize: "13px" }}>{label}</div>
-          <div style={{ marginTop: "6px", fontSize: "30px", fontWeight: 800, letterSpacing: "-0.04em" }}>{value}</div>
-        </div>
+      <div className="metric-card__header">
+        <div className="metric-card__label">{label}</div>
         <StatusBadge tone={tone === "positive" ? "positive" : tone === "warning" ? "warning" : "neutral"}>{delta}</StatusBadge>
       </div>
-      <div style={{ marginTop: "10px", color: theme.colors.muted, fontSize: "13px" }}>{caption}</div>
+      <div className="metric-card__value">{value}</div>
+      <div className="metric-card__caption">{caption}</div>
     </article>
   );
 }

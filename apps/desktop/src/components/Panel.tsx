@@ -1,6 +1,5 @@
 import React from "react";
-import type { CSSProperties, ReactNode } from "react";
-import { theme } from "../lib/theme";
+import type { ReactNode } from "react";
 
 interface PanelProps {
   title?: string;
@@ -11,25 +10,17 @@ interface PanelProps {
   dense?: boolean;
 }
 
-const shellStyle: CSSProperties = {
-  background: `linear-gradient(180deg, ${theme.colors.panelElevated}, ${theme.colors.panel})`,
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: theme.radius.xl,
-  boxShadow: theme.shadow,
-  padding: "18px",
-};
-
 export function Panel({ title, eyebrow, description, actions, children, dense }: PanelProps): JSX.Element {
   return (
-    <section style={{ ...shellStyle, padding: dense ? "16px" : shellStyle.padding }}>
+    <section className={`panel${dense ? " panel--dense" : ""}`}>
       {(title || eyebrow || description || actions) && (
-        <header style={{ display: "flex", alignItems: "start", justifyContent: "space-between", gap: "16px", marginBottom: "14px" }}>
+        <header className="panel__header">
           <div>
-            {eyebrow ? <div style={{ color: theme.colors.accent, fontSize: "11px", letterSpacing: "0.12em", textTransform: "uppercase" }}>{eyebrow}</div> : null}
-            {title ? <h2 style={{ margin: "6px 0 4px", fontSize: "18px", lineHeight: 1.2 }}>{title}</h2> : null}
-            {description ? <p style={{ margin: 0, color: theme.colors.muted, fontSize: "14px", lineHeight: 1.5 }}>{description}</p> : null}
+            {eyebrow ? <div className="panel__eyebrow">{eyebrow}</div> : null}
+            {title ? <h2 className="panel__title">{title}</h2> : null}
+            {description ? <p className="panel__description">{description}</p> : null}
           </div>
-          {actions ? <div>{actions}</div> : null}
+          {actions ? <div className="panel__actions">{actions}</div> : null}
         </header>
       )}
       {children}

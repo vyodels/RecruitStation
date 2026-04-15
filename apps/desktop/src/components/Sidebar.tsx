@@ -1,7 +1,5 @@
 import React from "react";
-import type { CSSProperties } from "react";
 import { useI18n } from "../lib/i18n";
-import { theme } from "../lib/theme";
 import type { WorkspaceTab } from "../lib/types";
 import { StatusBadge } from "./StatusBadge";
 
@@ -11,67 +9,62 @@ interface SidebarProps {
   counts: Partial<Record<WorkspaceTab, number>>;
 }
 
+const tabs: Array<{ key: WorkspaceTab; labelEn: string; labelZh: string; detailEn: string; detailZh: string }> = [
+  { key: "home", labelEn: "Home", labelZh: "首页", detailEn: "Today's recruiting overview", detailZh: "今日招聘总览" },
+  { key: "candidates", labelEn: "Candidates", labelZh: "候选人", detailEn: "Pipeline, progress, and next action", detailZh: "管道、进度与下一步" },
+  { key: "import-center", labelEn: "Import Center", labelZh: "导入中心", detailEn: "Resume intake and source review", detailZh: "简历导入与来源审查" },
+  { key: "jd-workspace", labelEn: "JD Workspace", labelZh: "JD 工作区", detailEn: "Role scope, workflow, and notes", detailZh: "岗位范围、流程与策略笔记" },
+  { key: "communications", labelEn: "Cockpit", labelZh: "候选人舱", detailEn: "Per-candidate threads and context", detailZh: "按候选人隔离的线程与上下文" },
+  { key: "ai-review", labelEn: "AI Review", labelZh: "AI 审查", detailEn: "Approvals, signals, and follow-ups", detailZh: "审批、信号与待办跟进" },
+  { key: "ai-strategy", labelEn: "AI Strategy", labelZh: "AI 策略", detailEn: "Strategy, memory, and hiring rules", detailZh: "策略、记忆与招聘规则" },
+  { key: "settings", labelEn: "Settings", labelZh: "设置", detailEn: "Accounts, sync, and tool setup", detailZh: "账号、同步与工具配置" },
+];
+
 export function Sidebar({ active, onChange, counts }: SidebarProps): JSX.Element {
   const { copy } = useI18n();
-  const tabs: Array<{ key: WorkspaceTab; label: string; detail: string }> = [
-    { key: "dashboard", label: copy("Overview", "概览"), detail: copy("Candidate progress, approvals, and live signals", "候选人进度、审批和实时信号") },
-    { key: "agent-inbox", label: copy("Agent IM", "Agent IM"), detail: copy("Run-time confirmations, blocked flow, and operator chat", "运行时确认、流程阻塞和操作员会话") },
-    { key: "recruit-agent", label: copy("Recruit Agent", "招聘 Agent"), detail: copy("Role, prompt, blueprint, memory, and skill contracts", "角色、提示词、执行蓝图、memory 和 skill 契约") },
-    { key: "workbench", label: copy("Workbench", "工作台"), detail: copy("Candidate progress and recent agent execution results", "候选人进度与最近的 agent 执行结果") },
-    { key: "communications", label: copy("Communications", "沟通中心"), detail: copy("Candidate-scoped threads and runtime confirmations", "候选人隔离线程与运行时确认") },
-    { key: "evolution", label: copy("Evolution", "自学习/演进"), detail: copy("Skill degradation, compaction, and evolution approvals", "skill 退化、compact 和演进审批") },
-    { key: "settings", label: copy("Settings", "设置"), detail: copy("Provider and sync", "Provider 与同步") },
-  ];
+
   return (
-    <aside
-      style={{
-        width: "248px",
-        padding: "16px",
-        background: "rgba(8,12,26,0.74)",
-        borderRight: `1px solid ${theme.colors.border}`,
-        backdropFilter: "blur(12px)",
-      }}
-    >
-      <div style={{ marginBottom: "16px" }}>
-        <div style={{ color: theme.colors.accent, textTransform: "uppercase", letterSpacing: "0.2em", fontSize: "11px" }}>
-          {copy("Recruit Agent", "Recruit Agent")}
-        </div>
-        <h1 style={{ margin: "8px 0 6px", fontSize: "24px", lineHeight: 1.08 }}>{copy("Recruit Agent Console", "招聘 Agent 控制台")}</h1>
-        <p style={{ margin: 0, color: theme.colors.muted, fontSize: "13px", lineHeight: 1.5 }}>
+    <aside className="workspace-sidebar">
+      <div className="workspace-sidebar__brand">
+        <div className="workspace-sidebar__eyebrow">{copy("Recruiter Workspace", "招聘工作台")}</div>
+        <div className="workspace-sidebar__title">{copy("Candidate Operations", "候选人运营")}</div>
+        <p className="workspace-sidebar__description">
           {copy(
-            "Local-first recruit-agent workspace focused on candidate progress, operator-visible configuration, isolated memory, communications, and skill evolution.",
-            "本地优先的 recruit-agent 工作区，聚焦候选人进度、可外露的 agent 配置、隔离 memory、沟通管理和 skill 演进。",
+            "A recruiter workspace for candidate flow, AI review, and coordinated follow-up.",
+            "面向招聘团队的工作台，用来处理候选人流转、AI 审查和协同跟进。",
           )}
         </p>
       </div>
-      <div style={{ display: "grid", gap: "8px" }}>
+
+      <nav className="workspace-sidebar__nav" aria-label={copy("Workspace sections", "工作区分区")}>
         {tabs.map((tab) => {
           const selected = tab.key === active;
+          const count = counts[tab.key] ?? 0;
+
           return (
             <button
               key={tab.key}
               type="button"
+              className="workspace-sidebar__item"
+              data-active={selected}
               onClick={() => onChange(tab.key)}
-              style={{
-                cursor: "pointer",
-                textAlign: "left",
-                padding: "12px 13px",
-                borderRadius: theme.radius.lg,
-                border: `1px solid ${selected ? "rgba(122,167,255,0.36)" : theme.colors.border}`,
-                background: selected ? "rgba(122,167,255,0.12)" : "rgba(255,255,255,0.02)",
-                color: theme.colors.text,
-                display: "grid",
-                gap: "4px",
-              }}
             >
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px" }}>
-                <span style={{ fontWeight: 700 }}>{tab.label}</span>
-                {counts[tab.key] ? <StatusBadge tone={selected ? "positive" : "neutral"}>{counts[tab.key]}</StatusBadge> : null}
+              <div className="workspace-sidebar__item-main">
+                <span className="workspace-sidebar__item-label">{copy(tab.labelEn, tab.labelZh)}</span>
+                {count > 0 ? <StatusBadge tone={selected ? "positive" : "neutral"}>{count}</StatusBadge> : null}
               </div>
-              <span style={{ color: theme.colors.muted, fontSize: "12px" }}>{tab.detail}</span>
+              <span className="workspace-sidebar__item-detail">{copy(tab.detailEn, tab.detailZh)}</span>
             </button>
           );
         })}
+      </nav>
+
+      <div className="workspace-sidebar__footer">
+        <div className="workspace-sidebar__footer-title">{copy("Local-first collaboration", "本地优先协作")}</div>
+        <div className="workspace-sidebar__footer-row">
+          <StatusBadge tone="positive">{copy("offline-ready", "离线可用")}</StatusBadge>
+          <StatusBadge tone="neutral">{copy("desktop approvals", "桌面确认")}</StatusBadge>
+        </div>
       </div>
     </aside>
   );

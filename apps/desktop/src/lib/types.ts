@@ -1,10 +1,11 @@
 export type WorkspaceTab =
-  | "dashboard"
-  | "agent-inbox"
-  | "recruit-agent"
-  | "workbench"
+  | "home"
+  | "candidates"
+  | "import-center"
+  | "jd-workspace"
   | "communications"
-  | "evolution"
+  | "ai-review"
+  | "ai-strategy"
   | "settings";
 
 export type ProviderKind = "openai-compatible" | "anthropic";

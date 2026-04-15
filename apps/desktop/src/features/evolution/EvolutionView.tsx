@@ -1,8 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Panel, StatusBadge } from "../../components";
+import { StatusBadge } from "../../components";
 import { formatCompactDate } from "../../lib/format";
 import { useI18n } from "../../lib/i18n";
-import { theme } from "../../lib/theme";
 import { translateUiToken } from "../../lib/uiText";
 import type {
   AgentGlobalMemoryRecord,
@@ -44,6 +43,62 @@ interface EvolutionViewProps {
   onOpenCandidate(candidateId: string): void;
 }
 
+const theme = {
+  colors: {
+    background: "var(--bg-page)",
+    panel: "var(--bg-card)",
+    border: "var(--border-line)",
+    text: "var(--text-primary)",
+    muted: "var(--text-secondary)",
+    positive: "var(--success)",
+    warning: "var(--warning)",
+    critical: "var(--danger)",
+    accent: "var(--brand-primary)",
+    accentSoft: "var(--brand-primary-soft)",
+  },
+  radius: {
+    xl: "var(--radius-lg)",
+    lg: "var(--radius-md)",
+    md: "var(--radius-sm)",
+    sm: "var(--radius-xs)",
+  },
+  shadow: "var(--shadow-pop)",
+} as const;
+
+interface PanelProps {
+  title?: string;
+  eyebrow?: string;
+  description?: string;
+  actions?: React.ReactNode;
+  children: React.ReactNode;
+  dense?: boolean;
+}
+
+function Panel({ title, eyebrow, description, actions, children, dense }: PanelProps): JSX.Element {
+  return (
+    <section
+      style={{
+        background: theme.colors.panel,
+        border: `1px solid ${theme.colors.border}`,
+        borderRadius: theme.radius.xl,
+        padding: dense ? "var(--space-4)" : "var(--space-5)",
+      }}
+    >
+      {(title || eyebrow || description || actions) && (
+        <header style={{ display: "flex", alignItems: "start", justifyContent: "space-between", gap: "var(--space-4)", marginBottom: "var(--space-4)" }}>
+          <div style={{ minWidth: 0 }}>
+            {eyebrow ? <div style={{ color: theme.colors.accent, fontSize: "12px", letterSpacing: "0.12em", textTransform: "uppercase", fontWeight: 600 }}>{eyebrow}</div> : null}
+            {title ? <h2 style={{ margin: "6px 0 4px", fontSize: "16px", lineHeight: 1.4, fontWeight: 600, color: theme.colors.text }}>{title}</h2> : null}
+            {description ? <p style={{ margin: 0, color: theme.colors.muted, fontSize: "13px", lineHeight: 1.6 }}>{description}</p> : null}
+          </div>
+          {actions ? <div style={{ flexShrink: 0 }}>{actions}</div> : null}
+        </header>
+      )}
+      {children}
+    </section>
+  );
+}
+
 type SelectionKey = string;
 
 type ListRow = {
@@ -57,9 +112,9 @@ type ListRow = {
 
 const inputStyle: React.CSSProperties = {
   width: "100%",
-  borderRadius: "10px",
+  borderRadius: theme.radius.sm,
   border: `1px solid ${theme.colors.border}`,
-  background: "rgba(7,12,22,0.92)",
+  background: theme.colors.panel,
   color: theme.colors.text,
   padding: "9px 10px",
   fontSize: "13px",
@@ -74,12 +129,12 @@ const textAreaStyle: React.CSSProperties = {
 
 const buttonStyle: React.CSSProperties = {
   border: `1px solid ${theme.colors.border}`,
-  borderRadius: "10px",
-  background: "rgba(255,255,255,0.04)",
+  borderRadius: theme.radius.sm,
+  background: theme.colors.panel,
   color: theme.colors.text,
-  padding: "8px 10px",
+  padding: "8px 12px",
   cursor: "pointer",
-  fontWeight: 700,
+  fontWeight: 600,
 };
 
 function stringifyJson(value: unknown): string {
@@ -295,8 +350,8 @@ export function EvolutionView({
     () => [
       {
         key: "playbook:current",
-        label: copy("Current playbook", "当前执行编排"),
-        detail: copy("Default recruiting playbook and status machine.", "默认招聘执行编排与状态机。"),
+        label: copy("Current workflow blueprint", "当前工作流蓝图"),
+        detail: copy("Default routing and status flow for the review center.", "审查中心默认的路由与状态流。"),
         status: profile?.status ?? "draft",
         updatedAt: profile?.updatedAt ?? new Date().toISOString(),
         tone: toneFromStatus(profile?.status ?? "draft"),
@@ -366,6 +421,16 @@ export function EvolutionView({
   };
 
   const currentRows = rowsBySection[section];
+  const reviewMetrics: Array<{
+    label: string;
+    value: number;
+    tone: "positive" | "neutral" | "warning";
+  }> = [
+    { label: copy("Open decisions", "待处理决策"), value: evolutionApprovals.filter((item) => item.status === "pending").length, tone: evolutionApprovals.some((item) => item.status === "pending") ? "warning" : "positive" },
+    { label: copy("Skill rules", "Skill 规则"), value: skillRows.length, tone: skillRows.length ? "neutral" : "positive" },
+    { label: copy("Memory scopes", "记忆范围"), value: memoryRows.length, tone: memoryRows.length ? "neutral" : "positive" },
+    { label: copy("Review assets", "审查资产"), value: historyRows.length, tone: historyRows.length ? "neutral" : "positive" },
+  ];
 
   useEffect(() => {
     if (requestedItemId) {
@@ -657,38 +722,38 @@ export function EvolutionView({
         },
       });
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : copy("Failed to save playbook.", "保存执行编排失败。"));
+      setErrorMessage(error instanceof Error ? error.message : copy("Failed to save workflow blueprint.", "保存工作流蓝图失败。"));
     }
   };
 
   const sectionMeta: Record<EvolutionSection, { title: string; description: string }> = {
     inbox: {
-      title: copy("Inbox", "收件箱"),
-      description: copy("Pending approvals and evolution drafts that need immediate review.", "需要立即审查的待批事项和演进草稿。"),
+      title: copy("Review queue", "审查队列"),
+      description: copy("Open items that need a decision, a clarification, or a route to another surface.", "需要决策、补充说明或转交到其他页面的事项。"),
     },
     skills: {
-      title: copy("Skills", "Skills"),
-      description: copy("Manage structured skill contracts, metadata, and health drift.", "管理结构化 skill 契约、元数据和健康漂移。"),
+      title: copy("Skill rules", "Skill 规则"),
+      description: copy("Manage skill contracts, metadata, and health drift.", "管理 skill 契约、元数据和健康漂移。"),
     },
     memory: {
-      title: copy("Memory", "Memory"),
-      description: copy("Manage memory policies and isolated memory layers without mixing candidate or JD scopes.", "统一管理记忆策略和隔离记忆层，不串候选人或 JD。"),
+      title: copy("Memory scopes", "记忆范围"),
+      description: copy("Manage scoped memory rules without mixing candidate or JD context.", "管理分域记忆规则，不混入候选人或 JD 上下文。"),
     },
     prompts: {
-      title: copy("Prompts", "提示词"),
-      description: copy("Maintain operator-visible role, tone, boundaries, and prompt slots.", "维护对用户可见的角色、口吻、边界和提示词槽位。"),
+      title: copy("Prompt brief", "提示词简报"),
+      description: copy("Maintain the role, tone, boundaries, and prompt slots visible to operators.", "维护对操作员可见的角色、口吻、边界和提示词槽位。"),
     },
     playbook: {
-      title: copy("Playbooks", "执行编排"),
-      description: copy("Edit the recruiting playbook, status machine, and round templates.", "编辑招聘执行编排、状态机和多轮模板。"),
+      title: copy("Workflow blueprint", "工作流蓝图"),
+      description: copy("Edit the recruiting routing, status machine, and round templates.", "编辑招聘路由、状态机和多轮模板。"),
     },
     approvals: {
-      title: copy("Approvals", "审批"),
-      description: copy("Central review queue for non-candidate approvals.", "面向非候选人事项的集中审批队列。"),
+      title: copy("Policy exceptions", "策略例外"),
+      description: copy("Central review queue for non-candidate decisions and exceptions.", "面向非候选人决策和例外的集中审查队列。"),
     },
     history: {
-      title: copy("History", "历史"),
-      description: copy("Reviewed approvals and applied or rejected evolution artifacts.", "已审查审批以及已应用/已拒绝的演进产物历史。"),
+      title: copy("Review history", "审查历史"),
+      description: copy("Reviewed decisions and applied or rejected strategy artifacts.", "已审查的决策以及已应用/已拒绝的策略产物。"),
     },
   };
 
@@ -713,7 +778,7 @@ export function EvolutionView({
             padding: "9px 10px",
             borderRadius: "10px",
             border: `1px solid ${selectedKey === row.key ? "rgba(122,167,255,0.34)" : theme.colors.border}`,
-            background: selectedKey === row.key ? "rgba(122,167,255,0.10)" : "rgba(255,255,255,0.02)",
+            background: selectedKey === row.key ? "var(--brand-primary-soft)" : "var(--bg-page)",
             color: theme.colors.text,
             cursor: "pointer",
           }}
@@ -742,7 +807,7 @@ export function EvolutionView({
           </div>
           <div style={{ lineHeight: 1.65 }}>{selectedApproval.detail}</div>
           {selectedApproval.payload ? (
-            <pre style={{ margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-word", fontSize: "12px", lineHeight: 1.6, color: "rgba(233,239,255,0.78)" }}>
+            <pre style={{ margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-word", fontSize: "12px", lineHeight: 1.6, color: theme.colors.text }}>
               {JSON.stringify(selectedApproval.payload, null, 2)}
             </pre>
           ) : null}
@@ -945,7 +1010,7 @@ export function EvolutionView({
             <span>{copy("Execution blueprint JSON", "执行蓝图 JSON")}</span>
             <textarea value={playbookJsonDraft} onChange={(event) => setPlaybookJsonDraft(event.target.value)} style={{ ...textAreaStyle, minHeight: "260px" }} />
           </label>
-          <button type="button" onClick={() => void savePlaybook()} style={buttonStyle}>{copy("Save playbook", "保存执行编排")}</button>
+          <button type="button" onClick={() => void savePlaybook()} style={buttonStyle}>{copy("Save workflow blueprint", "保存工作流蓝图")}</button>
         </div>
       );
     }
@@ -954,8 +1019,27 @@ export function EvolutionView({
   };
 
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "220px minmax(0, 1fr) 420px", gap: "16px", minWidth: 0 }}>
-      <Panel dense title={copy("Evolution", "Evolution")} eyebrow={copy("Governance", "治理中心")} description={copy("A dense asset registry for skills, memory, prompts, playbooks, approvals, and history.", "一个高密度治理中心，用来管理 skills、memory、提示词、执行编排、审批和历史版本。")}>
+    <div style={{ display: "grid", gap: "var(--space-5)", minWidth: 0, background: theme.colors.background, padding: "var(--space-5)", borderRadius: theme.radius.xl }}>
+      <Panel
+        title={copy("AI Review Center", "AI 审查中心")}
+        eyebrow={copy("Strategy controls", "策略控制")}
+        description={copy("Review skills, memory, prompts, and workflow blueprints as curated strategy assets.", "把 skills、memory、提示词和工作流蓝图当作可审查的策略资产来管理。")}
+      >
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: "var(--space-3)" }}>
+          {reviewMetrics.map((metric) => (
+            <div key={metric.label} style={{ border: `1px solid ${theme.colors.border}`, borderRadius: theme.radius.xl, padding: "var(--space-4)", background: "linear-gradient(180deg, #FFFFFF 0%, #F9FBFC 100%)" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: "8px", alignItems: "start" }}>
+                <div style={{ color: theme.colors.muted, fontSize: "13px", lineHeight: 1.4 }}>{metric.label}</div>
+                <StatusBadge tone={metric.tone}>{metric.value}</StatusBadge>
+              </div>
+              <div style={{ marginTop: "8px", fontSize: "22px", lineHeight: 1.2, fontWeight: 600, color: theme.colors.text }}>{metric.value}</div>
+            </div>
+          ))}
+        </div>
+      </Panel>
+
+    <div style={{ display: "grid", gridTemplateColumns: "220px minmax(0, 1fr) 420px", gap: "var(--space-4)", minWidth: 0 }}>
+      <Panel dense title={copy("Review map", "审查地图")} eyebrow={copy("Registry", "注册表")} description={copy("Choose the review surface you want to adjust.", "选择你要调整的审查面。")}>
         <div style={{ display: "grid", gap: "6px" }}>
           {([
             ["inbox", inboxRows.length],
@@ -979,7 +1063,7 @@ export function EvolutionView({
                 padding: "9px 10px",
                 borderRadius: "10px",
                 border: `1px solid ${section === key ? "rgba(122,167,255,0.34)" : theme.colors.border}`,
-                background: section === key ? "rgba(122,167,255,0.10)" : "rgba(255,255,255,0.02)",
+                background: section === key ? "var(--brand-primary-soft)" : "var(--bg-page)",
                 color: theme.colors.text,
                 cursor: "pointer",
               }}
@@ -1000,9 +1084,10 @@ export function EvolutionView({
         {renderList()}
       </Panel>
 
-      <Panel dense title={copy("Detail", "详情")} eyebrow={copy("Editor", "编辑区")} description={copy("Inspect and modify the currently selected asset, approval, or history item.", "查看并修改当前选中的资产、审批或历史记录。")}>
+      <Panel dense title={copy("Detail editor", "详情编辑")} eyebrow={copy("Editor", "编辑区")} description={copy("Inspect and modify the selected review item, policy exception, or history item.", "查看并修改当前选中的审查项、策略例外或历史记录。")}>
         {renderDetail()}
       </Panel>
+      </div>
     </div>
   );
 }
