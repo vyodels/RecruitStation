@@ -25,6 +25,7 @@
 
 - [README.md](../README.md)
 - [Plan.md](../Plan.md)
+- [docs/session-handoff-2026-04-15.md](./session-handoff-2026-04-15.md)
 - [apps/desktop/src/features/workspace/DesktopWorkspace.tsx](../apps/desktop/src/features/workspace/DesktopWorkspace.tsx)
 - [apps/desktop/src/features/recruit-agent/RecruitAgentView.tsx](../apps/desktop/src/features/recruit-agent/RecruitAgentView.tsx)
 - [apps/desktop/src/features/communications/CommunicationsView.tsx](../apps/desktop/src/features/communications/CommunicationsView.tsx)
