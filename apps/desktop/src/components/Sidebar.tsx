@@ -16,7 +16,7 @@ export function Sidebar({ active, onChange, counts }: SidebarProps): JSX.Element
   const tabs: Array<{ key: WorkspaceTab; label: string; detail: string }> = [
     { key: "dashboard", label: copy("Overview", "概览"), detail: copy("Candidate progress, approvals, and live signals", "候选人进度、审批和实时信号") },
     { key: "agent-inbox", label: copy("Agent IM", "Agent IM"), detail: copy("Run-time confirmations, blocked flow, and operator chat", "运行时确认、流程阻塞和操作员会话") },
-    { key: "recruit-agent", label: copy("Recruit Agent", "招聘 Agent"), detail: copy("Role, prompt, workflow, memory, and skill contracts", "角色、提示词、工作流、memory 和 skill 契约") },
+    { key: "recruit-agent", label: copy("Recruit Agent", "招聘 Agent"), detail: copy("Role, prompt, blueprint, memory, and skill contracts", "角色、提示词、执行蓝图、memory 和 skill 契约") },
     { key: "workbench", label: copy("Workbench", "工作台"), detail: copy("Candidate progress and recent agent execution results", "候选人进度与最近的 agent 执行结果") },
     { key: "communications", label: copy("Communications", "沟通中心"), detail: copy("Candidate-scoped threads and runtime confirmations", "候选人隔离线程与运行时确认") },
     { key: "evolution", label: copy("Evolution", "自学习/演进"), detail: copy("Skill degradation, compaction, and evolution approvals", "skill 退化、compact 和演进审批") },

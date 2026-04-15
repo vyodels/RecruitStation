@@ -76,7 +76,7 @@ const emptySummary: DashboardSummary = {
   timeline: [],
   alerts: [],
   candidates: [],
-  workflows: [],
+  playbooks: [],
   skills: [],
   approvals: [],
   agent: emptyAgent,

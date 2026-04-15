@@ -12,7 +12,7 @@ import type {
   SkillRecord,
 } from "../../lib/types";
 
-type RecruitAgentTab = "profile" | "workflow" | "context" | "memory" | "skills";
+type RecruitAgentTab = "profile" | "blueprint" | "context" | "memory" | "skills";
 type MemoryTargetKey = `candidate:${string}` | `job:${string}` | "global";
 
 interface RecruitAgentViewProps {
@@ -143,7 +143,7 @@ export function RecruitAgentView({
   const [agentWeightsDraft, setAgentWeightsDraft] = useState("{}");
   const [runTypeOverridesDraft, setRunTypeOverridesDraft] = useState("{}");
 
-  const [workflowJsonDraft, setWorkflowJsonDraft] = useState("{}");
+  const [playbookJsonDraft, setPlaybookJsonDraft] = useState("{}");
   const [candidateCompactThreshold, setCandidateCompactThreshold] = useState("1000000");
   const [jobCompactThreshold, setJobCompactThreshold] = useState("1000000");
   const [globalCompactThreshold, setGlobalCompactThreshold] = useState("1000000");
@@ -181,8 +181,8 @@ export function RecruitAgentView({
     const candidateLanePolicy = ((contextLanes.candidate as Record<string, unknown> | undefined) ?? {}) as Record<string, unknown>;
     const agentLanePolicy = ((contextLanes.agent as Record<string, unknown> | undefined) ?? {}) as Record<string, unknown>;
     const memoryPolicy = (profile.memoryPolicy ?? {}) as Record<string, unknown>;
-    const workflowDefinition = (profile.workflowDefinition ?? {}) as Record<string, unknown>;
-    const statusMachine = (workflowDefinition.status_machine ?? {}) as Record<string, unknown>;
+    const playbookBlueprint = (profile.playbookBlueprint ?? {}) as Record<string, unknown>;
+    const statusMachine = (playbookBlueprint.status_machine ?? {}) as Record<string, unknown>;
     setDescriptionDraft(profile.description ?? "");
     setIdentityDraft(String(roleDefinition.identity ?? ""));
     setPositioningDraft(String(roleDefinition.positioning ?? ""));
@@ -206,7 +206,7 @@ export function RecruitAgentView({
     setAgentMustIncludeDraft(arrayToLines(agentLanePolicy.must_include));
     setAgentWeightsDraft(stringifyJson(agentLanePolicy.default_weights));
     setRunTypeOverridesDraft(stringifyJson(contextPolicy.run_type_overrides));
-    setWorkflowJsonDraft(stringifyJson(profile.workflowDefinition));
+    setPlaybookJsonDraft(stringifyJson(profile.playbookBlueprint));
     setCandidateCompactThreshold(String(((memoryPolicy.candidate_memory as Record<string, unknown> | undefined)?.compact_threshold ?? 1_000_000)));
     setJobCompactThreshold(String(((memoryPolicy.job_memory as Record<string, unknown> | undefined)?.compact_threshold ?? 1_000_000)));
     setGlobalCompactThreshold(String(((memoryPolicy.agent_global_memory as Record<string, unknown> | undefined)?.compact_threshold ?? 1_000_000)));
@@ -292,30 +292,30 @@ export function RecruitAgentView({
     return record ? { kind: "job" as const, record } : null;
   }, [candidateMemories, globalMemory, jobMemories, selectedMemoryKey]);
 
-  const parsedWorkflowDraft = useMemo(() => {
+  const parsedPlaybookDraft = useMemo(() => {
     try {
-      return parseJsonDraft("workflowDefinition", workflowJsonDraft);
+      return parseJsonDraft("playbookBlueprint", playbookJsonDraft);
     } catch {
       return null;
     }
-  }, [workflowJsonDraft]);
+  }, [playbookJsonDraft]);
 
-  const workflowStageGroups = useMemo(
-    () => (parsedWorkflowDraft && Array.isArray(parsedWorkflowDraft.stage_groups) ? (parsedWorkflowDraft.stage_groups as Array<Record<string, unknown>>) : []),
-    [parsedWorkflowDraft],
+  const blueprintStageGroups = useMemo(
+    () => (parsedPlaybookDraft && Array.isArray(parsedPlaybookDraft.stage_groups) ? (parsedPlaybookDraft.stage_groups as Array<Record<string, unknown>>) : []),
+    [parsedPlaybookDraft],
   );
 
-  const workflowNodes = useMemo(
+  const blueprintStages = useMemo(
     () => {
-      if (!parsedWorkflowDraft) {
+      if (!parsedPlaybookDraft) {
         return [];
       }
-      if (Array.isArray(parsedWorkflowDraft.adaptive_stages)) {
-        return parsedWorkflowDraft.adaptive_stages as Array<Record<string, unknown>>;
+      if (Array.isArray(parsedPlaybookDraft.adaptive_stages)) {
+        return parsedPlaybookDraft.adaptive_stages as Array<Record<string, unknown>>;
       }
-      return Array.isArray(parsedWorkflowDraft.nodes) ? (parsedWorkflowDraft.nodes as Array<Record<string, unknown>>) : [];
+      return Array.isArray(parsedPlaybookDraft.nodes) ? (parsedPlaybookDraft.nodes as Array<Record<string, unknown>>) : [];
     },
-    [parsedWorkflowDraft],
+    [parsedPlaybookDraft],
   );
 
   useEffect(() => {
@@ -348,7 +348,7 @@ export function RecruitAgentView({
   const handleSaveProfile = async () => {
     setErrorMessage(undefined);
     try {
-      const advancedWorkflow = parseJsonDraft("workflowDefinition", workflowJsonDraft);
+      const advancedBlueprint = parseJsonDraft("playbookBlueprint", playbookJsonDraft);
       await saveProfile({
         description: descriptionDraft,
         roleDefinition: {
@@ -368,10 +368,10 @@ export function RecruitAgentView({
         dashboardConfig: parseJsonDraft("dashboardConfig", dashboardDraft),
         channelConfig: parseJsonDraft("channelConfig", channelDraft),
         agentMetadata: parseJsonDraft("agentMetadata", metadataDraft),
-        workflowDefinition: {
-          ...advancedWorkflow,
+        playbookBlueprint: {
+          ...advancedBlueprint,
           status_machine: {
-            ...(((advancedWorkflow.status_machine as Record<string, unknown> | undefined) ?? {})),
+            ...(((advancedBlueprint.status_machine as Record<string, unknown> | undefined) ?? {})),
             default_statuses: linesToArray(defaultStatusesDraft),
           },
         },
@@ -501,16 +501,16 @@ export function RecruitAgentView({
     await onCompactGlobalMemory();
   };
 
-  const updateWorkflowDraft = (updater: (draft: Record<string, unknown>) => void) => {
-    const parsed = parseJsonDraft("workflowDefinition", workflowJsonDraft);
+  const updatePlaybookDraft = (updater: (draft: Record<string, unknown>) => void) => {
+    const parsed = parseJsonDraft("playbookBlueprint", playbookJsonDraft);
     updater(parsed);
-    setWorkflowJsonDraft(stringifyJson(parsed));
+    setPlaybookJsonDraft(stringifyJson(parsed));
     const statusMachine = (parsed.status_machine ?? {}) as Record<string, unknown>;
     setDefaultStatusesDraft(Array.isArray(statusMachine.default_statuses) ? statusMachine.default_statuses.map((item) => String(item)).join("\n") : "");
   };
 
   const updateStageGroupField = (groupIndex: number, field: string, value: unknown) => {
-    updateWorkflowDraft((draft) => {
+    updatePlaybookDraft((draft) => {
       const groups = Array.isArray(draft.stage_groups) ? [...(draft.stage_groups as Array<Record<string, unknown>>)] : [];
       const group = { ...(groups[groupIndex] ?? {}) };
       group[field] = value;
@@ -520,7 +520,7 @@ export function RecruitAgentView({
   };
 
   const updateStageField = (groupIndex: number, stageIndex: number, field: string, value: unknown) => {
-    updateWorkflowDraft((draft) => {
+    updatePlaybookDraft((draft) => {
       const groups = Array.isArray(draft.stage_groups) ? [...(draft.stage_groups as Array<Record<string, unknown>>)] : [];
       const group = { ...(groups[groupIndex] ?? {}) };
       const stages = Array.isArray(group.stages) ? [...(group.stages as Array<Record<string, unknown>>)] : [];
@@ -534,7 +534,7 @@ export function RecruitAgentView({
   };
 
   const addStageToGroup = (groupIndex: number) => {
-    updateWorkflowDraft((draft) => {
+    updatePlaybookDraft((draft) => {
       const groups = Array.isArray(draft.stage_groups) ? [...(draft.stage_groups as Array<Record<string, unknown>>)] : [];
       const group = { ...(groups[groupIndex] ?? {}) };
       const stages = Array.isArray(group.stages) ? [...(group.stages as Array<Record<string, unknown>>)] : [];
@@ -546,7 +546,7 @@ export function RecruitAgentView({
   };
 
   const updateInterviewRoundField = (groupIndex: number, roundIndex: number, field: string, value: unknown) => {
-    updateWorkflowDraft((draft) => {
+    updatePlaybookDraft((draft) => {
       const groups = Array.isArray(draft.stage_groups) ? [...(draft.stage_groups as Array<Record<string, unknown>>)] : [];
       const group = { ...(groups[groupIndex] ?? {}) };
       const rounds = Array.isArray(group.default_rounds) ? [...(group.default_rounds as Array<Record<string, unknown>>)] : [];
@@ -559,8 +559,8 @@ export function RecruitAgentView({
     });
   };
 
-  const updateWorkflowNodeField = (nodeIndex: number, field: string, value: unknown) => {
-    updateWorkflowDraft((draft) => {
+  const updateBlueprintStageField = (nodeIndex: number, field: string, value: unknown) => {
+    updatePlaybookDraft((draft) => {
       const nodes = Array.isArray(draft.nodes) ? [...(draft.nodes as Array<Record<string, unknown>>)] : [];
       const node = { ...(nodes[nodeIndex] ?? {}) };
       node[field] = value;
@@ -650,7 +650,7 @@ export function RecruitAgentView({
     </div>
   );
 
-  const workflowContent = (
+  const blueprintContent = (
     <div style={{ display: "grid", gap: "18px" }}>
       <Panel
         title={copy("Execution blueprint and state machine", "执行蓝图与状态机")}
@@ -672,7 +672,7 @@ export function RecruitAgentView({
                 <span>{copy("Stage label", "阶段标题")}</span>
                 <span>{copy("Action", "操作")}</span>
               </div>
-              {workflowStageGroups.map((group, groupIndex) => {
+              {blueprintStageGroups.map((group, groupIndex) => {
                 const stages = Array.isArray(group.stages) ? (group.stages as Array<Record<string, unknown>>) : [];
                 const rounds = Array.isArray(group.default_rounds) ? (group.default_rounds as Array<Record<string, unknown>>) : [];
                 return (
@@ -708,7 +708,7 @@ export function RecruitAgentView({
                   </div>
                 );
               })}
-              {!workflowStageGroups.length ? <div style={{ color: theme.colors.muted, fontSize: "13px" }}>{copy("Blueprint JSON is invalid or missing stage groups.", "执行蓝图 JSON 无效，或缺少阶段组。")}</div> : null}
+              {!blueprintStageGroups.length ? <div style={{ color: theme.colors.muted, fontSize: "13px" }}>{copy("Blueprint JSON is invalid or missing stage groups.", "执行蓝图 JSON 无效，或缺少阶段组。")}</div> : null}
             </div>
           </div>
           <div style={{ display: "grid", gap: "10px" }}>
@@ -718,14 +718,14 @@ export function RecruitAgentView({
               <span>{copy("Requires skill", "依赖 skill")}</span>
               <span>{copy("Purpose / next stage", "用途 / 下一步")}</span>
             </div>
-            {workflowNodes.map((node, nodeIndex) => {
+            {blueprintStages.map((node, nodeIndex) => {
               const transitions = Array.isArray(node.transitions) ? (node.transitions as Array<Record<string, unknown>>) : [];
               return (
                 <div key={String(node.id ?? nodeIndex)} style={{ display: "grid", gridTemplateColumns: "180px 140px 120px minmax(0, 1fr)", gap: "8px", alignItems: "center" }}>
-                  <input value={String(node.name ?? "")} onChange={(event) => updateWorkflowNodeField(nodeIndex, "name", event.target.value)} style={inputStyle} />
-                  <input value={String(node.task_type ?? "")} onChange={(event) => updateWorkflowNodeField(nodeIndex, "task_type", event.target.value)} style={inputStyle} />
+                  <input value={String(node.name ?? "")} onChange={(event) => updateBlueprintStageField(nodeIndex, "name", event.target.value)} style={inputStyle} />
+                  <input value={String(node.task_type ?? "")} onChange={(event) => updateBlueprintStageField(nodeIndex, "task_type", event.target.value)} style={inputStyle} />
                   <label style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "13px" }}>
-                    <input type="checkbox" checked={Boolean(node.requires_skill ?? false)} onChange={(event) => updateWorkflowNodeField(nodeIndex, "requires_skill", event.target.checked)} />
+                    <input type="checkbox" checked={Boolean(node.requires_skill ?? false)} onChange={(event) => updateBlueprintStageField(nodeIndex, "requires_skill", event.target.checked)} />
                     <span>{Boolean(node.requires_skill ?? false) ? copy("Yes", "是") : copy("No", "否")}</span>
                   </label>
                   <div style={{ color: theme.colors.muted, fontSize: "12px", lineHeight: 1.5 }}>
@@ -743,7 +743,7 @@ export function RecruitAgentView({
             <summary style={{ cursor: "pointer", color: theme.colors.muted, fontSize: "12px" }}>{copy("Advanced JSON editor", "高级 JSON 编辑器")}</summary>
             <label style={{ display: "grid", gap: "6px", marginTop: "10px" }}>
               <span>{copy("Execution blueprint JSON", "执行蓝图 JSON")}</span>
-              <textarea value={workflowJsonDraft} onChange={(event) => setWorkflowJsonDraft(event.target.value)} style={{ ...textAreaStyle, minHeight: "260px" }} />
+              <textarea value={playbookJsonDraft} onChange={(event) => setPlaybookJsonDraft(event.target.value)} style={{ ...textAreaStyle, minHeight: "260px" }} />
             </label>
           </details>
         </div>
@@ -1050,7 +1050,7 @@ export function RecruitAgentView({
       <TopTabPage
         items={[
           { key: "profile", label: copy("Profile", "身份设定") },
-          { key: "workflow", label: copy("Blueprint", "执行蓝图") },
+          { key: "blueprint", label: copy("Blueprint", "执行蓝图") },
           { key: "context", label: copy("Context", "上下文策略") },
           { key: "memory", label: copy("Memory", "记忆管理") },
           { key: "skills", label: copy("Skills", "Skill 管理") },
@@ -1059,7 +1059,7 @@ export function RecruitAgentView({
         onChange={(next) => setTab(next as RecruitAgentTab)}
       >
         {tab === "profile" ? profileContent : null}
-        {tab === "workflow" ? workflowContent : null}
+        {tab === "blueprint" ? blueprintContent : null}
         {tab === "context" ? contextContent : null}
         {tab === "memory" ? memoryContent : null}
         {tab === "skills" ? skillContent : null}

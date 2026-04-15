@@ -48,10 +48,9 @@ from scene_pilot.models import (
     TaskSpec,
     TaskQueueItem,
     TalentPoolSyncRecord,
-    Workflow,
-    WorkflowPatch,
-    WorkflowTemplate,
-    WorkflowRun,
+    Playbook,
+    PlaybookPatch,
+    PlaybookVersion,
 )
 from scene_pilot.schemas import AppSettingsRead, MetricsSummary
 
@@ -105,11 +104,11 @@ class BaseRepository(Generic[ModelT]):
         return instance
 
 
-class WorkflowRepository(BaseRepository[Workflow]):
-    model = Workflow
+class PlaybookRepository(BaseRepository[Playbook]):
+    model = Playbook
 
-    def active(self) -> list[Workflow]:
-        stmt = select(Workflow).where(Workflow.status == "active").order_by(Workflow.updated_at.desc(), Workflow.id.asc())
+    def active(self) -> list[Playbook]:
+        stmt = select(Playbook).where(Playbook.status == "active").order_by(Playbook.updated_at.desc(), Playbook.id.asc())
         return list(self.session.scalars(stmt).all())
 
 
@@ -346,22 +345,6 @@ class EvolutionArtifactRepository(BaseRepository[EvolutionArtifact]):
             stmt = stmt.where(EvolutionArtifact.status == status)
         stmt = stmt.order_by(EvolutionArtifact.created_at.desc(), EvolutionArtifact.id.desc()).offset(offset).limit(limit)
         return list(self.session.scalars(stmt).all())
-
-
-class WorkflowRunRepository(BaseRepository[WorkflowRun]):
-    model = WorkflowRun
-
-    def active_for_candidate(self, workflow_id: str, candidate_id: str | None) -> WorkflowRun | None:
-        stmt = (
-            select(WorkflowRun)
-            .where(
-                WorkflowRun.workflow_id == workflow_id,
-                WorkflowRun.candidate_id == candidate_id,
-                WorkflowRun.status.in_(("running", "blocked")),
-            )
-            .order_by(WorkflowRun.created_at.desc(), WorkflowRun.id.desc())
-        )
-        return self.session.scalars(stmt).first()
 
 
 class RecruitAgentProfileRepository(BaseRepository[RecruitAgentProfile]):
@@ -786,18 +769,18 @@ class TaskSpecRepository(BaseRepository[TaskSpec]):
         return list(self.session.scalars(stmt).all())
 
 
-class WorkflowTemplateRepository(BaseRepository[WorkflowTemplate]):
-    model = WorkflowTemplate
+class PlaybookVersionRepository(BaseRepository[PlaybookVersion]):
+    model = PlaybookVersion
 
-    def by_template_key(self, template_key: str) -> WorkflowTemplate | None:
-        stmt = select(WorkflowTemplate).where(WorkflowTemplate.template_key == template_key)
+    def by_template_key(self, template_key: str) -> PlaybookVersion | None:
+        stmt = select(PlaybookVersion).where(PlaybookVersion.template_key == template_key)
         return self.session.scalars(stmt).first()
 
-    def active(self, limit: int = 100, offset: int = 0) -> list[WorkflowTemplate]:
+    def active(self, limit: int = 100, offset: int = 0) -> list[PlaybookVersion]:
         stmt = (
-            select(WorkflowTemplate)
-            .where(WorkflowTemplate.status == "active")
-            .order_by(WorkflowTemplate.updated_at.desc(), WorkflowTemplate.id.asc())
+            select(PlaybookVersion)
+            .where(PlaybookVersion.status == "active")
+            .order_by(PlaybookVersion.updated_at.desc(), PlaybookVersion.id.asc())
             .offset(offset)
             .limit(limit)
         )
@@ -895,38 +878,38 @@ class EnvironmentSnapshotRepository(BaseRepository[EnvironmentSnapshot]):
         return self.session.scalars(stmt).first()
 
 
-class WorkflowPatchRepository(BaseRepository[WorkflowPatch]):
-    model = WorkflowPatch
+class PlaybookPatchRepository(BaseRepository[PlaybookPatch]):
+    model = PlaybookPatch
 
-    def pending_review(self, limit: int = 100, offset: int = 0) -> list[WorkflowPatch]:
+    def pending_review(self, limit: int = 100, offset: int = 0) -> list[PlaybookPatch]:
         stmt = (
-            select(WorkflowPatch)
-            .where(WorkflowPatch.status == "pending_review")
-            .order_by(WorkflowPatch.created_at.asc(), WorkflowPatch.id.asc())
+            select(PlaybookPatch)
+            .where(PlaybookPatch.status == "pending_review")
+            .order_by(PlaybookPatch.created_at.asc(), PlaybookPatch.id.asc())
             .offset(offset)
             .limit(limit)
         )
         return list(self.session.scalars(stmt).all())
 
-    def for_template(self, workflow_template_id: str, limit: int = 50) -> list[WorkflowPatch]:
+    def for_template(self, playbook_version_id: str, limit: int = 50) -> list[PlaybookPatch]:
         stmt = (
-            select(WorkflowPatch)
-            .where(WorkflowPatch.template_id == workflow_template_id)
-            .order_by(WorkflowPatch.created_at.desc(), WorkflowPatch.id.desc())
+            select(PlaybookPatch)
+            .where(PlaybookPatch.template_id == playbook_version_id)
+            .order_by(PlaybookPatch.created_at.desc(), PlaybookPatch.id.desc())
             .limit(limit)
         )
         return list(self.session.scalars(stmt).all())
 
     def mark_review(
         self,
-        patch: WorkflowPatch,
+        patch: PlaybookPatch,
         *,
         status: str,
         reviewer: str | None = None,
         reason: str | None = None,
         rationale: str | None = None,
         applied_at: Any | None = None,
-    ) -> WorkflowPatch:
+    ) -> PlaybookPatch:
         patch.status = status
         patch.reviewed_by = reviewer
         patch.reviewed_at = utcnow()
@@ -1384,7 +1367,7 @@ class MetricsRepository:
 
     def summary(self) -> MetricsSummary:
         candidate_count = self.session.scalar(select(func.count()).select_from(Candidate)) or 0
-        workflow_count = self.session.scalar(select(func.count()).select_from(Workflow)) or 0
+        playbook_count = self.session.scalar(select(func.count()).select_from(Playbook)) or 0
         skill_count = self.session.scalar(select(func.count()).select_from(Skill)) or 0
         approval_count = self.session.scalar(select(func.count()).select_from(ApprovalItem)) or 0
         pending_approval_count = self.session.scalar(
@@ -1401,7 +1384,7 @@ class MetricsRepository:
         }
         return MetricsSummary(
             candidate_count=candidate_count,
-            workflow_count=workflow_count,
+            playbook_count=playbook_count,
             skill_count=skill_count,
             approval_count=approval_count,
             pending_approval_count=pending_approval_count,

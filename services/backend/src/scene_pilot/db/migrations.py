@@ -94,8 +94,8 @@ def _create_general_runtime_indexes(connection: Connection) -> None:
         "task_specs": (
             "CREATE INDEX IF NOT EXISTS ix_task_specs_status_domain ON task_specs (status, domain)",
         ),
-        "workflow_templates": (
-            "CREATE INDEX IF NOT EXISTS ix_workflow_templates_status_domain ON workflow_templates (status, domain)",
+        "playbook_versions": (
+            "CREATE INDEX IF NOT EXISTS ix_playbook_versions_status_domain ON playbook_versions (status, domain)",
         ),
         "execution_plans": (
             "CREATE INDEX IF NOT EXISTS ix_execution_plans_status_mode ON execution_plans (status, mode)",
@@ -108,9 +108,9 @@ def _create_general_runtime_indexes(connection: Connection) -> None:
         "environment_snapshots": (
             "CREATE INDEX IF NOT EXISTS ix_environment_snapshots_episode_page_type ON environment_snapshots (execution_episode_id, page_type)",
         ),
-        "workflow_patches": (
-            "CREATE INDEX IF NOT EXISTS ix_workflow_patches_status_kind ON workflow_patches (status, patch_kind)",
-            "CREATE INDEX IF NOT EXISTS ix_workflow_patches_template_created_at ON workflow_patches (template_id, created_at)",
+        "playbook_patches": (
+            "CREATE INDEX IF NOT EXISTS ix_playbook_patches_status_kind ON playbook_patches (status, patch_kind)",
+            "CREATE INDEX IF NOT EXISTS ix_playbook_patches_template_created_at ON playbook_patches (template_id, created_at)",
         ),
     }
     for table_name, statements in statements_by_table.items():
@@ -945,6 +945,269 @@ def _rename_candidate_stage_column(connection: Connection) -> None:
         connection.execute(text("ALTER TABLE candidates RENAME COLUMN current_workflow_node TO current_stage_key"))
 
 
+def _cut_over_playbook_storage(connection: Connection) -> None:
+    tables = {
+        row[0]
+        for row in connection.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()
+    }
+
+    if "recruit_agent_profiles" in tables:
+        columns = {
+            row[1]
+            for row in connection.execute(text("PRAGMA table_info(recruit_agent_profiles)")).fetchall()
+        }
+        if "playbook_blueprint" not in columns and "workflow_definition" in columns:
+            connection.execute(
+                text("ALTER TABLE recruit_agent_profiles RENAME COLUMN workflow_definition TO playbook_blueprint")
+            )
+
+    if "workflow_runs" in tables:
+        connection.execute(text("DROP TABLE workflow_runs"))
+
+    if "workflows" not in tables:
+        return
+
+    if "playbooks" not in tables:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE playbooks (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    scope_kind TEXT NOT NULL DEFAULT 'global',
+                    scope_ref TEXT,
+                    blueprint TEXT NOT NULL DEFAULT '{}',
+                    strategy_defaults TEXT NOT NULL DEFAULT '{}',
+                    context_overrides TEXT NOT NULL DEFAULT '{}',
+                    status TEXT NOT NULL DEFAULT 'draft',
+                    version INTEGER NOT NULL DEFAULT 1,
+                    playbook_metadata TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+        )
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_playbooks_name ON playbooks (name)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_playbooks_scope_kind ON playbooks (scope_kind)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_playbooks_scope_ref ON playbooks (scope_ref)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_playbooks_status ON playbooks (status)"))
+
+    playbook_count = connection.execute(text("SELECT COUNT(*) FROM playbooks")).scalar_one()
+    if int(playbook_count or 0) == 0:
+        rows = connection.execute(
+            text(
+                """
+                SELECT id, name, jd_id, config, status, version, created_at, updated_at
+                FROM workflows
+                """
+            )
+        ).fetchall()
+        for row in rows:
+            config_payload = row[3]
+            if isinstance(config_payload, str):
+                try:
+                    config = json.loads(config_payload)
+                except json.JSONDecodeError:
+                    config = {}
+            elif isinstance(config_payload, dict):
+                config = dict(config_payload)
+            else:
+                config = {}
+            description = config.get("description")
+            strategy_defaults = config.get("strategy_defaults") if isinstance(config.get("strategy_defaults"), dict) else {}
+            context_overrides = config.get("context_overrides") if isinstance(config.get("context_overrides"), dict) else {}
+            playbook_metadata = config.get("metadata") if isinstance(config.get("metadata"), dict) else {}
+            scope_ref = row[2]
+            scope_kind = "jd" if scope_ref else "global"
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO playbooks (
+                        id,
+                        name,
+                        description,
+                        scope_kind,
+                        scope_ref,
+                        blueprint,
+                        strategy_defaults,
+                        context_overrides,
+                        status,
+                        version,
+                        playbook_metadata,
+                        created_at,
+                        updated_at
+                    ) VALUES (
+                        :id,
+                        :name,
+                        :description,
+                        :scope_kind,
+                        :scope_ref,
+                        :blueprint,
+                        :strategy_defaults,
+                        :context_overrides,
+                        :status,
+                        :version,
+                        :playbook_metadata,
+                        :created_at,
+                        :updated_at
+                    )
+                    """
+                ),
+                {
+                    "id": row[0],
+                    "name": row[1],
+                    "description": description,
+                    "scope_kind": scope_kind,
+                    "scope_ref": scope_ref,
+                    "blueprint": json.dumps(config, ensure_ascii=False),
+                    "strategy_defaults": json.dumps(strategy_defaults, ensure_ascii=False),
+                    "context_overrides": json.dumps(context_overrides, ensure_ascii=False),
+                    "status": row[4],
+                    "version": row[5],
+                    "playbook_metadata": json.dumps(playbook_metadata, ensure_ascii=False),
+                    "created_at": row[6],
+                    "updated_at": row[7],
+                },
+            )
+
+    connection.execute(text("DROP TABLE workflows"))
+
+
+def _cut_over_playbook_version_storage(connection: Connection) -> None:
+    tables = {
+        row[0]
+        for row in connection.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()
+    }
+
+    if "workflow_templates" in tables:
+        if "playbook_versions" not in tables:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE playbook_versions (
+                        id TEXT PRIMARY KEY NOT NULL,
+                        template_key TEXT NOT NULL,
+                        name TEXT NOT NULL,
+                        domain TEXT NOT NULL DEFAULT 'general',
+                        status TEXT NOT NULL DEFAULT 'draft',
+                        version INTEGER NOT NULL DEFAULT 1,
+                        source_task_spec_id TEXT,
+                        template_body TEXT NOT NULL DEFAULT '{}',
+                        activation_strategy TEXT NOT NULL DEFAULT '{}',
+                        validation_summary TEXT,
+                        last_validated_at TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                    """
+                )
+            )
+            connection.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_playbook_versions_template_key ON playbook_versions (template_key)"))
+            connection.execute(text("CREATE INDEX IF NOT EXISTS ix_playbook_versions_name ON playbook_versions (name)"))
+            connection.execute(text("CREATE INDEX IF NOT EXISTS ix_playbook_versions_domain ON playbook_versions (domain)"))
+            connection.execute(text("CREATE INDEX IF NOT EXISTS ix_playbook_versions_status ON playbook_versions (status)"))
+            connection.execute(text("CREATE INDEX IF NOT EXISTS ix_playbook_versions_source_task_spec_id ON playbook_versions (source_task_spec_id)"))
+
+        version_count = int(connection.execute(text("SELECT COUNT(*) FROM playbook_versions")).scalar_one() or 0)
+        if version_count == 0:
+            rows = connection.execute(
+                text(
+                    """
+                    SELECT id, template_key, name, domain, status, version, source_task_spec_id,
+                           template_body, activation_strategy, validation_summary, last_validated_at,
+                           created_at, updated_at
+                    FROM workflow_templates
+                    """
+                )
+            ).fetchall()
+            for row in rows:
+                connection.execute(
+                    text(
+                        """
+                        INSERT INTO playbook_versions (
+                            id, template_key, name, domain, status, version, source_task_spec_id,
+                            template_body, activation_strategy, validation_summary, last_validated_at,
+                            created_at, updated_at
+                        ) VALUES (
+                            :id, :template_key, :name, :domain, :status, :version, :source_task_spec_id,
+                            :template_body, :activation_strategy, :validation_summary, :last_validated_at,
+                            :created_at, :updated_at
+                        )
+                        """
+                    ),
+                    dict(row._mapping),
+                )
+        connection.execute(text("DROP TABLE workflow_templates"))
+
+    if "workflow_patches" in tables:
+        if "playbook_patches" not in tables:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE playbook_patches (
+                        id TEXT PRIMARY KEY NOT NULL,
+                        title TEXT NOT NULL,
+                        patch_kind TEXT NOT NULL DEFAULT 'execution_divergence',
+                        status TEXT NOT NULL DEFAULT 'pending_review',
+                        template_id TEXT,
+                        task_spec_id TEXT,
+                        execution_plan_id TEXT,
+                        execution_episode_id TEXT,
+                        proposed_by TEXT,
+                        reviewed_by TEXT,
+                        reviewed_at TEXT,
+                        applied_at TEXT,
+                        divergence_summary TEXT,
+                        rationale TEXT,
+                        patch_body TEXT NOT NULL DEFAULT '{}',
+                        runtime_metadata TEXT NOT NULL DEFAULT '{}',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                    """
+                )
+            )
+            connection.execute(text("CREATE INDEX IF NOT EXISTS ix_playbook_patches_status ON playbook_patches (status)"))
+            connection.execute(text("CREATE INDEX IF NOT EXISTS ix_playbook_patches_patch_kind ON playbook_patches (patch_kind)"))
+            connection.execute(text("CREATE INDEX IF NOT EXISTS ix_playbook_patches_template_id ON playbook_patches (template_id)"))
+            connection.execute(text("CREATE INDEX IF NOT EXISTS ix_playbook_patches_task_spec_id ON playbook_patches (task_spec_id)"))
+            connection.execute(text("CREATE INDEX IF NOT EXISTS ix_playbook_patches_execution_plan_id ON playbook_patches (execution_plan_id)"))
+            connection.execute(text("CREATE INDEX IF NOT EXISTS ix_playbook_patches_execution_episode_id ON playbook_patches (execution_episode_id)"))
+
+        patch_count = int(connection.execute(text("SELECT COUNT(*) FROM playbook_patches")).scalar_one() or 0)
+        if patch_count == 0:
+            rows = connection.execute(
+                text(
+                    """
+                    SELECT id, title, patch_kind, status, template_id, task_spec_id, execution_plan_id,
+                           execution_episode_id, proposed_by, reviewed_by, reviewed_at, applied_at,
+                           divergence_summary, rationale, patch_body, runtime_metadata, created_at, updated_at
+                    FROM workflow_patches
+                    """
+                )
+            ).fetchall()
+            for row in rows:
+                connection.execute(
+                    text(
+                        """
+                        INSERT INTO playbook_patches (
+                            id, title, patch_kind, status, template_id, task_spec_id, execution_plan_id,
+                            execution_episode_id, proposed_by, reviewed_by, reviewed_at, applied_at,
+                            divergence_summary, rationale, patch_body, runtime_metadata, created_at, updated_at
+                        ) VALUES (
+                            :id, :title, :patch_kind, :status, :template_id, :task_spec_id, :execution_plan_id,
+                            :execution_episode_id, :proposed_by, :reviewed_by, :reviewed_at, :applied_at,
+                            :divergence_summary, :rationale, :patch_body, :runtime_metadata, :created_at, :updated_at
+                        )
+                        """
+                    ),
+                    dict(row._mapping),
+                )
+        connection.execute(text("DROP TABLE workflow_patches"))
+
+
 MIGRATIONS: tuple[SchemaMigration, ...] = (
     SchemaMigration(
         version=1,
@@ -1010,6 +1273,16 @@ MIGRATIONS: tuple[SchemaMigration, ...] = (
         version=13,
         name="rename_candidate_stage_column",
         apply=_rename_candidate_stage_column,
+    ),
+    SchemaMigration(
+        version=14,
+        name="cut_over_playbook_storage",
+        apply=_cut_over_playbook_storage,
+    ),
+    SchemaMigration(
+        version=15,
+        name="cut_over_playbook_version_storage",
+        apply=_cut_over_playbook_version_storage,
     ),
 )
 

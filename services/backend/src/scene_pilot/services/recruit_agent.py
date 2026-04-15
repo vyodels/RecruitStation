@@ -23,7 +23,7 @@ EVOLUTION_ARTIFACT_KINDS = {
     "prompt_patch",
     "memory_policy_patch",
     "playbook_patch",
-    "workflow_patch",
+    "playbook_patch",
 }
 EVOLUTION_ARTIFACT_STATUSES = {
     "draft",
@@ -38,7 +38,7 @@ EVOLUTION_ARTIFACT_REQUIRED_BODY_KEYS: dict[str, tuple[str, ...]] = {
     "prompt_patch": ("before", "after"),
     "memory_policy_patch": ("before", "after", "scope"),
     "playbook_patch": ("before", "after"),
-    "workflow_patch": ("before", "after"),
+    "playbook_patch": ("before", "after"),
 }
 CONTEXT_POLICY_LANES = {"candidate", "agent"}
 CONTEXT_POLICY_WEIGHT_KEYS = {
@@ -84,7 +84,7 @@ DEFAULT_CANDIDATE_STATUSES = [
 ]
 
 
-def _workflow_stage_groups() -> list[dict[str, Any]]:
+def _playbook_stage_groups() -> list[dict[str, Any]]:
     return [
         {
             "id": "discovery_and_screening",
@@ -356,7 +356,7 @@ def _adaptive_execution_to_payload() -> dict[str, Any]:
         "name": "Recruit Goal-Driven Runtime",
         "initial_stage": "exploration_trial",
         "version": 1,
-        "stage_groups": _workflow_stage_groups(),
+        "stage_groups": _playbook_stage_groups(),
         "status_machine": {"default_statuses": DEFAULT_CANDIDATE_STATUSES, "mutable": True},
         "adaptive_stages": [
             {
@@ -517,7 +517,7 @@ def default_recruit_agent_profile() -> dict[str, Any]:
                 "separate_fact_from_inference": True,
             },
         },
-        "workflow_definition": _adaptive_execution_to_payload(),
+        "playbook_blueprint": _adaptive_execution_to_payload(),
         "memory_policy": {
             "candidate_memory": {
                 "isolation": "strict_by_candidate",

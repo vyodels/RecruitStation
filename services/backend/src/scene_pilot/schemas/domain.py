@@ -106,7 +106,7 @@ class RecruitAgentProfileBase(BaseModel):
     is_primary: bool = False
     role_definition: dict[str, Any] = Field(default_factory=dict)
     prompt_config: dict[str, Any] = Field(default_factory=dict)
-    workflow_definition: dict[str, Any] = Field(default_factory=dict)
+    playbook_blueprint: dict[str, Any] = Field(default_factory=dict)
     memory_policy: dict[str, Any] = Field(default_factory=dict)
     dashboard_config: dict[str, Any] = Field(default_factory=dict)
     channel_config: dict[str, Any] = Field(default_factory=dict)
@@ -125,7 +125,7 @@ class RecruitAgentProfileUpdate(BaseModel):
     is_primary: bool | None = None
     role_definition: dict[str, Any] | None = None
     prompt_config: dict[str, Any] | None = None
-    workflow_definition: dict[str, Any] | None = None
+    playbook_blueprint: dict[str, Any] | None = None
     memory_policy: dict[str, Any] | None = None
     dashboard_config: dict[str, Any] | None = None
     channel_config: dict[str, Any] | None = None
@@ -513,7 +513,7 @@ class TalentPoolSyncRecordRead(TalentPoolSyncRecordBase):
 
 class EvolutionArtifactBase(BaseModel):
     agent_profile_id: str | None = None
-    artifact_kind: Literal["skill_draft", "prompt_patch", "memory_policy_patch", "playbook_patch", "workflow_patch"]
+    artifact_kind: Literal["skill_draft", "prompt_patch", "memory_policy_patch", "playbook_patch", "playbook_patch"]
     title: str
     summary: str | None = None
     status: Literal["draft", "pending_review", "approved", "applied", "rejected", "archived"] = "pending_review"
@@ -569,27 +569,37 @@ class CandidateThreadRead(BaseModel):
     runtime_interactions: list["OperatorInteractionRead"] = Field(default_factory=list)
 
 
-class WorkflowBase(BaseModel):
+class PlaybookBase(BaseModel):
     name: str
-    jd_id: str | None = None
-    config: dict[str, Any] = Field(default_factory=dict)
+    description: str | None = None
+    scope_kind: str = "global"
+    scope_ref: str | None = None
+    blueprint: dict[str, Any] = Field(default_factory=dict)
+    strategy_defaults: dict[str, Any] = Field(default_factory=dict)
+    context_overrides: dict[str, Any] = Field(default_factory=dict)
     status: str = "draft"
     version: int = 1
+    playbook_metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class WorkflowCreate(WorkflowBase):
+class PlaybookCreate(PlaybookBase):
     pass
 
 
-class WorkflowUpdate(BaseModel):
+class PlaybookUpdate(BaseModel):
     name: str | None = None
-    jd_id: str | None = None
-    config: dict[str, Any] | None = None
+    description: str | None = None
+    scope_kind: str | None = None
+    scope_ref: str | None = None
+    blueprint: dict[str, Any] | None = None
+    strategy_defaults: dict[str, Any] | None = None
+    context_overrides: dict[str, Any] | None = None
     status: str | None = None
     version: int | None = None
+    playbook_metadata: dict[str, Any] | None = None
 
 
-class WorkflowRead(WorkflowBase):
+class PlaybookRead(PlaybookBase):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
@@ -833,7 +843,7 @@ class EpisodeConfirmRequest(BaseModel):
     template_name: str | None = None
 
 
-class WorkflowTemplateBase(BaseModel):
+class PlaybookVersionBase(BaseModel):
     template_key: str
     name: str
     domain: str = "general"
@@ -846,11 +856,11 @@ class WorkflowTemplateBase(BaseModel):
     last_validated_at: datetime | None = None
 
 
-class WorkflowTemplateCreate(WorkflowTemplateBase):
+class PlaybookVersionCreate(PlaybookVersionBase):
     pass
 
 
-class WorkflowTemplateUpdate(BaseModel):
+class PlaybookVersionUpdate(BaseModel):
     template_key: str | None = None
     name: str | None = None
     domain: str | None = None
@@ -863,7 +873,7 @@ class WorkflowTemplateUpdate(BaseModel):
     last_validated_at: datetime | None = None
 
 
-class WorkflowTemplateRead(WorkflowTemplateBase):
+class PlaybookVersionRead(PlaybookVersionBase):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
@@ -871,7 +881,7 @@ class WorkflowTemplateRead(WorkflowTemplateBase):
     updated_at: datetime
 
 
-class WorkflowPatchBase(BaseModel):
+class PlaybookPatchBase(BaseModel):
     title: str
     patch_kind: str = "execution_divergence"
     status: str = "pending_review"
@@ -893,11 +903,11 @@ class WorkflowPatchBase(BaseModel):
         return self.rationale
 
 
-class WorkflowPatchCreate(WorkflowPatchBase):
+class PlaybookPatchCreate(PlaybookPatchBase):
     pass
 
 
-class WorkflowPatchUpdate(BaseModel):
+class PlaybookPatchUpdate(BaseModel):
     title: str | None = None
     patch_kind: str | None = None
     status: str | None = None
@@ -919,7 +929,7 @@ class WorkflowPatchUpdate(BaseModel):
         return self.rationale
 
 
-class WorkflowPatchRead(WorkflowPatchBase):
+class PlaybookPatchRead(PlaybookPatchBase):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
@@ -1214,8 +1224,8 @@ class LearningDraftRead(LearningDraftBase):
 
 class RuntimeLearningOutcomeRead(BaseModel):
     episode: ExecutionEpisodeRead
-    template: "WorkflowTemplateRead | None" = None
-    patch: "WorkflowPatchRead | None" = None
+    template: "PlaybookVersionRead | None" = None
+    patch: "PlaybookPatchRead | None" = None
     learning_draft: LearningDraftRead | None = None
     approval: "ApprovalRead | None" = None
     template_approval: "ApprovalRead | None" = None
@@ -1251,8 +1261,8 @@ class RuntimeEpisodeReplayRead(BaseModel):
     execution_plan: ExecutionPlanRead
     episode: ExecutionEpisodeRead
     snapshots: list[EnvironmentSnapshotRead] = Field(default_factory=list)
-    template: "WorkflowTemplateRead | None" = None
-    patch: "WorkflowPatchRead | None" = None
+    template: "PlaybookVersionRead | None" = None
+    patch: "PlaybookPatchRead | None" = None
     learning_draft: LearningDraftRead | None = None
     approvals: list["ApprovalRead"] = Field(default_factory=list)
     diagnostics: RuntimeReplayDiagnosticsRead
@@ -1344,7 +1354,7 @@ class ApprovalRead(ApprovalBase):
 
 class MetricsSummary(BaseModel):
     candidate_count: int
-    workflow_count: int
+    playbook_count: int
     skill_count: int
     approval_count: int
     pending_approval_count: int
@@ -1361,7 +1371,7 @@ class ApprovalDecisionRequest(BaseModel):
     reason: str | None = Field(default=None, validation_alias=AliasChoices("reason", "notes"))
 
 
-class WorkflowPatchDecisionRequest(BaseModel):
+class PlaybookPatchDecisionRequest(BaseModel):
     reviewer: str = Field(default="desktop-user", validation_alias=AliasChoices("reviewer", "reviewed_by"))
     reason: str | None = Field(default=None, validation_alias=AliasChoices("reason", "notes"))
     apply_immediately: bool = False
@@ -1578,7 +1588,7 @@ class CandidateDashboardRead(BaseModel):
     lastContactedAt: str | None = None
 
 
-class WorkflowNodeSummaryRead(BaseModel):
+class BlueprintNodeSummaryRead(BaseModel):
     id: str
     name: str
     kind: str
@@ -1587,14 +1597,16 @@ class WorkflowNodeSummaryRead(BaseModel):
     description: str
 
 
-class WorkflowDashboardRead(BaseModel):
+class PlaybookDashboardRead(BaseModel):
     id: str
     name: str
-    jdTitle: str
+    description: str | None = None
+    scopeKind: str
+    scopeRef: str | None = None
     status: str
     version: str
     updatedAt: str
-    nodes: list[WorkflowNodeSummaryRead]
+    nodes: list[BlueprintNodeSummaryRead]
 
 
 class SkillDashboardRead(BaseModel):
@@ -1637,7 +1649,7 @@ class DashboardRead(BaseModel):
     timeline: list[TimelineEventRead]
     alerts: list[TimelineEventRead]
     candidates: list[CandidateDashboardRead]
-    workflows: list[WorkflowDashboardRead]
+    playbooks: list[PlaybookDashboardRead]
     skills: list[SkillDashboardRead]
     approvals: list[ApprovalDashboardRead]
     agent: AgentStatusRead

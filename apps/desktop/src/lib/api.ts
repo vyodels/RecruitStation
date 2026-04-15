@@ -54,7 +54,7 @@ import type {
   SyncFlushResult,
   TalentPoolSyncRecord,
   SyncStatusSnapshot,
-  WorkflowDefinition,
+  PlaybookDefinition,
 } from "./types";
 
 export interface DesktopApiClient {
@@ -128,7 +128,7 @@ export interface DesktopApiClient {
   listSyncBacklog(): Promise<SyncBacklogItem[]>;
   flushSyncBacklog(): Promise<SyncFlushResult>;
   listCandidates(): Promise<CandidateRecord[]>;
-  listWorkflows(): Promise<WorkflowDefinition[]>;
+  listPlaybooks(): Promise<PlaybookDefinition[]>;
   listSkills(): Promise<SkillRecord[]>;
   updateSkill(skillId: string, payload: Partial<SkillRecord>): Promise<SkillRecord>;
   deleteSkill(skillId: string): Promise<void>;
@@ -435,7 +435,7 @@ function normalizeDashboard(raw: unknown): DashboardSummary {
     timeline: asArray(record.timeline) as DashboardSummary["timeline"],
     alerts: asArray(record.alerts) as DashboardSummary["alerts"],
     candidates: asArray(record.candidates).map(normalizeCandidateRecord),
-    workflows: asArray(record.workflows) as WorkflowDefinition[],
+    playbooks: asArray(record.playbooks) as PlaybookDefinition[],
     skills: asArray(record.skills).map(normalizeSkillRecord),
     approvals: asArray(record.approvals).map(normalizeApprovalItem),
     agent: normalizeAgentSnapshot(record.agent),
@@ -760,7 +760,7 @@ function normalizeRecruitAgentProfile(raw: unknown): RecruitAgentProfileRecord {
     isPrimary: Boolean(record.isPrimary ?? record.is_primary ?? false),
     roleDefinition: asRecord(record.roleDefinition ?? record.role_definition),
     promptConfig: asRecord(record.promptConfig ?? record.prompt_config),
-    workflowDefinition: asRecord(record.workflowDefinition ?? record.workflow_definition),
+    playbookBlueprint: asRecord(record.playbookBlueprint ?? record.playbook_blueprint),
     memoryPolicy: asRecord(record.memoryPolicy ?? record.memory_policy),
     dashboardConfig: asRecord(record.dashboardConfig ?? record.dashboard_config),
     channelConfig: asRecord(record.channelConfig ?? record.channel_config),
@@ -996,7 +996,7 @@ function normalizeEvolutionArtifact(raw: unknown): EvolutionArtifactRecord {
   return {
     id: String(record.id ?? ""),
     agentProfileId: record.agentProfileId ? String(record.agentProfileId) : record.agent_profile_id ? String(record.agent_profile_id) : null,
-    artifactKind: String(record.artifactKind ?? record.artifact_kind ?? "workflow_patch") as EvolutionArtifactRecord["artifactKind"],
+    artifactKind: String(record.artifactKind ?? record.artifact_kind ?? "playbook_patch") as EvolutionArtifactRecord["artifactKind"],
     title: String(record.title ?? ""),
     summary: record.summary ? String(record.summary) : null,
     status: String(record.status ?? "pending_review") as EvolutionArtifactRecord["status"],
@@ -1990,7 +1990,7 @@ function createFetchClient(baseUrl: string): DesktopApiClient {
             is_primary: payload.isPrimary,
             role_definition: payload.roleDefinition,
             prompt_config: payload.promptConfig,
-            workflow_definition: payload.workflowDefinition,
+            playbook_blueprint: payload.playbookBlueprint,
             memory_policy: payload.memoryPolicy,
             dashboard_config: payload.dashboardConfig,
             channel_config: payload.channelConfig,
@@ -2217,7 +2217,7 @@ function createFetchClient(baseUrl: string): DesktopApiClient {
         }),
       ),
     listCandidates: async () => normalizeDashboard(await requestJson<unknown>(baseUrl, "/api/dashboard")).candidates,
-    listWorkflows: async () => normalizeDashboard(await requestJson<unknown>(baseUrl, "/api/dashboard")).workflows,
+    listPlaybooks: async () => normalizeDashboard(await requestJson<unknown>(baseUrl, "/api/dashboard")).playbooks,
     listSkills: async () => asArray(await requestJson<unknown>(baseUrl, "/api/skills")).map(normalizeSkillRecord),
     updateSkill: async (skillId, payload) =>
       normalizeSkillRecord(

@@ -15,11 +15,11 @@ from .routers.runtime import router as runtime_router
 from .routers.settings import router as settings_router
 from .routers.skills import router as skills_router
 from .routers.sync import router as sync_router
-from .routers.workflows import router as workflows_router
+from .routers.playbooks import router as playbooks_router
 
 ALL_ROUTERS = [
     health_router,
-    workflows_router,
+    playbooks_router,
     candidates_router,
     skills_router,
     mcp_router,

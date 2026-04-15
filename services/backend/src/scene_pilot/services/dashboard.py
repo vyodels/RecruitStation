@@ -8,12 +8,12 @@ from sqlalchemy.orm import Session
 from scene_pilot.core.settings import AppSettings
 from scene_pilot.repositories import (
     AgentLearningRepository,
+    PlaybookRepository,
     ApprovalRepository,
     CandidateRepository,
     MetricsRepository,
     SettingsRepository,
     SkillRepository,
-    WorkflowRepository,
 )
 from scene_pilot.schemas.domain import AgentStatusRead, DashboardRead
 from scene_pilot.services.events import EventStreamService
@@ -36,8 +36,14 @@ def _runtime_scene_account(settings: AppSettings) -> str:
     return str(provider_config.get("site_account") or "本机场景 01")
 
 
-def _workflow_nodes_for_dashboard(config: dict[str, Any]) -> list[dict[str, Any]]:
-    raw_nodes = config.get("nodes") or []
+def _blueprint_nodes_for_dashboard(blueprint: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_nodes = blueprint.get("nodes")
+    if not isinstance(raw_nodes, list):
+        graph = blueprint.get("graph")
+        if isinstance(graph, dict):
+            raw_nodes = graph.get("nodes")
+    if not isinstance(raw_nodes, list):
+        raw_nodes = []
     normalized: list[dict[str, Any]] = []
     for raw_node in raw_nodes:
         if isinstance(raw_node, str):
@@ -94,7 +100,7 @@ class DashboardService:
 
     def build_dashboard(self, session: Session, *, queue_depth: int = 0) -> DashboardRead:
         candidate_repo = CandidateRepository(session)
-        workflow_repo = WorkflowRepository(session)
+        playbook_repo = PlaybookRepository(session)
         skill_repo = SkillRepository(session)
         approval_repo = ApprovalRepository(session)
         learning_repo = AgentLearningRepository(session)
@@ -104,7 +110,7 @@ class DashboardService:
         metrics = metrics_repo.summary()
         settings = AppSettings.model_validate(settings_repo.load(self.settings).model_dump())
         candidates = candidate_repo.list(limit=50)
-        workflows = workflow_repo.list(limit=50)
+        playbooks = playbook_repo.list(limit=50)
         skills = skill_repo.list(limit=50)
         approvals = approval_repo.list(limit=50)
         learnings = learning_repo.list(limit=50)
@@ -150,11 +156,11 @@ class DashboardService:
                     "caption": "已记录到本地 SQLite",
                 },
                 {
-                    "label": "执行编排",
-                    "value": str(metrics.workflow_count),
+                    "label": "执行蓝图",
+                    "value": str(metrics.playbook_count),
                     "delta": f"{metrics.by_status.get('passed_to_talent_pool', 0)} 位已进入后续交接",
                     "tone": "neutral",
-                    "caption": "Recruit Agent 当前可用的执行编排",
+                    "caption": "Recruit Agent 当前可用的 Playbook 蓝图",
                 },
                 {
                     "label": "Skills",
@@ -241,17 +247,19 @@ class DashboardService:
                 }
                 for item in candidates
             ],
-            "workflows": [
+            "playbooks": [
                 {
                     "id": item.id,
                     "name": item.name,
-                    "jdTitle": item.jd_id or "未分配岗位",
+                    "description": item.description,
+                    "scopeKind": item.scope_kind,
+                    "scopeRef": item.scope_ref,
                     "status": item.status,
                     "version": f"v{item.version}",
                     "updatedAt": item.updated_at.isoformat(),
-                    "nodes": _workflow_nodes_for_dashboard(item.config),
+                    "nodes": _blueprint_nodes_for_dashboard(item.blueprint),
                 }
-                for item in workflows
+                for item in playbooks
             ],
             "skills": [
                 {

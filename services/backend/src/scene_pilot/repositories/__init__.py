@@ -39,8 +39,7 @@ from .domain import (
     TaskSpecRepository,
     TaskQueueRepository,
     TalentPoolSyncRecordRepository,
-    WorkflowRepository,
-    WorkflowPatchRepository,
-    WorkflowTemplateRepository,
-    WorkflowRunRepository,
+    PlaybookRepository,
+    PlaybookPatchRepository,
+    PlaybookVersionRepository,
 )

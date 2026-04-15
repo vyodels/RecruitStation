@@ -35,7 +35,7 @@ def test_recruit_agent_candidate_thread_state_and_memory(tmp_path):
 
         profile_response = client.get("/api/recruit-agent/profile")
         assert profile_response.status_code == 200
-        assert "status_machine" in profile_response.json()["workflow_definition"]
+        assert "status_machine" in profile_response.json()["playbook_blueprint"]
         assert "context_policy" in profile_response.json()["prompt_config"]
 
         memory_response = client.get(f"/api/recruit-agent/candidate-memories/{candidate_id}")

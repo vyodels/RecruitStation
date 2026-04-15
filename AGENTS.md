@@ -1,7 +1,7 @@
 # 仓库指南
 
 ## 项目结构与模块组织
-`apps/desktop` 是 Electron + React 桌面端。可复用 UI 放在 `src/components`，按功能划分的页面放在 `src/features`，Electron 主进程与预加载代码放在 `electron/`。`packages/shared` 存放桌面端共用的 TypeScript 类型契约和 mock 数据。`services/backend/src/scene_pilot` 是 FastAPI 后端，按 `api/`、`runtime/`、`services/`、`workflows/`、`db/`、`scheduler/` 等模块组织。后端测试位于 `services/backend/tests`。架构说明和发布文档集中在 `docs/` 与 [Plan.md](./Plan.md)。
+`apps/desktop` 是 Electron + React 桌面端。可复用 UI 放在 `src/components`，按功能划分的页面放在 `src/features`，Electron 主进程与预加载代码放在 `electron/`。`packages/shared` 存放桌面端共用的 TypeScript 类型契约。`services/backend/src/scene_pilot` 是 FastAPI 后端，按 `api/`、`runtime/`、`services/`、`playbooks/`、`db/`、`scheduler/` 等模块组织。后端测试位于 `services/backend/tests`。架构说明和发布文档集中在 `docs/` 与 [Plan.md](./Plan.md)。
 
 ## 构建、测试与开发命令
 前端依赖使用 `npm install --ignore-scripts` 安装；仓库中的 `.npmrc` 默认关闭安装脚本。启动桌面端使用 `npm run desktop:dev`，构建使用 `npm run desktop:build`，严格类型检查使用 `npm run desktop:typecheck`。

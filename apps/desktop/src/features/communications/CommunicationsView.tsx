@@ -263,9 +263,9 @@ export function CommunicationsView({
   );
 
   const stageGroups = useMemo(() => {
-    const workflowDefinition = (profile?.workflowDefinition ?? {}) as Record<string, unknown>;
-    return Array.isArray(workflowDefinition.stage_groups)
-      ? (workflowDefinition.stage_groups as Array<Record<string, unknown>>)
+    const playbookBlueprint = (profile?.playbookBlueprint ?? {}) as Record<string, unknown>;
+    return Array.isArray(playbookBlueprint.stage_groups)
+      ? (playbookBlueprint.stage_groups as Array<Record<string, unknown>>)
       : [];
   }, [profile]);
 

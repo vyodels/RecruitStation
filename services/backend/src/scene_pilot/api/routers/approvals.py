@@ -14,7 +14,7 @@ from scene_pilot.schemas import (
     ApprovalRead,
     ApprovalUpdate,
     EpisodeConfirmRequest,
-    WorkflowPatchDecisionRequest,
+    PlaybookPatchDecisionRequest,
 )
 from scene_pilot.services.container import AppContainer
 from scene_pilot.services.runtime import PersistedRuntimeService
@@ -40,10 +40,10 @@ def _apply_runtime_review(
     session: Session,
 ) -> ApprovalRead:
     runtime = _runtime_service(container, session)
-    if approval.target_type == "workflow_patch":
-        runtime.review_workflow_patch(
+    if approval.target_type == "playbook_patch":
+        runtime.review_playbook_patch(
             approval.target_id,
-            WorkflowPatchDecisionRequest(
+            PlaybookPatchDecisionRequest(
                 reviewer=payload.reviewer,
                 reason=payload.reason,
                 apply_immediately=approve,
@@ -109,7 +109,7 @@ def approve_approval(
     item = repo.get(approval_id)
     if item is None:
         raise HTTPException(status_code=404, detail="Approval not found")
-    if item.target_type in {"workflow_patch", "template_candidate"}:
+    if item.target_type in {"playbook_patch", "template_candidate"}:
         return _apply_runtime_review(
             approval=item,
             approve=True,
@@ -195,7 +195,7 @@ def reject_approval(
     item = repo.get(approval_id)
     if item is None:
         raise HTTPException(status_code=404, detail="Approval not found")
-    if item.target_type in {"workflow_patch", "template_candidate"}:
+    if item.target_type in {"playbook_patch", "template_candidate"}:
         return _apply_runtime_review(
             approval=item,
             approve=False,

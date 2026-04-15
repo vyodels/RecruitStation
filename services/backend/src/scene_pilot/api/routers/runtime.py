@@ -29,12 +29,12 @@ from scene_pilot.schemas import (
     TaskSpecRead,
     TrialRunExecuteRequest,
     TrialRunRequest,
-    WorkflowPatchCreate,
-    WorkflowPatchDecisionRequest,
-    WorkflowPatchRead,
-    WorkflowTemplateCreate,
-    WorkflowTemplateRead,
-    WorkflowTemplateUpdate,
+    PlaybookPatchCreate,
+    PlaybookPatchDecisionRequest,
+    PlaybookPatchRead,
+    PlaybookVersionCreate,
+    PlaybookVersionRead,
+    PlaybookVersionUpdate,
 )
 from scene_pilot.services.runtime import CompilePlanRequest, PersistedRuntimeService
 
@@ -351,96 +351,96 @@ def list_environment_assessments(
     )
 
 
-@router.get("/playbook-versions", response_model=list[WorkflowTemplateRead])
-def list_workflow_templates(
+@router.get("/playbook-versions", response_model=list[PlaybookVersionRead])
+def list_playbook_versions(
     domain: str | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     service: PersistedRuntimeService = Depends(get_runtime_service),
-) -> list[WorkflowTemplateRead]:
+) -> list[PlaybookVersionRead]:
     return service.list_templates(domain=domain, limit=limit, offset=offset)
 
 
-@router.get("/playbook-versions/{template_id}", response_model=WorkflowTemplateRead)
-def get_workflow_template(
+@router.get("/playbook-versions/{template_id}", response_model=PlaybookVersionRead)
+def get_playbook_version(
     template_id: str,
     service: PersistedRuntimeService = Depends(get_runtime_service),
-) -> WorkflowTemplateRead:
+) -> PlaybookVersionRead:
     try:
         return service.get_template(template_id)
     except ValueError as exc:
         _raise_runtime_http_error(exc)
 
 
-@router.post("/playbook-versions", response_model=WorkflowTemplateRead, status_code=201)
-def create_workflow_template(
-    payload: WorkflowTemplateCreate,
+@router.post("/playbook-versions", response_model=PlaybookVersionRead, status_code=201)
+def create_playbook_version(
+    payload: PlaybookVersionCreate,
     service: PersistedRuntimeService = Depends(get_runtime_service),
-) -> WorkflowTemplateRead:
+) -> PlaybookVersionRead:
     try:
         return service.create_template(payload)
     except ValueError as exc:
         _raise_runtime_http_error(exc)
 
 
-@router.patch("/playbook-versions/{template_id}", response_model=WorkflowTemplateRead)
-def update_workflow_template(
+@router.patch("/playbook-versions/{template_id}", response_model=PlaybookVersionRead)
+def update_playbook_version(
     template_id: str,
-    payload: WorkflowTemplateUpdate,
+    payload: PlaybookVersionUpdate,
     service: PersistedRuntimeService = Depends(get_runtime_service),
-) -> WorkflowTemplateRead:
+) -> PlaybookVersionRead:
     try:
         return service.update_template(template_id, payload)
     except ValueError as exc:
         _raise_runtime_http_error(exc)
 
 
-@router.get("/adjustments", response_model=list[WorkflowPatchRead])
-def list_workflow_patches(
+@router.get("/adjustments", response_model=list[PlaybookPatchRead])
+def list_playbook_patches(
     status: str | None = Query(default=None),
-    workflow_template_id: str | None = Query(default=None),
+    playbook_version_id: str | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     service: PersistedRuntimeService = Depends(get_runtime_service),
-) -> list[WorkflowPatchRead]:
-    return service.list_workflow_patches(
+) -> list[PlaybookPatchRead]:
+    return service.list_playbook_patches(
         status=status,
-        workflow_template_id=workflow_template_id,
+        playbook_version_id=playbook_version_id,
         limit=limit,
         offset=offset,
     )
 
 
-@router.post("/adjustments", response_model=WorkflowPatchRead, status_code=201)
-def create_workflow_patch(
-    payload: WorkflowPatchCreate,
+@router.post("/adjustments", response_model=PlaybookPatchRead, status_code=201)
+def create_playbook_patch(
+    payload: PlaybookPatchCreate,
     service: PersistedRuntimeService = Depends(get_runtime_service),
-) -> WorkflowPatchRead:
+) -> PlaybookPatchRead:
     try:
-        return service.create_workflow_patch(payload)
+        return service.create_playbook_patch(payload)
     except ValueError as exc:
         _raise_runtime_http_error(exc)
 
 
-@router.post("/adjustments/{patch_id}/approve", response_model=WorkflowPatchRead)
-def approve_workflow_patch(
+@router.post("/adjustments/{patch_id}/approve", response_model=PlaybookPatchRead)
+def approve_playbook_patch(
     patch_id: str,
-    payload: WorkflowPatchDecisionRequest,
+    payload: PlaybookPatchDecisionRequest,
     service: PersistedRuntimeService = Depends(get_runtime_service),
-) -> WorkflowPatchRead:
+) -> PlaybookPatchRead:
     try:
-        return service.review_workflow_patch(patch_id, payload, approve=True)
+        return service.review_playbook_patch(patch_id, payload, approve=True)
     except ValueError as exc:
         _raise_runtime_http_error(exc)
 
 
-@router.post("/adjustments/{patch_id}/reject", response_model=WorkflowPatchRead)
-def reject_workflow_patch(
+@router.post("/adjustments/{patch_id}/reject", response_model=PlaybookPatchRead)
+def reject_playbook_patch(
     patch_id: str,
-    payload: WorkflowPatchDecisionRequest,
+    payload: PlaybookPatchDecisionRequest,
     service: PersistedRuntimeService = Depends(get_runtime_service),
-) -> WorkflowPatchRead:
+) -> PlaybookPatchRead:
     try:
-        return service.review_workflow_patch(patch_id, payload, approve=False)
+        return service.review_playbook_patch(patch_id, payload, approve=False)
     except ValueError as exc:
         _raise_runtime_http_error(exc)

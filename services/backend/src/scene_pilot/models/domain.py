@@ -266,29 +266,20 @@ class McpTool(Base, TimestampMixin):
     tool_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
 
 
-class Workflow(Base, TimestampMixin):
-    __tablename__ = "workflows"
+class Playbook(Base, TimestampMixin):
+    __tablename__ = "playbooks"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=generate_id)
     name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
-    jd_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
-    config: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    scope_kind: Mapped[str] = mapped_column(String(32), nullable=False, default="global", index=True)
+    scope_ref: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    blueprint: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    strategy_defaults: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    context_overrides: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="draft", index=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
-
-
-class WorkflowRun(Base, TimestampMixin):
-    __tablename__ = "workflow_runs"
-
-    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=generate_id)
-    workflow_id: Mapped[str] = mapped_column(ForeignKey("workflows.id", ondelete="CASCADE"), nullable=False, index=True)
-    candidate_id: Mapped[str | None] = mapped_column(ForeignKey("candidates.id", ondelete="SET NULL"), nullable=True, index=True)
-    status: Mapped[str] = mapped_column(String(32), nullable=False, default="running", index=True)
-    current_node: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    context: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
-    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    playbook_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
 
 
 class RecruitAgentProfile(Base, TimestampMixin):
@@ -302,7 +293,7 @@ class RecruitAgentProfile(Base, TimestampMixin):
     is_primary: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
     role_definition: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     prompt_config: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
-    workflow_definition: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    playbook_blueprint: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     memory_policy: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     dashboard_config: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     channel_config: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
@@ -709,8 +700,8 @@ class ExecutionEpisode(Base, TimestampMixin):
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
-class WorkflowTemplate(Base, TimestampMixin):
-    __tablename__ = "workflow_templates"
+class PlaybookVersion(Base, TimestampMixin):
+    __tablename__ = "playbook_versions"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=generate_id)
     template_key: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
@@ -727,15 +718,15 @@ class WorkflowTemplate(Base, TimestampMixin):
     last_validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
-class WorkflowPatch(Base, TimestampMixin):
-    __tablename__ = "workflow_patches"
+class PlaybookPatch(Base, TimestampMixin):
+    __tablename__ = "playbook_patches"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=generate_id)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     patch_kind: Mapped[str] = mapped_column(String(64), nullable=False, default="execution_divergence", index=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending_review", index=True)
     template_id: Mapped[str | None] = mapped_column(
-        ForeignKey("workflow_templates.id", ondelete="SET NULL"), nullable=True, index=True
+        ForeignKey("playbook_versions.id", ondelete="SET NULL"), nullable=True, index=True
     )
     task_spec_id: Mapped[str | None] = mapped_column(
         ForeignKey("task_specs.id", ondelete="SET NULL"), nullable=True, index=True

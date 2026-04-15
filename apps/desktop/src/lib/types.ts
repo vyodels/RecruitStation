@@ -196,7 +196,7 @@ export interface MemoryDisclosureRecord {
   tiers: Array<Record<string, unknown>>;
 }
 
-export interface WorkflowNodeSummary {
+export interface BlueprintNodeSummary {
   id: string;
   name: string;
   kind: "discover" | "screen" | "communicate" | "resume" | "score" | "review";
@@ -205,13 +205,15 @@ export interface WorkflowNodeSummary {
   description: string;
 }
 
-export interface WorkflowDefinition {
+export interface PlaybookDefinition {
   id: string;
   name: string;
-  jdTitle: string;
+  description?: string | null;
+  scopeKind: string;
+  scopeRef?: string | null;
   status: "draft" | "active" | "archived";
   version: string;
-  nodes: WorkflowNodeSummary[];
+  nodes: BlueprintNodeSummary[];
   updatedAt: string;
 }
 
@@ -373,7 +375,7 @@ export interface RecruitAgentProfileRecord {
   isPrimary: boolean;
   roleDefinition: Record<string, unknown>;
   promptConfig: Record<string, unknown>;
-  workflowDefinition: Record<string, unknown>;
+  playbookBlueprint: Record<string, unknown>;
   memoryPolicy: Record<string, unknown>;
   dashboardConfig: Record<string, unknown>;
   channelConfig: Record<string, unknown>;
@@ -468,7 +470,7 @@ export interface CandidateThreadRecord {
   runtimeInteractions: OperatorInteractionRecord[];
 }
 
-export type EvolutionArtifactKind = "skill_draft" | "prompt_patch" | "memory_policy_patch" | "playbook_patch" | "workflow_patch";
+export type EvolutionArtifactKind = "skill_draft" | "prompt_patch" | "memory_policy_patch" | "playbook_patch" | "playbook_patch";
 export type EvolutionArtifactStatus = "draft" | "pending_review" | "approved" | "applied" | "rejected" | "archived";
 
 export interface EvolutionArtifactRecord {
@@ -627,7 +629,7 @@ export interface DashboardSummary {
   timeline: TimelineEvent[];
   alerts: TimelineEvent[];
   candidates: CandidateRecord[];
-  workflows: WorkflowDefinition[];
+  playbooks: PlaybookDefinition[];
   skills: SkillRecord[];
   approvals: ApprovalItem[];
   agent: AgentSnapshot;

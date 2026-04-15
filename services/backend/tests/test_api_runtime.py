@@ -307,18 +307,18 @@ class ApiRuntimeTests(unittest.TestCase):
         refreshed_template = next(item for item in refreshed_templates.json() if item["id"] == template_id)
         self.assertEqual(refreshed_template["status"], "active")
 
-        refreshed_workflows = self.client.get(f"{EXECUTION_API_BASE}/playbooks")
-        self.assertEqual(refreshed_workflows.status_code, 200)
+        refreshed_playbooks = self.client.get(f"{EXECUTION_API_BASE}/playbooks")
+        self.assertEqual(refreshed_playbooks.status_code, 200)
         self.assertEqual(
-            next(item for item in refreshed_workflows.json() if item["id"] == task_spec_id)["status"],
+            next(item for item in refreshed_playbooks.json() if item["id"] == task_spec_id)["status"],
             "production_ready",
         )
 
-    def test_generic_approval_endpoint_applies_workflow_patches(self) -> None:
+    def test_generic_approval_endpoint_applies_playbook_patches(self) -> None:
         created_task = self.client.post(
             f"{EXECUTION_API_BASE}/playbooks/compile",
             json={
-                "instruction": "Open GitHub trends, inspect repositories, and propose a safer workflow when divergence happens.",
+                "instruction": "Open GitHub trends, inspect repositories, and propose a safer playbook when divergence happens.",
                 "title": "Queue patch approval through the approval inbox",
                 "domain_hint": ARCHIVED_REPOSITORY_WATCH,
             },
@@ -357,7 +357,7 @@ class ApiRuntimeTests(unittest.TestCase):
         linked_approval = next(
             item
             for item in approvals.json()
-            if item["target_type"] == "workflow_patch" and item["target_id"] == patch_payload["id"]
+            if item["target_type"] == "playbook_patch" and item["target_id"] == patch_payload["id"]
         )
 
         approved = self.client.post(
@@ -805,11 +805,11 @@ class ApiRuntimeTests(unittest.TestCase):
         approval_actions = payload["task_spec"]["approval_policy"]["approval_actions"]
         self.assertIn("write_to_downstream_system", approval_actions)
 
-    def test_templates_and_workflow_patch_review_scaffold(self) -> None:
+    def test_templates_and_playbook_patch_review_scaffold(self) -> None:
         created_task = self.client.post(
             f"{EXECUTION_API_BASE}/playbooks/compile",
             json={
-                "instruction": "Open GitHub trends, inspect the repositories, and propose a safer workflow when divergence happens.",
+                "instruction": "Open GitHub trends, inspect the repositories, and propose a safer playbook when divergence happens.",
                 "title": "GitHub trends mutation candidate",
                 "domain_hint": ARCHIVED_REPOSITORY_WATCH,
             },
@@ -852,7 +852,7 @@ class ApiRuntimeTests(unittest.TestCase):
 
         approvals = self.client.get("/api/approvals?pending_only=true")
         self.assertEqual(approvals.status_code, 200)
-        linked_approval = next(item for item in approvals.json() if item["target_type"] == "workflow_patch" and item["target_id"] == patch_payload["id"])
+        linked_approval = next(item for item in approvals.json() if item["target_type"] == "playbook_patch" and item["target_id"] == patch_payload["id"])
         self.assertEqual(linked_approval["status"], "pending")
 
         approved_patch = self.client.post(
@@ -889,7 +889,7 @@ class ApiRuntimeTests(unittest.TestCase):
         plan_by_id = {item["id"]: item for item in plans.json()}
         self.assertIn(patched_plan_id, plan_by_id)
         self.assertEqual(plan_by_id[patched_plan_id]["compiled_from_patch_id"], patch_payload["id"])
-        self.assertEqual(plan_by_id[patched_plan_id]["runtime_metadata"]["workflow_template_id"], patched_template_id)
+        self.assertEqual(plan_by_id[patched_plan_id]["runtime_metadata"]["playbook_version_id"], patched_template_id)
 
         templates = self.client.get(f"{EXECUTION_API_BASE}/playbook-versions")
         self.assertEqual(templates.status_code, 200)

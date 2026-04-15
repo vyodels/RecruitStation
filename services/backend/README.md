@@ -4,7 +4,7 @@ FastAPI backend foundation for the Recruit Agent workspace.
 
 ## What is here
 
-- SQLAlchemy models for candidates, recruit-agent profiles, workflows, skills, approvals, settings, audit logs, and agent learning records.
+- SQLAlchemy models for candidates, recruit-agent profiles, playbooks, skills, approvals, settings, audit logs, and agent learning records.
 - Repository layer for local-first SQLite persistence.
 - Pydantic schemas for REST payloads.
 - FastAPI routers for health, dashboard, recruit-agent, recruit-agent execution, candidates, skills, settings, approvals, sync, and metrics.

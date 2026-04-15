@@ -37,8 +37,7 @@ from .domain import (
     TaskSpec,
     TaskQueueItem,
     TalentPoolSyncRecord,
-    Workflow,
-    WorkflowPatch,
-    WorkflowTemplate,
-    WorkflowRun,
+    Playbook,
+    PlaybookPatch,
+    PlaybookVersion,
 )

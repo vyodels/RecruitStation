@@ -41,10 +41,11 @@ export type CandidateRecord = {
   aiDecision?: "pass" | "reject" | "review";
 };
 
-export type WorkflowRecord = {
+export type PlaybookRecord = {
   id: string;
   name: string;
-  jdId: string;
+  scopeKind: "global" | "jd" | "environment";
+  scopeRef?: string;
   status: "draft" | "active" | "archived";
   version: number;
   updatedAt: string;
@@ -64,7 +65,7 @@ export type SkillRecord = {
 
 export type ApprovalRecord = {
   id: string;
-  type: "skill_activation" | "workflow_change" | "system_command";
+  type: "skill_activation" | "playbook_change" | "system_command";
   title: string;
   status: "pending" | "approved" | "rejected";
   createdAt: string;
@@ -81,7 +82,7 @@ export type MetricSnapshot = {
 export type AgentEvent = {
   id: string;
   level: "info" | "warning" | "error";
-  category: "scheduler" | "runtime" | "workflow" | "approval" | "sync";
+  category: "scheduler" | "runtime" | "playbook" | "approval" | "sync";
   message: string;
   timestamp: string;
 };

@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from scene_pilot.db.base import utcnow
-from scene_pilot.models import ApprovalItem, Skill, WorkflowPatch
+from scene_pilot.models import ApprovalItem, Skill, PlaybookPatch
 from scene_pilot.repositories import (
     AgentLearningRepository,
     ApprovalRepository,
@@ -21,8 +21,8 @@ from scene_pilot.repositories import (
     ExecutionPlanRepository,
     SkillRepository,
     TaskSpecRepository,
-    WorkflowPatchRepository,
-    WorkflowTemplateRepository,
+    PlaybookPatchRepository,
+    PlaybookVersionRepository,
 )
 from scene_pilot.schemas import (
     ActionAffordanceRead,
@@ -56,12 +56,12 @@ from scene_pilot.schemas import (
     TaskSpecRead,
     TrialRunExecuteRequest,
     TrialRunRequest,
-    WorkflowPatchCreate,
-    WorkflowPatchDecisionRequest,
-    WorkflowPatchRead,
-    WorkflowTemplateCreate,
-    WorkflowTemplateRead,
-    WorkflowTemplateUpdate,
+    PlaybookPatchCreate,
+    PlaybookPatchDecisionRequest,
+    PlaybookPatchRead,
+    PlaybookVersionCreate,
+    PlaybookVersionRead,
+    PlaybookVersionUpdate,
 )
 from scene_pilot.runtime.agent_loop import AgentLoop, AgentLoopConfig
 from scene_pilot.runtime.models import AgentResult, Message
@@ -482,7 +482,7 @@ DEFAULT_WORKFLOW_TEMPLATES: tuple[dict[str, Any], ...] = (
 
 class CompilePlanRequest(BaseModel):
     task_spec_id: str
-    workflow_template_id: str | None = None
+    playbook_version_id: str | None = None
     name: str | None = None
     mode: str = "trial"
     status: str = "draft"
@@ -1832,10 +1832,10 @@ class PersistedRuntimeService:
             raise ValueError("Task spec not found")
 
         template = None
-        if payload.workflow_template_id is not None:
-            template = WorkflowTemplateRepository(self.session).get(payload.workflow_template_id)
+        if payload.playbook_version_id is not None:
+            template = PlaybookVersionRepository(self.session).get(payload.playbook_version_id)
             if template is None:
-                raise ValueError("Workflow template not found")
+                raise ValueError("Playbook version not found")
 
         steps = self._normalize_steps(
             list(payload.steps) or self._default_steps(task_spec, template),
@@ -1862,8 +1862,8 @@ class PersistedRuntimeService:
                 "checkpoints": list(payload.checkpoints) or self._default_checkpoints(task_spec, template),
                 "runtime_metadata": {
                     **dict(payload.runtime_metadata),
-                    "workflow_template_id": template.id if template is not None else None,
-                    "workflow_template_key": template.template_key if template is not None else None,
+                    "playbook_version_id": template.id if template is not None else None,
+                    "playbook_version_key": template.template_key if template is not None else None,
                     "domain_pack": task_spec.domain,
                     "planner_contract_version": "runtime-scene-v2",
                     "step_outline_source": "compiled_payload"
@@ -1962,8 +1962,8 @@ class PersistedRuntimeService:
             execution_plan=ExecutionPlanRead.model_validate(plan),
             episode=ExecutionEpisodeRead.model_validate(episode),
             snapshots=[EnvironmentSnapshotRead.model_validate(item) for item in snapshots],
-            template=WorkflowTemplateRead.model_validate(template) if template is not None else None,
-            patch=WorkflowPatchRead.model_validate(patch) if patch is not None else None,
+            template=PlaybookVersionRead.model_validate(template) if template is not None else None,
+            patch=PlaybookPatchRead.model_validate(patch) if patch is not None else None,
             learning_draft=LearningDraftRead.model_validate(learning) if learning is not None else None,
             approvals=[ApprovalRead.model_validate(item) for item in approvals],
             diagnostics=diagnostics,
@@ -2491,8 +2491,8 @@ class PersistedRuntimeService:
 
         return RuntimeLearningOutcomeRead(
             episode=ExecutionEpisodeRead.model_validate(refreshed_episode),
-            template=WorkflowTemplateRead.model_validate(template) if template is not None else None,
-            patch=WorkflowPatchRead.model_validate(patch) if patch is not None else None,
+            template=PlaybookVersionRead.model_validate(template) if template is not None else None,
+            patch=PlaybookPatchRead.model_validate(patch) if patch is not None else None,
             learning_draft=LearningDraftRead.model_validate(learning) if learning is not None else None,
             approval=ApprovalRead.model_validate(approval) if approval is not None else ApprovalRead.model_validate(template_approval) if template_approval is not None else None,
             template_approval=ApprovalRead.model_validate(template_approval) if template_approval is not None else None,
@@ -2528,12 +2528,12 @@ class PersistedRuntimeService:
         template_approval = outcome.template_approval
         template_model = None
         if outcome.template is not None:
-            template_repo = WorkflowTemplateRepository(self.session)
+            template_repo = PlaybookVersionRepository(self.session)
             template_model = template_repo.get(outcome.template.id)
             if approve and template_model is not None:
                 template = template_repo.update(
                     template_model,
-                    WorkflowTemplateUpdate(
+                    PlaybookVersionUpdate(
                         name=payload.template_name or template_model.name,
                         status="active" if payload.activate_template else template_model.status,
                         validation_summary=payload.reason or template_model.validation_summary or "Confirmed from supervised trial run.",
@@ -2595,7 +2595,7 @@ class PersistedRuntimeService:
 
         return RuntimeLearningOutcomeRead(
             episode=ExecutionEpisodeRead.model_validate(episode),
-            template=WorkflowTemplateRead.model_validate(template) if template is not None else outcome.template,
+            template=PlaybookVersionRead.model_validate(template) if template is not None else outcome.template,
             patch=outcome.patch,
             learning_draft=outcome.learning_draft,
             approval=outcome.approval,
@@ -2620,61 +2620,61 @@ class PersistedRuntimeService:
         item = EnvironmentSnapshotRepository(self.session).create(payload)
         return EnvironmentSnapshotRead.model_validate(item)
 
-    def list_templates(self, *, domain: str | None = None, limit: int = 100, offset: int = 0) -> list[WorkflowTemplateRead]:
-        repo = WorkflowTemplateRepository(self.session)
+    def list_templates(self, *, domain: str | None = None, limit: int = 100, offset: int = 0) -> list[PlaybookVersionRead]:
+        repo = PlaybookVersionRepository(self.session)
         items = repo.list(limit=limit, offset=offset)
         if not items:
             items = [self._seed_template(repo, item) for item in DEFAULT_WORKFLOW_TEMPLATES]
         if domain is not None:
             items = [item for item in items if item.domain == domain]
-        return [WorkflowTemplateRead.model_validate(item) for item in items]
+        return [PlaybookVersionRead.model_validate(item) for item in items]
 
-    def get_template(self, template_id: str) -> WorkflowTemplateRead:
-        item = WorkflowTemplateRepository(self.session).get(template_id)
+    def get_template(self, template_id: str) -> PlaybookVersionRead:
+        item = PlaybookVersionRepository(self.session).get(template_id)
         if item is None:
-            raise ValueError("Workflow template not found")
-        return WorkflowTemplateRead.model_validate(item)
+            raise ValueError("Playbook version not found")
+        return PlaybookVersionRead.model_validate(item)
 
-    def create_template(self, payload: WorkflowTemplateCreate) -> WorkflowTemplateRead:
-        repo = WorkflowTemplateRepository(self.session)
+    def create_template(self, payload: PlaybookVersionCreate) -> PlaybookVersionRead:
+        repo = PlaybookVersionRepository(self.session)
         if repo.by_template_key(payload.template_key) is not None:
-            raise ValueError("Workflow template with the same template_key already exists")
+            raise ValueError("Playbook version with the same template_key already exists")
         item = repo.create(payload)
-        return WorkflowTemplateRead.model_validate(item)
+        return PlaybookVersionRead.model_validate(item)
 
-    def update_template(self, template_id: str, payload: WorkflowTemplateUpdate) -> WorkflowTemplateRead:
-        repo = WorkflowTemplateRepository(self.session)
+    def update_template(self, template_id: str, payload: PlaybookVersionUpdate) -> PlaybookVersionRead:
+        repo = PlaybookVersionRepository(self.session)
         item = repo.get(template_id)
         if item is None:
-            raise ValueError("Workflow template not found")
+            raise ValueError("Playbook version not found")
         if payload.template_key and payload.template_key != item.template_key:
             existing = repo.by_template_key(payload.template_key)
             if existing is not None and existing.id != item.id:
-                raise ValueError("Workflow template with the same template_key already exists")
+                raise ValueError("Playbook version with the same template_key already exists")
         updated = repo.update(item, payload)
-        return WorkflowTemplateRead.model_validate(updated)
+        return PlaybookVersionRead.model_validate(updated)
 
-    def list_workflow_patches(
+    def list_playbook_patches(
         self,
         *,
         status: str | None = None,
-        workflow_template_id: str | None = None,
+        playbook_version_id: str | None = None,
         limit: int = 100,
         offset: int = 0,
-    ) -> list[WorkflowPatchRead]:
-        repo = WorkflowPatchRepository(self.session)
+    ) -> list[PlaybookPatchRead]:
+        repo = PlaybookPatchRepository(self.session)
         items = repo.pending_review(limit=limit, offset=offset) if status == "pending_review" else repo.list(limit=limit, offset=offset)
-        if workflow_template_id is not None:
-            items = [item for item in items if item.template_id == workflow_template_id]
+        if playbook_version_id is not None:
+            items = [item for item in items if item.template_id == playbook_version_id]
         if status is not None and status != "pending_review":
             items = [item for item in items if item.status == status]
-        return [WorkflowPatchRead.model_validate(item) for item in items]
+        return [PlaybookPatchRead.model_validate(item) for item in items]
 
-    def create_workflow_patch(self, payload: WorkflowPatchCreate) -> WorkflowPatchRead:
+    def create_playbook_patch(self, payload: PlaybookPatchCreate) -> PlaybookPatchRead:
         if payload.template_id is not None:
-            template = WorkflowTemplateRepository(self.session).get(payload.template_id)
+            template = PlaybookVersionRepository(self.session).get(payload.template_id)
             if template is None:
-                raise ValueError("Workflow template not found")
+                raise ValueError("Playbook version not found")
         if payload.task_spec_id is not None and TaskSpecRepository(self.session).get(payload.task_spec_id) is None:
             raise ValueError("Task spec not found")
         if payload.execution_plan_id is not None and ExecutionPlanRepository(self.session).get(payload.execution_plan_id) is None:
@@ -2682,7 +2682,7 @@ class PersistedRuntimeService:
         if payload.execution_episode_id is not None and ExecutionEpisodeRepository(self.session).get(payload.execution_episode_id) is None:
             raise ValueError("Execution episode not found")
 
-        item = WorkflowPatchRepository(self.session).create(payload)
+        item = PlaybookPatchRepository(self.session).create(payload)
         if payload.execution_episode_id is not None:
             episode_repo = ExecutionEpisodeRepository(self.session)
             episode = episode_repo.get(payload.execution_episode_id)
@@ -2690,17 +2690,17 @@ class PersistedRuntimeService:
                 episode_repo.update(episode, {"patch_id": item.id, "divergence_detected": True})
 
         self._ensure_patch_approval(item)
-        return WorkflowPatchRead.model_validate(item)
+        return PlaybookPatchRead.model_validate(item)
 
-    def review_workflow_patch(self, patch_id: str, payload: WorkflowPatchDecisionRequest, *, approve: bool) -> WorkflowPatchRead:
-        repo = WorkflowPatchRepository(self.session)
+    def review_playbook_patch(self, patch_id: str, payload: PlaybookPatchDecisionRequest, *, approve: bool) -> PlaybookPatchRead:
+        repo = PlaybookPatchRepository(self.session)
         item = repo.get(patch_id)
         if item is None:
-            raise ValueError("Workflow patch not found")
+            raise ValueError("Playbook patch not found")
 
         applied_artifacts: dict[str, Any] = {}
         if approve and payload.apply_immediately:
-            applied_artifacts = self._apply_workflow_patch(item, reviewer=payload.reviewer, reason=payload.reason)
+            applied_artifacts = self._apply_playbook_patch(item, reviewer=payload.reviewer, reason=payload.reason)
 
         status = "applied" if approve and payload.apply_immediately else "approved" if approve else "rejected"
         updated = repo.mark_review(
@@ -2721,22 +2721,22 @@ class PersistedRuntimeService:
                 },
             )
         self._sync_patch_approval(updated, payload=payload, approve=approve)
-        return WorkflowPatchRead.model_validate(updated)
+        return PlaybookPatchRead.model_validate(updated)
 
-    def _ensure_patch_approval(self, patch: WorkflowPatch) -> ApprovalItem:
+    def _ensure_patch_approval(self, patch: PlaybookPatch) -> ApprovalItem:
         existing = self._get_patch_approval(patch.id)
         if existing is not None:
             return existing
         return ApprovalRepository(self.session).create(
             {
-                "target_type": "workflow_patch",
+                "target_type": "playbook_patch",
                 "target_id": patch.id,
                 "title": patch.title,
                 "status": "pending",
                 "requested_by": patch.proposed_by or "runtime",
                 "payload": {
                     "summary": patch.divergence_summary or patch.rationale or patch.title,
-                    "workflow_patch_id": patch.id,
+                    "playbook_patch_id": patch.id,
                     "template_id": patch.template_id,
                     "task_spec_id": patch.task_spec_id,
                     "execution_plan_id": patch.execution_plan_id,
@@ -2812,9 +2812,9 @@ class PersistedRuntimeService:
 
     def _sync_patch_approval(
         self,
-        patch: WorkflowPatch,
+        patch: PlaybookPatch,
         *,
-        payload: WorkflowPatchDecisionRequest,
+        payload: PlaybookPatchDecisionRequest,
         approve: bool,
     ) -> None:
         approval = self._get_patch_approval(patch.id)
@@ -2840,7 +2840,7 @@ class PersistedRuntimeService:
 
     def _get_patch_approval(self, patch_id: str) -> ApprovalItem | None:
         stmt = select(ApprovalItem).where(
-            ApprovalItem.target_type == "workflow_patch",
+            ApprovalItem.target_type == "playbook_patch",
             ApprovalItem.target_id == patch_id,
         )
         return self.session.scalars(stmt).first()
@@ -2852,9 +2852,9 @@ class PersistedRuntimeService:
         )
         return self.session.scalars(stmt).first()
 
-    def _apply_workflow_patch(
+    def _apply_playbook_patch(
         self,
-        patch: WorkflowPatch,
+        patch: PlaybookPatch,
         *,
         reviewer: str,
         reason: str | None,
@@ -2871,7 +2871,7 @@ class PersistedRuntimeService:
             "applied_at": utcnow().isoformat(),
         }
 
-        template_repo = WorkflowTemplateRepository(self.session)
+        template_repo = PlaybookVersionRepository(self.session)
         plan_repo = ExecutionPlanRepository(self.session)
         task_repo = TaskSpecRepository(self.session)
 
@@ -2911,7 +2911,7 @@ class PersistedRuntimeService:
                 }
                 if template is None:
                     template = template_repo.create(
-                        WorkflowTemplateCreate(
+                        PlaybookVersionCreate(
                             template_key=template_key,
                             name=f"{task_spec.title} Patch Template",
                             domain=task_spec.domain,
@@ -2965,7 +2965,7 @@ class PersistedRuntimeService:
                 )
                 template = template_repo.update(
                     template,
-                    WorkflowTemplateUpdate(
+                    PlaybookVersionUpdate(
                         version=int(template.version) + 1,
                         status="active",
                         template_body={
@@ -3028,8 +3028,8 @@ class PersistedRuntimeService:
                         "applied_patch_id": patch.id,
                         "patched_by": reviewer,
                         "patch_reason": reason,
-                        "workflow_template_id": template.id if template is not None else dict(current_plan.runtime_metadata or {}).get("workflow_template_id"),
-                        "workflow_template_key": template.template_key if template is not None else dict(current_plan.runtime_metadata or {}).get("workflow_template_key"),
+                        "playbook_version_id": template.id if template is not None else dict(current_plan.runtime_metadata or {}).get("playbook_version_id"),
+                        "playbook_version_key": template.template_key if template is not None else dict(current_plan.runtime_metadata or {}).get("playbook_version_key"),
                     },
                     "compiled_from_patch_id": patch.id,
                 }
@@ -3043,7 +3043,7 @@ class PersistedRuntimeService:
 
         return apply_result
 
-    def _seed_template(self, repo: WorkflowTemplateRepository, payload: dict[str, Any]):
+    def _seed_template(self, repo: PlaybookVersionRepository, payload: dict[str, Any]):
         existing = repo.by_template_key(payload["template_key"])
         if existing is not None:
             return existing
@@ -4236,7 +4236,7 @@ class PersistedRuntimeService:
             return existing_template
         if episode.divergence_detected:
             return None
-        repo = WorkflowTemplateRepository(self.session)
+        repo = PlaybookVersionRepository(self.session)
         template_key = self._template_key(task_spec)
         template = repo.by_template_key(template_key)
         domain_config = DOMAIN_PACKS.get(task_spec.domain, DOMAIN_PACKS["general"])
@@ -4287,7 +4287,7 @@ class PersistedRuntimeService:
             return created
         updated = repo.update(
             template,
-            WorkflowTemplateUpdate(
+            PlaybookVersionUpdate(
                 version=int(template.version) + 1,
                 template_body=payload["template_body"],
                 activation_strategy={
@@ -4311,15 +4311,15 @@ class PersistedRuntimeService:
 
     def _materialize_patch(self, *, task_spec, plan, episode, template):
         if not episode.divergence_detected:
-            return WorkflowPatchRepository(self.session).get(episode.patch_id) if episode.patch_id else None
+            return PlaybookPatchRepository(self.session).get(episode.patch_id) if episode.patch_id else None
         existing_patch = self._episode_patch(episode)
         if existing_patch is not None:
             return existing_patch
 
         latest_snapshot = EnvironmentSnapshotRepository(self.session).latest_for_episode(episode.id)
         snapshot_hint = latest_snapshot.page_type if latest_snapshot is not None else "runtime_state"
-        patch = WorkflowPatchRepository(self.session).create(
-            WorkflowPatchCreate(
+        patch = PlaybookPatchRepository(self.session).create(
+            PlaybookPatchCreate(
                 title=f"Patch {task_spec.title}",
                 patch_kind="execution_divergence",
                 template_id=template.id if template is not None else None,
@@ -4514,8 +4514,8 @@ class PersistedRuntimeService:
         }
 
     def _get_episode_template(self, *, plan, task_spec, patch):
-        template_repo = WorkflowTemplateRepository(self.session)
-        template_id = (plan.runtime_metadata or {}).get("workflow_template_id")
+        template_repo = PlaybookVersionRepository(self.session)
+        template_id = (plan.runtime_metadata or {}).get("playbook_version_id")
         if isinstance(template_id, str) and template_id:
             template = template_repo.get(template_id)
             if template is not None:
@@ -4533,13 +4533,13 @@ class PersistedRuntimeService:
 
     def _get_episode_patch(self, episode):
         if episode.patch_id:
-            patch = WorkflowPatchRepository(self.session).get(episode.patch_id)
+            patch = PlaybookPatchRepository(self.session).get(episode.patch_id)
             if patch is not None:
                 return patch
         stmt = (
-            select(WorkflowPatch)
-            .where(WorkflowPatch.execution_episode_id == episode.id)
-            .order_by(WorkflowPatch.created_at.desc(), WorkflowPatch.id.desc())
+            select(PlaybookPatch)
+            .where(PlaybookPatch.execution_episode_id == episode.id)
+            .order_by(PlaybookPatch.created_at.desc(), PlaybookPatch.id.desc())
         )
         return self.session.scalars(stmt).first()
 
@@ -4555,12 +4555,12 @@ class PersistedRuntimeService:
         template_id = str((episode.runtime_metadata or {}).get("derived_template_id") or "").strip()
         if not template_id:
             return None
-        return WorkflowTemplateRepository(self.session).get(template_id)
+        return PlaybookVersionRepository(self.session).get(template_id)
 
     def _episode_patch(self, episode):
         patch_id = str((episode.runtime_metadata or {}).get("derived_patch_id") or "").strip()
         if patch_id:
-            patch = WorkflowPatchRepository(self.session).get(patch_id)
+            patch = PlaybookPatchRepository(self.session).get(patch_id)
             if patch is not None:
                 return patch
         return self._get_episode_patch(episode)
@@ -4824,7 +4824,7 @@ class PersistedRuntimeService:
         return normalized[-limit:]
 
     def _domain_pack_read(self, key: str, config: dict[str, Any]) -> DomainPackRead:
-        template_repo = WorkflowTemplateRepository(self.session)
+        template_repo = PlaybookVersionRepository(self.session)
         templates = [item for item in template_repo.list(limit=500, offset=0) if item.domain == key]
         return DomainPackRead(
             key=key,

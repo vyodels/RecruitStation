@@ -2,7 +2,7 @@
 
 Recruit Agent is a local-first recruiting automation workspace.
 
-The current direction is no longer the earlier execution console model. The product now centers on a built-in recruiting agent with editable workflow, isolated memory, skill governance, candidate progress tracking, and operator-controlled communication review.
+The current direction is no longer the earlier execution console model. The product now centers on a built-in recruiting agent with editable execution blueprints, isolated memory, skill governance, candidate progress tracking, and operator-controlled communication review.
 
 ## Product Focus
 
@@ -12,7 +12,7 @@ Current scope:
 - candidate pipeline and progress tracking
 - candidate-isolated memory and JD-isolated memory
 - editable agent profile, prompt, role, boundaries, and compression policies
-- editable recruiting workflow with patch-based evolution
+- editable recruiting playbook with patch-based evolution
 - structured skills with user management and review
 - chat-like candidate communication review
 - local-first persistence with optional later-stage intranet upload
@@ -26,7 +26,7 @@ Not the current product focus:
 ## Core Objects
 
 - `RecruitAgentProfile`: agent identity, prompt assets, tone, boundaries, success criteria, forbidden actions, compression policies
-- `RecruitAgentWorkflow`: recruiting workflow graph used internally by the agent
+- `RecruitAgentPlaybook`: recruiting playbook graph used internally by the agent
 - `Candidate`: structured candidate record and progress source of truth
 - `Candidate Memory`: long-term memory isolated per candidate
 - `Job / JD Memory`: long-term memory isolated per JD
@@ -45,7 +45,7 @@ Not the current product focus:
 
 The codebase still contains legacy execution structures from the earlier architecture phase. They are being retained as implementation machinery, but the product surface is moving to a recruit-agent-first model:
 
-- workflow becomes the agent’s internal playbook
+- blueprint becomes the agent’s internal playbook
 - execution records remain technical artifacts, not the main user-facing object
 - candidate progress, memory, communication, and evolution governance become the primary UI surfaces
 

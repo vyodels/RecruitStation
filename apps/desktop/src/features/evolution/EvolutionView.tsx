@@ -302,7 +302,7 @@ export function EvolutionView({
         tone: toneFromStatus(profile?.status ?? "draft"),
       },
       ...artifacts
-        .filter((item) => /(playbook_patch|workflow_patch)/i.test(item.artifactKind))
+        .filter((item) => /(playbook_patch|playbook_patch)/i.test(item.artifactKind))
         .map((item) => ({
           key: `artifact:${item.id}`,
           label: item.title,
@@ -434,7 +434,7 @@ export function EvolutionView({
   const [systemPromptDraft, setSystemPromptDraft] = useState("");
   const [contextSlotsDraft, setContextSlotsDraft] = useState("");
 
-  const [workflowJsonDraft, setWorkflowJsonDraft] = useState("{}");
+  const [playbookJsonDraft, setPlaybookJsonDraft] = useState("{}");
   const [defaultStatusesDraft, setDefaultStatusesDraft] = useState("");
 
   useEffect(() => {
@@ -501,8 +501,8 @@ export function EvolutionView({
     }
     const roleDefinition = (profile.roleDefinition ?? {}) as Record<string, unknown>;
     const promptConfig = (profile.promptConfig ?? {}) as Record<string, unknown>;
-    const workflowDefinition = (profile.workflowDefinition ?? {}) as Record<string, unknown>;
-    const statusMachine = (workflowDefinition.status_machine ?? {}) as Record<string, unknown>;
+    const playbookBlueprint = (profile.playbookBlueprint ?? {}) as Record<string, unknown>;
+    const statusMachine = (playbookBlueprint.status_machine ?? {}) as Record<string, unknown>;
     setIdentityDraft(String(roleDefinition.identity ?? ""));
     setPositioningDraft(String(roleDefinition.positioning ?? ""));
     setToneDraft(String(roleDefinition.tone ?? ""));
@@ -510,7 +510,7 @@ export function EvolutionView({
     setBoundariesDraft(arrayToLines(roleDefinition.boundaries));
     setSystemPromptDraft(String(promptConfig.system_prompt ?? ""));
     setContextSlotsDraft(arrayToLines(promptConfig.context_slots));
-    setWorkflowJsonDraft(stringifyJson(workflowDefinition));
+    setPlaybookJsonDraft(stringifyJson(playbookBlueprint));
     setDefaultStatusesDraft(arrayToLines(statusMachine.default_statuses));
   }, [profile]);
 
@@ -646,12 +646,12 @@ export function EvolutionView({
     }
     setErrorMessage(undefined);
     try {
-      const workflowDefinition = parseJsonDraft("workflowDefinition", workflowJsonDraft);
+      const playbookBlueprint = parseJsonDraft("playbookBlueprint", playbookJsonDraft);
       await onSaveProfile({
-        workflowDefinition: {
-          ...workflowDefinition,
+        playbookBlueprint: {
+          ...playbookBlueprint,
           status_machine: {
-            ...((workflowDefinition.status_machine ?? {}) as Record<string, unknown>),
+            ...((playbookBlueprint.status_machine ?? {}) as Record<string, unknown>),
             default_statuses: linesToArray(defaultStatusesDraft),
           },
         },
@@ -942,8 +942,8 @@ export function EvolutionView({
             <textarea value={defaultStatusesDraft} onChange={(event) => setDefaultStatusesDraft(event.target.value)} style={textAreaStyle} />
           </label>
           <label style={{ display: "grid", gap: "6px" }}>
-            <span>{copy("Workflow definition JSON", "工作流定义 JSON")}</span>
-            <textarea value={workflowJsonDraft} onChange={(event) => setWorkflowJsonDraft(event.target.value)} style={{ ...textAreaStyle, minHeight: "260px" }} />
+            <span>{copy("Execution blueprint JSON", "执行蓝图 JSON")}</span>
+            <textarea value={playbookJsonDraft} onChange={(event) => setPlaybookJsonDraft(event.target.value)} style={{ ...textAreaStyle, minHeight: "260px" }} />
           </label>
           <button type="button" onClick={() => void savePlaybook()} style={buttonStyle}>{copy("Save playbook", "保存执行编排")}</button>
         </div>
