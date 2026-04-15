@@ -493,6 +493,7 @@ UI 形态：
 - `Provider & Auth Layer`
   - 在现有 `baseUrl + apiKey` 基础上，补更完整的 provider routing
   - 评估是否需要 credential pool、同 provider 多 key 轮转、跨 provider failover、凭证健康状态
+  - 当前优先级下调，暂不进入本轮实现
 - `Dynamic Context Assembler`
   - 将当前偏静态的 `context_slots` 演进为按任务动态装配的上下文系统
   - 支持按候选人阶段、当前目标、历史事件、评分卡、记忆层级、skill 相关性做裁剪与优先级排序
@@ -523,6 +524,11 @@ UI 形态：
   - `/api/recruit-agent/runtime/checkpoints`
   - `/api/recruit-agent/runtime/events`
 - 桌面端设置页已支持编辑并持久化平台并发限制
+- 启动恢复已补齐到 runtime 层：
+  - 程序异常关闭后，重启会立即回收遗留的 running queue task，而不再等待默认 stale 窗口
+  - 对应 `AgentRun / WorkItem` 会一并恢复到 `queued / resumable`，不再只标记为 `interrupted`
+  - 在存在可恢复任务快照时，会自动重建 queue task 并继续从任务边界恢复执行
+  - 恢复过程会写入 `runtime event` 和 `run.runtime_metadata.recovery_history`
 
 当前仍未做的是更深一层的 `Orchestrator` 能力，例如 work item 合并、复杂抢占策略、按动作类型限流，以及更强的片段相关性排序与检索增强。
 
@@ -714,6 +720,8 @@ UI 形态：
 
 ## 后续计划：Goal-Driven Adaptive Runtime
 
+开始这一轮前，先在当前稳定分支上做一次备份分支或 tag，避免探索式改动跨度过大时难以快速回退。
+
 下一轮不再把“预先编排完整 workflow”作为 runtime 的主要执行依据，而是转向：
 
 - 用户描述目标与约束
@@ -819,6 +827,8 @@ UI 形态：
 - context policy
 
 ## 后续计划：Operator Intervention Layer
+
+开始这一轮前，沿用同一条原则：先对当前稳定分支做备份，再进入大范围交互模型改造。
 
 如果 runtime 不再强依赖预设 workflow，而是更自主地探索和执行，就必须补上人工干预层，避免：
 

@@ -5,8 +5,10 @@ from fastapi.testclient import TestClient
 from scene_pilot.core.app import create_app
 from scene_pilot.core.settings import AppSettings, FeatureFlags
 from scene_pilot.models import Candidate, Skill, Workflow
+from scene_pilot.repositories import AgentRunRepository, AgentWorkItemRepository, TaskQueueRepository
 from scene_pilot.runtime.models import LLMResponse
 from scene_pilot.runtime.providers import ScriptedProvider
+from scene_pilot.services.runtime_control import RuntimeControlService
 
 
 def test_autonomy_loop_disabled_by_default(tmp_path):
@@ -137,3 +139,124 @@ def test_autonomy_loop_runs_periodic_skill_health_sweep(tmp_path):
             assert refreshed.last_health_status == "warning"
 
         assert any(event.source == "skill_health" for event in container.events.snapshot())
+
+
+def test_runtime_recovery_restores_recently_interrupted_run_on_restart(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'recruit-agent.db'}"
+    data_dir = str(tmp_path / "data")
+
+    app = create_app(
+        AppSettings(
+            data_dir=data_dir,
+            database_url=database_url,
+        )
+    )
+    container = app.state.bootstrap_container
+
+    with container.session_factory() as session:
+        candidate = Candidate(
+            name="Recovery Candidate",
+            platform="boss",
+            platform_candidate_id="boss_recovery_001",
+            status="screening",
+            jd_id="jd-recovery",
+        )
+        workflow = Workflow(
+            name="Recovery Workflow",
+            status="active",
+            config={
+                "start_node_id": "initial_screening",
+                "nodes": [
+                    {
+                        "id": "initial_screening",
+                        "name": "Initial Screening",
+                        "task_type": "initial_screening",
+                    }
+                ],
+            },
+        )
+        session.add_all([candidate, workflow])
+        session.commit()
+        session.refresh(candidate)
+        session.refresh(workflow)
+
+    task = container.agent_control.enqueue_task(
+        "initial_screening",
+        candidate_id=candidate.id,
+        workflow_id=workflow.id,
+        workflow_node_id="initial_screening",
+        payload={"jd_criteria": "Recovery path"},
+        priority=260,
+    )
+
+    claimed = container.scheduler.queue.get()
+    assert claimed is not None
+    assert claimed.task_id == task.task_id
+
+    with container.session_factory() as session:
+        RuntimeControlService(
+            session,
+            settings=container.settings,
+            live_events=container.events,
+        ).begin_run(claimed)
+
+        queue_item = TaskQueueRepository(session).get(task.task_id)
+        assert queue_item is not None
+        assert queue_item.status == "running"
+
+        runtime_run = AgentRunRepository(session).by_queue_task_id(task.task_id)
+        assert runtime_run is not None
+        assert runtime_run.status == "running"
+
+        work_item = AgentWorkItemRepository(session).by_queue_task_id(task.task_id)
+        assert work_item is not None
+        assert work_item.status == "running"
+
+    recovered_app = create_app(
+        AppSettings(
+            data_dir=data_dir,
+            database_url=database_url,
+        )
+    )
+    recovered_container = recovered_app.state.bootstrap_container
+    recovered_container.agent_control.agent_loop.provider = ScriptedProvider(
+        provider_name="scripted-recovery-test",
+        responses=[
+            LLMResponse(
+                content="Recovered runtime completed successfully.",
+                result_data={"status": "pass", "summary": "Recovered run result", "overall": 1.0},
+            )
+        ]
+        * 16,
+    )
+
+    with recovered_container.session_factory() as session:
+        queue_item = TaskQueueRepository(session).get(task.task_id)
+        assert queue_item is not None
+        assert queue_item.status == "pending"
+
+        runtime_run = AgentRunRepository(session).by_queue_task_id(task.task_id)
+        assert runtime_run is not None
+        assert runtime_run.status == "queued"
+        assert runtime_run.runtime_metadata["recovery_mode"] in {"requeued", "rebuilt_queue_task"}
+
+        work_item = AgentWorkItemRepository(session).by_queue_task_id(task.task_id)
+        assert work_item is not None
+        assert work_item.status == "queued"
+
+    outcome = recovered_container.scheduler.run_once()
+    assert outcome is not None
+    assert outcome.result.status == "completed"
+
+    with recovered_container.session_factory() as session:
+        queue_item = TaskQueueRepository(session).get(task.task_id)
+        assert queue_item is not None
+        assert queue_item.status == "completed"
+
+        runtime_run = AgentRunRepository(session).by_queue_task_id(task.task_id)
+        assert runtime_run is not None
+        assert runtime_run.status == "completed"
+
+        work_item = AgentWorkItemRepository(session).by_queue_task_id(task.task_id)
+        assert work_item is not None
+        assert work_item.status == "completed"

@@ -14,6 +14,7 @@ from scene_pilot.repositories import (
     AgentWorkItemRepository,
     CandidateRepository,
     RecruitAgentProfileRepository,
+    TaskQueueRepository,
 )
 from scene_pilot.scheduler.queue import TaskEnvelope
 from scene_pilot.scheduler.scheduler import TaskDeferred
@@ -95,12 +96,18 @@ class RuntimeControlService:
                     "priority": task.priority,
                     "dedupe_key": self._work_item_dedupe_key(task=task, candidate_id=candidate.id if candidate is not None else None, lane=lane),
                     "payload": {
+                        "task_snapshot": self._task_snapshot(task),
                         "payload": dict(task.payload or {}),
                         "metadata": dict(task.metadata or {}),
                     },
                     "scheduled_for": task.due_at,
                 }
             )
+        else:
+            payload = dict(work_item.payload or {})
+            if not isinstance(payload.get("task_snapshot"), dict):
+                payload["task_snapshot"] = self._task_snapshot(task)
+                work_item = work_item_repo.update(work_item, {"payload": payload})
 
         task.metadata["agent_session_id"] = session_record.id
         task.metadata["agent_run_id"] = run.id
@@ -358,15 +365,82 @@ class RuntimeControlService:
 
     def recover_running_runs(self) -> int:
         repo = AgentRunRepository(self.session)
-        runs = repo.list_filtered(status="running", limit=5000, offset=0)
+        work_item_repo = AgentWorkItemRepository(self.session)
+        queue_repo = TaskQueueRepository(self.session)
+        runs = repo.list_recoverable(limit=5000)
         recovered = 0
         for run in runs:
+            work_items = work_item_repo.list_for_run(run.id, limit=200, offset=0)
+            queue_task_id = str(run.queue_task_id or "").strip()
+            queue_record = queue_repo.get(queue_task_id) if queue_task_id else None
+            recovery_mode = "requeued"
+
+            if queue_record is None or queue_record.status in {"completed", "failed"}:
+                restored = self._restore_queue_task_for_run(run=run, work_items=work_items)
+                if restored is None:
+                    recovery_mode = "manual_recovery_required"
+                else:
+                    queue_task_id = restored
+                    recovery_mode = "rebuilt_queue_task"
+                    queue_record = queue_repo.get(queue_task_id)
+
+            next_status = "queued" if queue_record is not None and queue_record.status in {"pending", "running"} else "resumable"
+            recovery_message = (
+                "Recovered after local runtime restart and returned to queue."
+                if next_status == "queued"
+                else "Recovered after local runtime restart; manual resume may be required."
+            )
+            metadata = dict(run.runtime_metadata or {})
+            recovery_history = list(metadata.get("recovery_history") or [])
+            recovery_history.append(
+                {
+                    "at": datetime.now(timezone.utc).isoformat(),
+                    "previous_status": run.status,
+                    "status": next_status,
+                    "queue_task_id": queue_task_id or None,
+                    "queue_status": queue_record.status if queue_record is not None else None,
+                    "mode": recovery_mode,
+                }
+            )
+            metadata["recovery_history"] = recovery_history[-20:]
+            metadata["recovery_required"] = next_status == "resumable"
+            metadata["recovery_mode"] = recovery_mode
+
             repo.update(
                 run,
                 {
-                    "status": "interrupted",
-                    "finished_at": datetime.now(timezone.utc),
-                    "last_error": "Recovered after local runtime restart.",
+                    "status": next_status,
+                    "queue_task_id": queue_task_id or run.queue_task_id,
+                    "finished_at": None,
+                    "blocked_reason": None,
+                    "last_error": recovery_message,
+                    "runtime_metadata": metadata,
+                },
+            )
+            for work_item in work_items:
+                if work_item.status not in {"completed", "failed", "rejected"}:
+                    work_item_repo.update(
+                        work_item,
+                        {
+                            "status": "queued" if next_status == "queued" else "resumable",
+                            "claimed_at": None,
+                            "completed_at": None,
+                            "last_error": recovery_message,
+                        },
+                    )
+
+            self.publish_event(
+                session_id=run.session_id,
+                run_id=run.id,
+                candidate_id=run.candidate_id,
+                level="warning",
+                source="runtime_recovery",
+                event_type="run_recovered",
+                message=recovery_message,
+                payload={
+                    "queue_task_id": queue_task_id or None,
+                    "queue_status": queue_record.status if queue_record is not None else None,
+                    "mode": recovery_mode,
                 },
             )
             recovered += 1
@@ -403,3 +477,57 @@ class RuntimeControlService:
     def _work_item_dedupe_key(self, *, task: TaskEnvelope, candidate_id: str | None, lane: str) -> str:
         parts = [lane, task.task_type, task.workflow_node_id or "", candidate_id or ""]
         return ":".join(part for part in parts if part)
+
+    def _task_snapshot(self, task: TaskEnvelope) -> dict[str, Any]:
+        return {
+            "task_id": task.task_id,
+            "task_type": task.task_type,
+            "priority": task.priority,
+            "payload": dict(task.payload or {}),
+            "metadata": dict(task.metadata or {}),
+            "candidate_id": task.candidate_id,
+            "workflow_id": task.workflow_id,
+            "workflow_node_id": task.workflow_node_id,
+            "platform": task.platform,
+            "attempts": task.attempts,
+            "due_at": task.due_at.isoformat() if task.due_at else None,
+            "created_at": task.created_at.isoformat(),
+        }
+
+    def _restore_queue_task_for_run(self, *, run, work_items: list[Any]) -> str | None:
+        queue_repo = TaskQueueRepository(self.session)
+        for work_item in work_items:
+            payload = dict(work_item.payload or {})
+            snapshot = dict(payload.get("task_snapshot") or {})
+            task_id = str(snapshot.get("task_id") or work_item.queue_task_id or run.queue_task_id or "").strip()
+            task_type = str(snapshot.get("task_type") or work_item.item_type or run.run_type or "").strip()
+            if not task_id or not task_type:
+                continue
+            queue_payload = self._queue_payload_from_snapshot(snapshot=snapshot, run=run, work_item=work_item)
+            queue_repo.enqueue(
+                task_id=task_id,
+                task_type=task_type,
+                priority=int(snapshot.get("priority") or work_item.priority or run.priority or 100),
+                payload=queue_payload,
+                status="pending",
+                scheduled_for=work_item.scheduled_for,
+                attempts=int(snapshot.get("attempts") or 0),
+            )
+            return task_id
+        return None
+
+    def _queue_payload_from_snapshot(self, *, snapshot: dict[str, Any], run, work_item) -> dict[str, Any]:
+        metadata = dict(snapshot.get("metadata") or {})
+        metadata.setdefault("agent_session_id", run.session_id)
+        metadata.setdefault("agent_run_id", run.id)
+        metadata.setdefault("agent_work_item_id", work_item.id)
+        return {
+            "payload": dict(snapshot.get("payload") or {}),
+            "platform": str(snapshot.get("platform") or work_item.platform or run.platform or "site"),
+            "workflow_id": snapshot.get("workflow_id"),
+            "workflow_node_id": snapshot.get("workflow_node_id"),
+            "candidate_id": snapshot.get("candidate_id") or work_item.candidate_id or run.candidate_id,
+            "due_at": snapshot.get("due_at"),
+            "created_at": snapshot.get("created_at") or datetime.now(timezone.utc).isoformat(),
+            "metadata": metadata,
+        }

@@ -446,6 +446,13 @@ class AgentRunRepository(BaseRepository[AgentRun]):
         stmt = stmt.order_by(AgentRun.created_at.desc(), AgentRun.id.desc()).offset(offset).limit(limit)
         return list(self.session.scalars(stmt).all())
 
+    def list_recoverable(self, *, session_id: str | None = None, limit: int = 5000) -> list[AgentRun]:
+        stmt = select(AgentRun).where(AgentRun.status.in_(("running", "interrupted", "resumable")))
+        if session_id is not None:
+            stmt = stmt.where(AgentRun.session_id == session_id)
+        stmt = stmt.order_by(AgentRun.updated_at.desc(), AgentRun.id.desc()).limit(limit)
+        return list(self.session.scalars(stmt).all())
+
     def by_queue_task_id(self, queue_task_id: str) -> AgentRun | None:
         stmt = select(AgentRun).where(AgentRun.queue_task_id == queue_task_id).order_by(AgentRun.created_at.desc(), AgentRun.id.desc())
         return self.session.scalars(stmt).first()
@@ -505,6 +512,25 @@ class AgentWorkItemRepository(BaseRepository[AgentWorkItem]):
     def by_queue_task_id(self, queue_task_id: str) -> AgentWorkItem | None:
         stmt = select(AgentWorkItem).where(AgentWorkItem.queue_task_id == queue_task_id)
         return self.session.scalars(stmt).first()
+
+    def list_filtered(
+        self,
+        *,
+        run_id: str | None = None,
+        status: str | None = None,
+        candidate_id: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[AgentWorkItem]:
+        stmt = select(AgentWorkItem)
+        if run_id is not None:
+            stmt = stmt.where(AgentWorkItem.run_id == run_id)
+        if status is not None:
+            stmt = stmt.where(AgentWorkItem.status == status)
+        if candidate_id is not None:
+            stmt = stmt.where(AgentWorkItem.candidate_id == candidate_id)
+        stmt = stmt.order_by(AgentWorkItem.created_at.asc(), AgentWorkItem.id.asc()).offset(offset).limit(limit)
+        return list(self.session.scalars(stmt).all())
 
     def list_for_run(self, run_id: str, limit: int = 100, offset: int = 0) -> list[AgentWorkItem]:
         stmt = (
@@ -827,6 +853,9 @@ class ApprovalRepository(BaseRepository[ApprovalItem]):
 class TaskQueueRepository:
     def __init__(self, session: Session) -> None:
         self.session = session
+
+    def get(self, task_id: str) -> TaskQueueItem | None:
+        return self.session.get(TaskQueueItem, task_id)
 
     def _append_audit_event(self, record: TaskQueueItem, kind: str, **extra: Any) -> None:
         payload = dict(record.payload or {})

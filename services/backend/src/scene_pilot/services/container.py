@@ -556,7 +556,7 @@ class AppContainer:
         recovered_tasks = 0
         recover_stale = getattr(container.scheduler.queue, "recover_stale", None)
         if callable(recover_stale):
-            recovered_tasks = int(recover_stale())
+            recovered_tasks = int(recover_stale(stale_after=timedelta(seconds=0)))
         with container.session_factory() as session:
             recovered_episodes = PersistedRuntimeService(session=session, providers=container.providers).recover_running_episodes()
         with container.session_factory() as session:
