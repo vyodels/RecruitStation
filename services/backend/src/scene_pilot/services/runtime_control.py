@@ -47,14 +47,14 @@ class RuntimeControlService:
         application_id = str(task.application_id or "").strip() or None
         application = CandidateApplicationRepository(self.session).get(application_id) if application_id else None
         job_description = (
-            JobDescriptionRepository(self.session).get_by_internal_id(application.job_description_id)
+            JobDescriptionRepository(self.session).get_by_storage_id(application.job_description_id)
             if application is not None and application.job_description_id
             else None
         )
         candidate = (
             CandidateRepository(self.session).resolve(task.candidate_id)
             if task.candidate_id
-            else CandidateRepository(self.session).resolve(application.person_id)
+            else CandidateRepository(self.session).get_by_storage_id(application.person_id)
             if application is not None
             else None
         )

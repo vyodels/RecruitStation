@@ -74,9 +74,9 @@ def _timestamp(value) -> int | None:
 
 
 def _as_candidate_application_read(session: Session, application) -> CandidateApplicationRead:
-    person = CandidateRepository(session).get_by_internal_id(application.person_id)
+    person = CandidateRepository(session).get_by_storage_id(application.person_id)
     job_description = (
-        JobDescriptionRepository(session).get_by_internal_id(application.job_description_id)
+        JobDescriptionRepository(session).get_by_storage_id(application.job_description_id)
         if application.job_description_id
         else None
     )
@@ -202,7 +202,9 @@ def list_candidate_application_assessments(
     session: Session = Depends(get_session),
 ) -> list[CandidateAssessmentRead]:
     application, person = _get_application_with_person_or_404(session, applicationId)
-    items = ApplicationAssessmentRepository(session).by_application(application.id, limit=100, offset=0)
+    items = ApplicationAssessmentRepository(session).by_application(
+        application.candidate_application_id, limit=100, offset=0
+    )
     return [
         _with_application_id(
             CandidateAssessmentRead,

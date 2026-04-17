@@ -122,7 +122,7 @@ def _get_application_with_person_or_404(session: Session, application_id: str):
     application = CandidateApplicationRepository(session).get(application_id)
     if application is None:
         raise HTTPException(status_code=404, detail="Candidate application not found")
-    person = CandidateRepository(session).resolve(application.person_id)
+    person = CandidateRepository(session).get_by_storage_id(application.person_id)
     if person is None:
         raise HTTPException(status_code=404, detail="Candidate person not found")
     return application, person
@@ -147,7 +147,7 @@ def _runtime_subject_filter_ids(session: Session, subject_id: str | None) -> tup
         return None, None
     application = CandidateApplicationRepository(session).get(text)
     if application is not None:
-        person = CandidateRepository(session).resolve(application.person_id)
+        person = CandidateRepository(session).get_by_storage_id(application.person_id)
         return (
             str(person.candidate_person_id or "").strip() or None if person is not None else None,
             application.candidate_application_id,
@@ -233,7 +233,7 @@ def _build_application_thread(session: Session, application, person) -> Candidat
     application_id = application.candidate_application_id
     person_id = person.candidate_person_id
     job_description = (
-        JobDescriptionRepository(session).get_by_internal_id(application.job_description_id)
+        JobDescriptionRepository(session).get_by_storage_id(application.job_description_id)
         if getattr(application, "job_description_id", None)
         else None
     )
@@ -246,13 +246,13 @@ def _build_application_thread(session: Session, application, person) -> Candidat
     scorecard_repo = ApplicationScorecardRepository(session)
     review_repo = ApplicationReviewDecisionRepository(session)
     sync_repo = ApplicationSyncRecordRepository(session)
-    application_session = session_repo.by_application_id(application.id)
-    logs = logs_repo.by_application(application.id, limit=200, offset=0)
+    application_session = session_repo.by_application_id(application_id)
+    logs = logs_repo.by_application(application_id, limit=200, offset=0)
     status_transitions = [
         _with_application_id(CandidateStatusTransitionRead, item, application_id, person_id)
-        for item in transition_repo.by_application(application.id, limit=200, offset=0)
+        for item in transition_repo.by_application(application_id, limit=200, offset=0)
     ]
-    assessments = assessment_repo.by_application(application.id, limit=50, offset=0)
+    assessments = assessment_repo.by_application(application_id, limit=50, offset=0)
     if application.ai_scores and not any(item.assessment_type == "ai" for item in assessments):
             assessments = [
                 CandidateAssessmentRead(
@@ -278,23 +278,23 @@ def _build_application_thread(session: Session, application, person) -> Candidat
         assessments = [_with_application_id(CandidateAssessmentRead, item, application_id, person_id) for item in assessments]
     assignments = [
         _with_application_id(CandidateAssignmentRead, item, application_id, person_id)
-        for item in assignment_repo.by_application(application.id, limit=20, offset=0)
+        for item in assignment_repo.by_application(application_id, limit=20, offset=0)
     ]
     resume_artifacts = [
         _with_application_id(ResumeArtifactRead, item, application_id, person_id)
-        for item in resume_repo.by_application(application.id, limit=20, offset=0)
+        for item in resume_repo.by_application(application_id, limit=20, offset=0)
     ]
     scorecards = [
         _with_application_id(CandidateScorecardRead, item, application_id, person_id)
-        for item in scorecard_repo.by_application(application.id, limit=50, offset=0)
+        for item in scorecard_repo.by_application(application_id, limit=50, offset=0)
     ]
     review_decisions = [
         _with_application_id(CandidateReviewDecisionRead, item, application_id, person_id)
-        for item in review_repo.by_application(application.id, limit=50, offset=0)
+        for item in review_repo.by_application(application_id, limit=50, offset=0)
     ]
     sync_records = [
         _with_application_id(TalentPoolSyncRecordRead, item, application_id, person_id)
-        for item in sync_repo.by_application(application.id, limit=20, offset=0)
+        for item in sync_repo.by_application(application_id, limit=20, offset=0)
     ]
     return CandidateThreadRead(
         application_id=application_id,
@@ -339,7 +339,9 @@ def build_application_thread(session: Session, application_id: str) -> Candidate
 
 def list_application_entries(session: Session, application_id: str) -> list[CandidateConversationEntryRead]:
     application, _person = _get_application_with_person_or_404(session, application_id)
-    logs = ApplicationCommunicationLogRepository(session).by_application(application.id, limit=200, offset=0)
+    logs = ApplicationCommunicationLogRepository(session).by_application(
+        application.candidate_application_id, limit=200, offset=0
+    )
     resolved_application_id = application.candidate_application_id
     return [
         CandidateConversationEntryRead(
@@ -376,7 +378,7 @@ def create_application_entry(
         }
     )
     application_session = ApplicationSessionRepository(session).get_or_create(
-        application.id,
+        resolved_application_id,
         defaults={"status": "active", "facts": {}, "recent_messages": []},
     )
     ApplicationSessionRepository(session).append_recent_message(
@@ -401,9 +403,11 @@ def create_application_entry(
 def list_application_status_transitions(session: Session, application_id: str) -> list[CandidateStatusTransitionRead]:
     application, _person = _get_application_with_person_or_404(session, application_id)
     resolved_application_id = application.candidate_application_id
-    person = CandidateRepository(session).resolve(application.person_id)
+    person = CandidateRepository(session).get_by_storage_id(application.person_id)
     person_id = person.candidate_person_id if person is not None else application.person_id
-    items = ApplicationStatusTransitionRepository(session).by_application(application.id, limit=500, offset=0)
+    items = ApplicationStatusTransitionRepository(session).by_application(
+        application.candidate_application_id, limit=500, offset=0
+    )
     return [_with_application_id(CandidateStatusTransitionRead, item, resolved_application_id, person_id) for item in items]
 
 
@@ -574,7 +578,7 @@ def list_application_threads(
     threads: list[CandidateThreadRead] = []
     candidate_repo = CandidateRepository(session)
     for application in applications:
-        candidate = candidate_repo.resolve(application.person_id)
+        candidate = candidate_repo.get_by_storage_id(application.person_id)
         if candidate is None:
             continue
         threads.append(_build_application_thread(session, application, candidate))
@@ -606,7 +610,9 @@ def list_application_status_transitions_view(application_id: str, session: Sessi
 
 def list_application_assignments(application_id: str, session: Session = Depends(get_session)) -> list[CandidateAssignmentRead]:
     application, person = _get_application_with_person_or_404(session, application_id)
-    items = ApplicationAssignmentRepository(session).by_application(application.id, limit=100, offset=0)
+    items = ApplicationAssignmentRepository(session).by_application(
+        application.candidate_application_id, limit=100, offset=0
+    )
     return [_with_application_id(CandidateAssignmentRead, item, application.candidate_application_id, person.candidate_person_id) for item in items]
 
 
@@ -626,7 +632,7 @@ def create_application_assignment(
             "assigned_at": payload.assigned_at or _now(),
         }
     )
-    person = CandidateRepository(session).resolve(application.person_id)
+    person = CandidateRepository(session).get_by_storage_id(application.person_id)
     return _with_application_id(
         CandidateAssignmentRead,
         item,
@@ -637,7 +643,9 @@ def create_application_assignment(
 
 def list_application_resume_artifacts(application_id: str, session: Session = Depends(get_session)) -> list[ResumeArtifactRead]:
     application, person = _get_application_with_person_or_404(session, application_id)
-    items = ResumeArtifactRepository(session).by_application(application.id, limit=100, offset=0)
+    items = ResumeArtifactRepository(session).by_application(
+        application.candidate_application_id, limit=100, offset=0
+    )
     return [_with_application_id(ResumeArtifactRead, item, application.candidate_application_id, person.candidate_person_id) for item in items]
 
 
@@ -736,7 +744,7 @@ def create_application_assessment(
         snapshot["human_assessment_status"] = payload.status
     snapshot["latest_note"] = payload.summary or snapshot.get("latest_note")
     CandidateApplicationRepository(session).update(application, {"state_snapshot": snapshot})
-    person = CandidateRepository(session).resolve(application.person_id)
+    person = CandidateRepository(session).get_by_storage_id(application.person_id)
     return _with_application_id(
         CandidateAssessmentRead,
         item,
@@ -747,8 +755,10 @@ def create_application_assessment(
 
 def list_application_scorecards(application_id: str, session: Session = Depends(get_session)) -> list[CandidateScorecardRead]:
     application, _person = _get_application_with_person_or_404(session, application_id)
-    items = ApplicationScorecardRepository(session).by_application(application.id, limit=100, offset=0)
-    person = CandidateRepository(session).resolve(application.person_id)
+    items = ApplicationScorecardRepository(session).by_application(
+        application.candidate_application_id, limit=100, offset=0
+    )
+    person = CandidateRepository(session).get_by_storage_id(application.person_id)
     person_id = person.candidate_person_id if person is not None else application.person_id
     return [_with_application_id(CandidateScorecardRead, item, application.candidate_application_id, person_id) for item in items]
 
@@ -768,7 +778,7 @@ def create_application_scorecard(
             "application_id": application.id,
         }
     )
-    person = CandidateRepository(session).resolve(application.person_id)
+    person = CandidateRepository(session).get_by_storage_id(application.person_id)
     return _with_application_id(
         CandidateScorecardRead,
         item,
@@ -779,8 +789,10 @@ def create_application_scorecard(
 
 def list_application_review_decisions(application_id: str, session: Session = Depends(get_session)) -> list[CandidateReviewDecisionRead]:
     application, _person = _get_application_with_person_or_404(session, application_id)
-    items = ApplicationReviewDecisionRepository(session).by_application(application.id, limit=100, offset=0)
-    person = CandidateRepository(session).resolve(application.person_id)
+    items = ApplicationReviewDecisionRepository(session).by_application(
+        application.candidate_application_id, limit=100, offset=0
+    )
+    person = CandidateRepository(session).get_by_storage_id(application.person_id)
     person_id = person.candidate_person_id if person is not None else application.person_id
     return [_with_application_id(CandidateReviewDecisionRead, item, application.candidate_application_id, person_id) for item in items]
 
@@ -801,7 +813,7 @@ def create_application_review_decision(
             "decided_at": payload.decided_at or _now(),
         }
     )
-    person = CandidateRepository(session).resolve(application.person_id)
+    person = CandidateRepository(session).get_by_storage_id(application.person_id)
     return _with_application_id(
         CandidateReviewDecisionRead,
         item,
@@ -812,8 +824,10 @@ def create_application_review_decision(
 
 def list_application_sync_records(application_id: str, session: Session = Depends(get_session)) -> list[TalentPoolSyncRecordRead]:
     application, _person = _get_application_with_person_or_404(session, application_id)
-    items = ApplicationSyncRecordRepository(session).by_application(application.id, limit=100, offset=0)
-    person = CandidateRepository(session).resolve(application.person_id)
+    items = ApplicationSyncRecordRepository(session).by_application(
+        application.candidate_application_id, limit=100, offset=0
+    )
+    person = CandidateRepository(session).get_by_storage_id(application.person_id)
     person_id = person.candidate_person_id if person is not None else application.person_id
     return [_with_application_id(TalentPoolSyncRecordRead, item, application.candidate_application_id, person_id) for item in items]
 
@@ -833,7 +847,7 @@ def create_application_sync_record(
             "application_id": application.id,
         }
     )
-    person = CandidateRepository(session).resolve(application.person_id)
+    person = CandidateRepository(session).get_by_storage_id(application.person_id)
     return _with_application_id(
         TalentPoolSyncRecordRead,
         item,

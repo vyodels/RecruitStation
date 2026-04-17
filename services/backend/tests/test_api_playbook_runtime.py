@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 import unittest
 
@@ -1317,7 +1317,10 @@ class ApiPlaybookRuntimeTests(unittest.TestCase):
             assert refreshed is not None
             self.assertEqual(refreshed.current_status, "cooldown")
             self.assertIsNotNone(refreshed.cooldown_until)
-            remaining_days = (refreshed.cooldown_until.date() - utcnow().date()).days
+            remaining_days = (
+                datetime.fromtimestamp(refreshed.cooldown_until).date()
+                - utcnow().date()
+            ).days
             self.assertGreaterEqual(remaining_days, 13)
             self.assertLessEqual(remaining_days, 14)
 

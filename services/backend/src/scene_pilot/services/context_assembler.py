@@ -133,9 +133,9 @@ class ContextAssemblerService:
         if task.candidate_id:
             candidate = CandidateRepository(self.session).resolve(task.candidate_id)
         if candidate is None and application is not None:
-            candidate = CandidateRepository(self.session).resolve(application.person_id)
+            candidate = CandidateRepository(self.session).get_by_storage_id(application.person_id)
         job_description = (
-            JobDescriptionRepository(self.session).get_by_internal_id(application.job_description_id)
+            JobDescriptionRepository(self.session).get_by_storage_id(application.job_description_id)
             if application is not None and application.job_description_id
             else None
         )
@@ -157,7 +157,11 @@ class ContextAssemblerService:
                 score=98,
             )
 
-            application_session = ApplicationSessionRepository(self.session).by_application_id(application.id) if application is not None else None
+            application_session = (
+                ApplicationSessionRepository(self.session).by_application_id(application.candidate_application_id)
+                if application is not None
+                else None
+            )
             candidate_session = CandidateSessionRepository(self.session).by_candidate_id(candidate.candidate_person_id)
             active_session = application_session or candidate_session
             if active_session is not None:
@@ -247,7 +251,9 @@ class ContextAssemblerService:
                 )
 
             latest_assessments = (
-                ApplicationAssessmentRepository(self.session).by_application(application.id, limit=3, offset=0)
+                ApplicationAssessmentRepository(self.session).by_application(
+                    application.candidate_application_id, limit=3, offset=0
+                )
                 if application is not None
                 else CandidateAssessmentRepository(self.session).by_candidate(candidate.id, limit=3, offset=0)
             )
@@ -262,7 +268,9 @@ class ContextAssemblerService:
                     score=88,
                 )
             latest_scorecards = (
-                ApplicationScorecardRepository(self.session).by_application(application.id, limit=2, offset=0)
+                ApplicationScorecardRepository(self.session).by_application(
+                    application.candidate_application_id, limit=2, offset=0
+                )
                 if application is not None
                 else CandidateScorecardRepository(self.session).by_candidate(candidate.id, limit=2, offset=0)
             )
@@ -277,7 +285,9 @@ class ContextAssemblerService:
                     score=84,
                 )
             latest_decisions = (
-                ApplicationReviewDecisionRepository(self.session).by_application(application.id, limit=2, offset=0)
+                ApplicationReviewDecisionRepository(self.session).by_application(
+                    application.candidate_application_id, limit=2, offset=0
+                )
                 if application is not None
                 else CandidateReviewDecisionRepository(self.session).by_candidate(candidate.id, limit=2, offset=0)
             )

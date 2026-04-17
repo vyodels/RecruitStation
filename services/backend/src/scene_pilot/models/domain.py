@@ -3,10 +3,10 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
-from scene_pilot.db.base import Base, TimestampMixin, generate_business_id, generate_id, utcnow
+from scene_pilot.db.base import Base, TimestampMixin, UnixTimestamp, generate_business_id, generate_id, utcnow
 
 
 class Candidate(Base, TimestampMixin):
@@ -35,8 +35,8 @@ class CandidatePlatformIdx(Base, TimestampMixin):
     platform_candidate_person_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     profile_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     raw_profile: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
-    first_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    first_seen_at: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True)
+    last_seen_at: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True)
 
 
 class JobDescription(Base, TimestampMixin):
@@ -74,7 +74,7 @@ class JobDescriptionPlatformIdx(Base, TimestampMixin):
     external_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     sync_status: Mapped[str] = mapped_column(String(64), nullable=False, default="pending", index=True)
     sync_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
-    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_synced_at: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True)
 
 
 class CandidateApplication(Base, TimestampMixin):
@@ -108,8 +108,8 @@ class CandidateApplication(Base, TimestampMixin):
     resume_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     ai_scores: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     ai_reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)
-    cooldown_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    last_contacted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cooldown_until: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True)
+    last_contacted_at: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True)
     active_assessment_summary: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     application_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
 
@@ -129,7 +129,7 @@ class ApplicationSession(Base, TimestampMixin):
     recent_messages: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
     facts: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     suspend_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
-    last_active_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_active_at: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True)
 
 
 class ApplicationCommunicationLog(Base):
@@ -150,7 +150,7 @@ class ApplicationCommunicationLog(Base):
     platform: Mapped[str] = mapped_column(String(64), nullable=False, default="site", index=True)
     signal_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     message_metadata: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, nullable=False, default=dict)
-    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    timestamp: Mapped[datetime] = mapped_column(UnixTimestamp, nullable=False)
 
 
 class ApplicationStatusTransition(Base, TimestampMixin):
@@ -205,7 +205,7 @@ class ApplicationAssessment(Base, TimestampMixin):
     assessment_metadata: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, nullable=False, default=dict)
     created_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
     reviewed_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True)
 
     __table_args__ = (
         Index("ix_candidate_application_assessments_application_created_at", "application_id", "created_at"),
@@ -226,8 +226,8 @@ class ApplicationAssignment(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="active", index=True)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     assignment_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
-    assigned_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow, index=True)
-    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    assigned_at: Mapped[datetime] = mapped_column(UnixTimestamp, nullable=False, default=utcnow, index=True)
+    released_at: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True)
 
     __table_args__ = (
         Index("ix_application_assignments_application_assigned_at", "application_id", "assigned_at"),
@@ -250,7 +250,7 @@ class PersonResumeArtifact(Base, TimestampMixin):
     extracted_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     contact_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     artifact_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
-    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow, index=True)
+    captured_at: Mapped[datetime] = mapped_column(UnixTimestamp, nullable=False, default=utcnow, index=True)
 
     __table_args__ = (
         Index("ix_person_resume_artifacts_person_captured_at", "person_id", "captured_at"),
@@ -304,7 +304,7 @@ class ApplicationReviewDecision(Base, TimestampMixin):
         index=True,
     )
     review_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
-    decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow, index=True)
+    decided_at: Mapped[datetime] = mapped_column(UnixTimestamp, nullable=False, default=utcnow, index=True)
 
     __table_args__ = (
         Index("ix_application_review_decisions_application_decided_at", "application_id", "decided_at"),
@@ -325,8 +325,8 @@ class ApplicationSyncRecord(Base, TimestampMixin):
     external_ref: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     payload_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
-    synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    last_attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    synced_at: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True)
+    last_attempted_at: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True)
     sync_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
 
     __table_args__ = (
@@ -349,7 +349,7 @@ class CandidateSession(Base, TimestampMixin):
     recent_messages: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
     facts: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     suspend_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
-    last_active_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_active_at: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True)
 
 
 class CommunicationLog(Base):
@@ -362,7 +362,7 @@ class CommunicationLog(Base):
     message_type: Mapped[str] = mapped_column(String(32), nullable=False, default="text")
     platform: Mapped[str] = mapped_column(String(64), nullable=False, default="site", index=True)
     message_metadata: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, nullable=False, default=dict)
-    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    timestamp: Mapped[datetime] = mapped_column(UnixTimestamp, nullable=False)
 
 
 class CandidateStatusTransition(Base, TimestampMixin):
@@ -403,7 +403,7 @@ class CandidateAssessment(Base, TimestampMixin):
     assessment_metadata: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, nullable=False, default=dict)
     created_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
     reviewed_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True)
 
     __table_args__ = (
         Index("ix_candidate_assessments_candidate_created_at", "candidate_id", "created_at"),
@@ -420,8 +420,8 @@ class CandidateAssignment(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="active", index=True)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     assignment_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
-    assigned_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow, index=True)
-    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    assigned_at: Mapped[datetime] = mapped_column(UnixTimestamp, nullable=False, default=utcnow, index=True)
+    released_at: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True)
 
     __table_args__ = (
         Index("ix_candidate_assignments_candidate_assigned_at", "candidate_id", "assigned_at"),
@@ -444,7 +444,7 @@ class ResumeArtifact(Base, TimestampMixin):
     extracted_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     contact_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     artifact_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
-    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow, index=True)
+    captured_at: Mapped[datetime] = mapped_column(UnixTimestamp, nullable=False, default=utcnow, index=True)
 
     __table_args__ = (
         Index("ix_resume_artifacts_application_captured_at", "application_id", "captured_at"),
@@ -487,7 +487,7 @@ class CandidateReviewDecision(Base, TimestampMixin):
         index=True,
     )
     review_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
-    decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow, index=True)
+    decided_at: Mapped[datetime] = mapped_column(UnixTimestamp, nullable=False, default=utcnow, index=True)
 
     __table_args__ = (
         Index("ix_candidate_review_decisions_candidate_decided_at", "candidate_id", "decided_at"),
@@ -504,8 +504,8 @@ class TalentPoolSyncRecord(Base, TimestampMixin):
     external_ref: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     payload_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
-    synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    last_attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    synced_at: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True)
+    last_attempted_at: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True)
     sync_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
 
     __table_args__ = (
@@ -534,8 +534,8 @@ class EvolutionArtifact(Base, TimestampMixin):
     related_skill_id: Mapped[str | None] = mapped_column(ForeignKey("skills.id", ondelete="SET NULL"), nullable=True, index=True)
     proposed_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
     reviewed_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True)
+    applied_at: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True)
     artifact_body: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     artifact_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
 
@@ -558,7 +558,7 @@ class McpServer(Base, TimestampMixin):
     server_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     health_status: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown", index=True)
     health_error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    last_health_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    last_health_at: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True, index=True)
 
 
 class McpTool(Base, TimestampMixin):
@@ -638,7 +638,7 @@ class CandidatePersonMemory(Base, TimestampMixin):
     disclosure: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     token_estimate: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     source_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    compacted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    compacted_at: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True)
     compacted_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     memory_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
 
@@ -668,7 +668,7 @@ class JobDescriptionMemory(Base, TimestampMixin):
     disclosure: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     token_estimate: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     source_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    compacted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    compacted_at: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True)
     compacted_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     memory_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
 
@@ -693,7 +693,7 @@ class AgentGlobalMemory(Base, TimestampMixin):
     disclosure: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     token_estimate: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     source_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    compacted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    compacted_at: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True)
     compacted_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     memory_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
 
@@ -714,8 +714,8 @@ class AgentSession(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="active", index=True)
     current_goal_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     current_lane: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
-    last_active_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
-    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    last_active_at: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True, index=True)
+    last_run_at: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True, index=True)
     runtime_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
 
 
@@ -745,8 +745,8 @@ class AgentRun(Base, TimestampMixin):
     checkpoint_status: Mapped[str] = mapped_column(String(32), nullable=False, default="none", index=True)
     context_manifest: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     runtime_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
-    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    started_at: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True, index=True)
+    finished_at: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True, index=True)
     blocked_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -779,10 +779,10 @@ class AgentWorkItem(Base, TimestampMixin):
     priority: Mapped[int] = mapped_column(Integer, nullable=False, default=100, index=True)
     dedupe_key: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
-    scheduled_for: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
-    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    deferred_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    scheduled_for: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True, index=True)
+    claimed_at: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True)
+    deferred_until: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
@@ -804,7 +804,7 @@ class AgentRunCheckpoint(Base, TimestampMixin):
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     resolved_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True)
 
     __table_args__ = (
         Index("ix_agent_run_checkpoints_run_status", "run_id", "status"),
@@ -827,7 +827,7 @@ class AgentRuntimeEvent(Base, TimestampMixin):
     event_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     message: Mapped[str] = mapped_column(Text, nullable=False)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
-    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow, index=True)
+    occurred_at: Mapped[datetime] = mapped_column(UnixTimestamp, nullable=False, default=utcnow, index=True)
 
     __table_args__ = (
         Index("ix_agent_runtime_events_session_occurred_at", "session_id", "occurred_at"),
@@ -858,7 +858,7 @@ class GoalSpec(Base, TimestampMixin):
     run_preferences: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     latest_run_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
-    last_activity_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    last_activity_at: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True, index=True)
     goal_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
 
     __table_args__ = (
@@ -887,8 +887,8 @@ class ExecutionTrace(Base, TimestampMixin):
     distilled_trace: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     outcome: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     trace_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
-    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    started_at: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True, index=True)
+    finished_at: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True, index=True)
 
     __table_args__ = (
         Index("ix_execution_traces_goal_created_at", "goal_spec_id", "created_at"),
@@ -921,7 +921,7 @@ class StrategyFragment(Base, TimestampMixin):
     evidence: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="draft", index=True)
     adoption_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    last_applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_applied_at: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True)
     fragment_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
 
     __table_args__ = (
@@ -979,8 +979,8 @@ class OperatorInteraction(Base, TimestampMixin):
     effect_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     scope: Mapped[str] = mapped_column(String(32), nullable=False, default="run_only", index=True)
     interaction_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
-    surfaced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow, index=True)
-    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    surfaced_at: Mapped[datetime] = mapped_column(UnixTimestamp, nullable=False, default=utcnow, index=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True)
     resolved_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     __table_args__ = (
@@ -1041,8 +1041,8 @@ class ExecutionEpisode(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending", index=True)
     requested_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
     requires_confirmation: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True)
     result_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     observations: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
     actions: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
@@ -1068,7 +1068,7 @@ class PlaybookVersion(Base, TimestampMixin):
     template_body: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     activation_strategy: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     validation_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
-    last_validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_validated_at: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True)
 
 
 class PlaybookPatch(Base, TimestampMixin):
@@ -1092,8 +1092,8 @@ class PlaybookPatch(Base, TimestampMixin):
     )
     proposed_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
     reviewed_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True)
+    applied_at: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True)
     divergence_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
     patch_body: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
@@ -1133,8 +1133,8 @@ class TaskQueueItem(Base, TimestampMixin):
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     priority: Mapped[int] = mapped_column(Integer, nullable=False, default=100, index=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending", index=True)
-    scheduled_for: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
-    locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    scheduled_for: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True, index=True)
+    locked_at: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True)
     locked_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
@@ -1154,9 +1154,9 @@ class SyncBacklogEntry(Base, TimestampMixin):
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending", index=True)
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    last_attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_attempted_at: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    synced_at: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True)
 
 
 class Skill(Base, TimestampMixin):
@@ -1178,10 +1178,10 @@ class Skill(Base, TimestampMixin):
     risk_level: Mapped[str] = mapped_column(String(32), nullable=False, default="medium", index=True)
     health_check_config: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     skill_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
-    last_health_check: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_health_check: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True)
     last_health_status: Mapped[str | None] = mapped_column(String(64), nullable=True)
     confirmed_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    confirmed_at: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True)
 
 
 class ApprovalItem(Base, TimestampMixin):
@@ -1194,7 +1194,7 @@ class ApprovalItem(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending", index=True)
     requested_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
     reviewed_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -1215,7 +1215,7 @@ class RecruitmentStateMachineVersion(Base, TimestampMixin):
     nodes_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
     transitions_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
     global_transitions_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
-    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow, index=True)
+    published_at: Mapped[datetime] = mapped_column(UnixTimestamp, nullable=False, default=utcnow, index=True)
     version_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
 
 
@@ -1236,7 +1236,7 @@ class DecisionLog(Base):
     input_context_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     hr_override: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     hr_override_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
-    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    timestamp: Mapped[datetime] = mapped_column(UnixTimestamp, nullable=False)
 
 
 class AgentLearning(Base, TimestampMixin):
@@ -1246,5 +1246,5 @@ class AgentLearning(Base, TimestampMixin):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     tags: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     source_task_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
-    consolidated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    consolidated_at: Mapped[datetime | None] = mapped_column(UnixTimestamp, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)

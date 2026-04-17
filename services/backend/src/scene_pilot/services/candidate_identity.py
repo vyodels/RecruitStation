@@ -86,7 +86,7 @@ def resolve_candidate_by_platform_identity(
         return None
     idx = CandidatePlatformIdxRepository(session).by_platform_identity(platform_key, platform_identity)
     if idx is not None:
-        candidate = CandidateRepository(session).get(idx.candidate_id)
+        candidate = CandidateRepository(session).get_by_storage_id(idx.candidate_id)
         if candidate is not None:
             return candidate
     return CandidateRepository(session).by_platform_candidate_id(platform_key, platform_identity)

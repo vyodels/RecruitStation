@@ -2,16 +2,20 @@ from fastapi.testclient import TestClient
 
 from scene_pilot.core.app import create_app
 from scene_pilot.core.settings import AppSettings
+from scene_pilot.db.session import create_engine_from_settings, create_session_factory
+from scene_pilot.repositories import CandidateApplicationRepository, CandidateRepository, JobDescriptionRepository
 from scene_pilot.services.application_window import make_application_window
 
 
-def make_client(tmp_path):
-    app = create_app(
-        AppSettings(
-            data_dir=str(tmp_path / "data"),
-            database_url=f"sqlite:///{tmp_path / 'recruit-agent.db'}",
-        )
+def make_settings(tmp_path):
+    return AppSettings(
+        data_dir=str(tmp_path / "data"),
+        database_url=f"sqlite:///{tmp_path / 'recruit-agent.db'}",
     )
+
+
+def make_client(tmp_path):
+    app = create_app(make_settings(tmp_path))
     return TestClient(app)
 
 
@@ -111,3 +115,22 @@ def test_job_description_and_application_crud(tmp_path):
         )
         assert patch_application.status_code == 200
         assert patch_application.json()["currentStatus"] == "screening_passed"
+
+        settings = make_settings(tmp_path)
+        engine = create_engine_from_settings(settings)
+        session_factory = create_session_factory(engine)
+        with session_factory() as session:
+            stored_person = CandidateRepository(session).get_by_business_id(person_id)
+            stored_job = JobDescriptionRepository(session).get_by_business_id(job_description_id)
+            stored_application = CandidateApplicationRepository(session).get_by_business_id(application_id)
+            assert stored_person is not None
+            assert stored_job is not None
+            assert stored_application is not None
+            internal_person_id = stored_person.id
+            internal_job_description_id = stored_job.id
+            internal_application_id = stored_application.id
+            assert CandidateRepository(session).get(internal_person_id) is None
+            assert JobDescriptionRepository(session).get(internal_job_description_id) is None
+            assert CandidateApplicationRepository(session).get(internal_application_id) is None
+
+        assert client.get(f"/api/candidate-applications/{internal_application_id}").status_code == 404

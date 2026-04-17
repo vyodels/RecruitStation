@@ -277,7 +277,7 @@ BIGINT
 
 ### Task 1：先用测试钉住 canonical 表名、字段名、时间类型
 
-**当前状态：** 代码层已有部分 canonical naming 收口，但没有明确事实表明 canonical 物理表名、双 ID 规则和 int64 时间字段已完整落地；本任务继续视为未完成。
+**当前状态：** canonical 物理表名、双 ID 规则和 int64 时间字段已按计划落地，以下步骤保留为已完成收口记录。
 
 **Files:**
 - Modify: `services/backend/tests/test_db_migrations.py`

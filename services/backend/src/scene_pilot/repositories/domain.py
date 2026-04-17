@@ -133,20 +133,17 @@ class CandidateRepository(BaseRepository[Candidate]):
         stmt = select(Candidate).where(Candidate.candidate_person_id == candidate_person_id)
         return self.session.scalars(stmt).first()
 
-    def get_by_internal_id(self, internal_id: str) -> Candidate | None:
-        return self.session.get(Candidate, internal_id)
+    def get_by_storage_id(self, storage_id: str) -> Candidate | None:
+        return self.session.get(Candidate, storage_id)
 
     def get(self, item_id: str) -> Candidate | None:
-        candidate = self.get_by_business_id(item_id)
-        if candidate is not None:
-            return candidate
-        return self.get_by_internal_id(item_id)
+        return self.get_by_business_id(item_id)
 
     def by_platform_candidate_id(self, platform: str, platform_candidate_id: str) -> Candidate | None:
         idx_repo = CandidatePlatformIdxRepository(self.session)
         idx = idx_repo.by_platform_identity(platform, platform_candidate_id)
         if idx is not None:
-            candidate = self.get_by_internal_id(idx.candidate_id)
+            candidate = self.get_by_storage_id(idx.candidate_id)
             if candidate is not None:
                 return candidate
         return None
@@ -228,13 +225,10 @@ class JobDescriptionRepository(BaseRepository[JobDescription]):
         return self.session.scalars(stmt).first()
 
     def get(self, item_id: str) -> JobDescription | None:
-        job_description = self.get_by_business_id(item_id)
-        if job_description is not None:
-            return job_description
-        return self.session.get(JobDescription, item_id)
+        return self.get_by_business_id(item_id)
 
-    def get_by_internal_id(self, internal_id: str) -> JobDescription | None:
-        return self.session.get(JobDescription, internal_id)
+    def get_by_storage_id(self, storage_id: str) -> JobDescription | None:
+        return self.session.get(JobDescription, storage_id)
 
 
 class JobDescriptionPlatformIdxRepository(BaseRepository[JobDescriptionPlatformIdx]):
@@ -255,14 +249,11 @@ class CandidateApplicationRepository(BaseRepository[CandidateApplication]):
         stmt = select(CandidateApplication).where(CandidateApplication.candidate_application_id == candidate_application_id)
         return self.session.scalars(stmt).first()
 
-    def get_by_internal_id(self, internal_id: str) -> CandidateApplication | None:
-        return self.session.get(CandidateApplication, internal_id)
+    def get_by_storage_id(self, storage_id: str) -> CandidateApplication | None:
+        return self.session.get(CandidateApplication, storage_id)
 
     def get(self, item_id: str) -> CandidateApplication | None:
-        application = self.get_by_business_id(item_id)
-        if application is not None:
-            return application
-        return self.get_by_internal_id(item_id)
+        return self.get_by_business_id(item_id)
 
     def _normalize_payload(self, data: BaseModel | dict[str, Any]) -> dict[str, Any]:
         payload = data.model_dump(exclude_unset=True) if isinstance(data, BaseModel) else dict(data)
@@ -345,10 +336,7 @@ def _resolve_application_storage_id(session: Session, application_id: str) -> st
     if not normalized:
         return normalized
     repo = CandidateApplicationRepository(session)
-    application = repo.get(normalized)
-    if application is not None:
-        return application.id
-    application = repo.get_by_internal_id(normalized)
+    application = repo.get_by_business_id(normalized)
     if application is not None:
         return application.id
     return normalized
@@ -364,7 +352,7 @@ class ApplicationSessionRepository(BaseRepository[ApplicationSession]):
 
     def get_or_create(self, application_id: str, *, defaults: dict[str, Any] | None = None) -> ApplicationSession:
         resolved_application_id = _resolve_application_storage_id(self.session, application_id)
-        existing = self.by_application_id(resolved_application_id)
+        existing = self.by_application_id(application_id)
         if existing is not None:
             return existing
         payload = {"application_id": resolved_application_id, **dict(defaults or {})}

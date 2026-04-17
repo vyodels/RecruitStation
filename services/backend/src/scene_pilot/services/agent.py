@@ -5,7 +5,7 @@ import re
 import time
 import traceback
 from dataclasses import asdict, dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
@@ -86,6 +86,20 @@ def _json_default(value: Any) -> Any:
 
 def _json_ready(value: Any) -> Any:
     return json.loads(json.dumps(value, ensure_ascii=False, default=_json_default))
+
+
+def _as_timestamp(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return int(value.timestamp())
+    return None
 
 
 @dataclass(slots=True)
@@ -309,7 +323,7 @@ class AgentControlService:
                 if not application_business_id:
                     continue
                 execution_config = dict(node.get("executionConfig") or {})
-                person = candidate_repo.resolve(application.person_id)
+                person = candidate_repo.get_by_storage_id(application.person_id)
                 application_names[application_business_id] = str(getattr(person, "name", "") or "")
                 targets.append(
                     ApplicationProgressionTarget(
@@ -459,7 +473,7 @@ class AgentControlService:
                 ).strip()
                 if not application_business_id:
                     continue
-                person = candidate_repo.resolve(application.person_id)
+                person = candidate_repo.get_by_storage_id(application.person_id)
                 person_names[application_business_id] = str(getattr(person, "name", "") or "")
                 retry_state = self._candidate_retry_state(application, current_status=current_status)
                 try:
@@ -501,7 +515,7 @@ class AgentControlService:
                 application = application_repo.get(selected_action.application_id)
                 if application is None:
                     return None
-                candidate = candidate_repo.resolve(application.person_id)
+                candidate = candidate_repo.get_by_storage_id(application.person_id)
                 if candidate is None:
                     return None
                 transition_result = transition_candidate(
@@ -1683,11 +1697,11 @@ class AgentControlService:
             candidate_repo = CandidateRepository(session)
             candidate = candidate_repo.resolve(task.candidate_id) if task.candidate_id else None
             if candidate is None and application is not None:
-                candidate = candidate_repo.resolve(application.person_id)
+                candidate = candidate_repo.get_by_storage_id(application.person_id)
             if candidate is None:
                 return {}
             job_description = (
-                JobDescriptionRepository(session).get_by_internal_id(application.job_description_id)
+                JobDescriptionRepository(session).get_by_storage_id(application.job_description_id)
                 if application is not None and application.job_description_id
                 else None
             )
@@ -1812,7 +1826,7 @@ class AgentControlService:
                     "recent_messages": list(candidate_session.recent_messages or []),
                     "facts": dict(candidate_session.facts or {}),
                     "suspend_reason": candidate_session.suspend_reason,
-                    "last_active_at": candidate_session.last_active_at.isoformat() if candidate_session.last_active_at else None,
+                    "last_active_at": _as_timestamp(candidate_session.last_active_at),
                 },
                 "state_machine": {
                     "version": state_machine_snapshot.get("version"),
@@ -1902,7 +1916,7 @@ class AgentControlService:
 
                 candidate = candidate_repo.resolve(task.candidate_id) if task.candidate_id else None
                 if candidate is None and application is not None:
-                    candidate = candidate_repo.resolve(application.person_id)
+                    candidate = candidate_repo.get_by_storage_id(application.person_id)
                 candidate_session = None
                 adaptive_stage = self._adaptive_stage_for_task(task)
                 learning_stage = adaptive_stage == "strategy_distill"
@@ -3505,7 +3519,7 @@ class AgentControlService:
             candidate_repo = CandidateRepository(session)
             candidate = candidate_repo.resolve(raw_person_id) if raw_person_id else None
             if candidate is None and application is not None:
-                candidate = candidate_repo.resolve(application.person_id)
+                candidate = candidate_repo.get_by_storage_id(application.person_id)
             if candidate is not None:
                 person_id = str(candidate.candidate_person_id or "").strip() or None
         return application_id, person_id, application
@@ -3642,11 +3656,14 @@ class AgentControlService:
         ]
         candidate_records = []
         for application in application_records:
-            candidate = candidate_repo.resolve(application.person_id)
+            candidate = candidate_repo.get_by_storage_id(application.person_id)
             if candidate is not None:
                 candidate_records.append((application, candidate))
         for candidate_id in candidate_ids:
-            if any(application.id == candidate_id for application, _candidate in candidate_records):
+            if any(
+                application is not None and application.candidate_application_id == candidate_id
+                for application, _candidate in candidate_records
+            ):
                 continue
             candidate = candidate_repo.resolve(candidate_id)
             if candidate is not None:
@@ -3673,7 +3690,7 @@ class AgentControlService:
             if bool(application_metadata.get("resume_available")) or bool(application_state.get("resume_available")):
                 has_resume_or_profile = True
             artifacts = (
-                resume_repo.by_application(application.id, limit=50, offset=0)
+                resume_repo.by_application(application.candidate_application_id, limit=50, offset=0)
                 if application is not None
                 else []
             )

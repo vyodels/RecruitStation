@@ -385,7 +385,7 @@ class DashboardService:
                 for payload in (
                     application_payload_from_application(
                         application,
-                        person=candidate_repo.resolve(application.person_id),
+                        person=candidate_repo.get_by_storage_id(application.person_id),
                         job_description=(
                             job_description_repo.get(application.job_description_id)
                             if getattr(application, "job_description_id", None)

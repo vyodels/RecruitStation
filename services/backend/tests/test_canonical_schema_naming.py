@@ -67,6 +67,14 @@ def test_canonical_business_ids_and_timestamp_columns_exist(tmp_path):
             row[1]: row[2]
             for row in connection.execute(text("PRAGMA table_info(candidate_person_platform_idx)")).fetchall()
         }
+        application_transition_columns = {
+            row[1]: row[2]
+            for row in connection.execute(text("PRAGMA table_info(candidate_application_transitions)")).fetchall()
+        }
+        message_columns = {
+            row[1]: row[2]
+            for row in connection.execute(text("PRAGMA table_info(candidate_application_messages)")).fetchall()
+        }
 
     assert "candidate_person_id" in person_columns
     assert "candidate_application_id" in application_columns
@@ -76,3 +84,10 @@ def test_canonical_business_ids_and_timestamp_columns_exist(tmp_path):
     for column_map in (person_columns, application_columns, platform_idx_columns):
         assert column_map["created_at"].upper() in {"BIGINT", "INTEGER"}
         assert column_map["updated_at"].upper() in {"BIGINT", "INTEGER"}
+
+    assert platform_idx_columns["first_seen_at"].upper() in {"BIGINT", "INTEGER"}
+    assert platform_idx_columns["last_seen_at"].upper() in {"BIGINT", "INTEGER"}
+    assert application_columns["cooldown_until"].upper() in {"BIGINT", "INTEGER"}
+    assert application_columns["last_contacted_at"].upper() in {"BIGINT", "INTEGER"}
+    assert application_transition_columns["created_at"].upper() in {"BIGINT", "INTEGER"}
+    assert message_columns["timestamp"].upper() in {"BIGINT", "INTEGER"}
