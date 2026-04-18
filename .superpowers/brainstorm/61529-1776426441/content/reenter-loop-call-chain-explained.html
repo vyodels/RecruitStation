@@ -1,0 +1,210 @@
+<h2>Re-enter Loop 调用链路图（带每一步说明）</h2>
+<p class="subtitle">这页专门把“Assistant → Tool → Observe → Re-enter Loop”的链路拆开，并给每一步补上文字说明，方便你直接顺着看。</p>
+
+<div class="section">
+  <div class="label">调用链路图</div>
+  <div class="mockup">
+    <div class="mockup-header">Assistant → Tool → Observe → Re-enter Loop</div>
+    <div class="mockup-body">
+<pre style="white-space:pre-wrap; font-size:13px; line-height:1.45; margin:0;">
+Agent Assembly
+  ↓
+Agent Kernel
+  ↓
+Assemble Request
+  ↓
+Call LLM
+  ↓
+Assistant Turn
+  ├─ 情况 A：直接给 Final Result
+  │    → 退出内层 loop
+  │
+  └─ 情况 B：发起 Tool Call
+       ↓
+    Guard / Policy Check
+       ├─ 不允许 / 需审批
+       │    → 返回审批事件 / 阻断结果
+       │    → 退出内层 loop
+       │
+       └─ 允许执行
+            ↓
+         Act
+            ↓
+         Tool / Skill / Worker
+            ↓
+         Observe
+            ↓
+         生成 tool_result / side effect summary / error
+            ↓
+         Append result into current tick context
+            ↓
+         Re-enter Loop
+            ↓
+         Call LLM（同一个 tick 内的下一轮）
+</pre>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="label">每一步说明</div>
+  <div class="cards">
+    <div class="card">
+      <div class="card-body">
+        <h3>1. Agent Assembly</h3>
+        <p>这一步提供这次执行所需的装配配置，不直接执行逻辑。</p>
+        <p>主要包括：prompt profile、context profile、tool profile、memory profile、policy profile、wakeup/session profile。</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-body">
+        <h3>2. Agent Kernel</h3>
+        <p>统一执行底座开始工作，负责后续的上下文组装、LLM 调用、工具执行、审批判断、结果回流等流程控制。</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-body">
+        <h3>3. Assemble Request</h3>
+        <p>把这次需要发给 LLM 的信息组装出来。</p>
+        <p>典型内容包括：system prompt、动态 user context、可用 tools、memory index，以及必要时选中的 memory detail。</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-body">
+        <h3>4. Call LLM</h3>
+        <p>真正发起一次模型调用。</p>
+        <p>此时会把组装好的 system / user / tools 一起发给 LLM，请它给出当前轮的决策。</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-body">
+        <h3>5. Assistant Turn</h3>
+        <p>接收模型当前轮输出。</p>
+        <p>这里会有两种结果：一种是直接给出 final result；另一种是要求调用某个 tool / skill / worker。</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-body">
+        <h3>6A. Final Result</h3>
+        <p>如果 assistant 已经得到足够信息，直接产出最终结果，那么内层 loop 结束，回到外层 tick 的 Evaluate / Update Memory / 出口阶段。</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-body">
+        <h3>6B. Tool Call</h3>
+        <p>如果 assistant 认为还需要进一步行动或获取信息，就会发起 tool call。</p>
+        <p>这只是“提出动作请求”，还没有真正执行。</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-body">
+        <h3>7. Guard / Policy Check</h3>
+        <p>在真正执行 tool 之前，对动作做守卫和策略判断。</p>
+        <p>这里会检查：权限是否允许、是否需要审批、是否超预算、是否重复执行、是否有高风险副作用。</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-body">
+        <h3>8A. 不允许 / 需审批</h3>
+        <p>如果动作不允许直接执行，或需要审批，就不会继续进入 Act。</p>
+        <p>系统会返回一个审批事件、阻断结果或等待状态，然后退出当前内层 loop。</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-body">
+        <h3>8B. 允许执行</h3>
+        <p>如果策略检查通过，才会真正进入执行阶段。</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-body">
+        <h3>9. Act</h3>
+        <p>执行 assistant 决定的动作。</p>
+        <p>可能是调用一个 tool、触发一个 skill、调用一个 worker，或者直接写业务数据。</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-body">
+        <h3>10. Tool / Skill / Worker</h3>
+        <p>这是动作的真正执行体。</p>
+        <p>Tool 偏轻量直接能力，Skill 偏封装后的能力资产，Worker 偏较重的后台执行单元。</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-body">
+        <h3>11. Observe</h3>
+        <p>读取执行结果，观察动作的真实反馈。</p>
+        <p>结果可能是成功、失败、部分成功、异常、产物生成、状态变化等。</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-body">
+        <h3>12. 生成 tool_result / summary / error</h3>
+        <p>把执行结果标准化成当前 tick 可继续使用的事实。</p>
+        <p>例如：tool_result、side effect summary、error、artifact output、status transition。</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-body">
+        <h3>13. Append result into current tick context</h3>
+        <p>把刚才得到的结果追加回这一次 tick 的上下文中。</p>
+        <p>注意：这里只更新“当前 tick 上下文”，不会重新开始一个新 tick。</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-body">
+        <h3>14. Re-enter Loop</h3>
+        <p>表示：在同一个 tick 内，再次回到 LLM 推理。</p>
+        <p>本质上是“带着新的 tool_result 再问一次 LLM：下一步怎么办”。</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-body">
+        <h3>15. Call LLM（下一轮）</h3>
+        <p>重新调用 LLM，但不是从零开始。</p>
+        <p>它能看到刚刚新增的 tool_result，因此可以调整计划、换工具、补动作、或直接结束。</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="label">一个关键结论</div>
+  <div class="mock-content">
+    <strong>Re-enter Loop 不等于重新开始一个新 tick。</strong><br/>
+    它只表示：在当前 tick 内，完成了一次 assistant → tool → observe 之后，把新结果回流给 LLM，再继续当前这轮执行。
+  </div>
+</div>
+
+<div class="options" style="margin-top:20px;">
+  <div class="option" data-choice="reenter-explained-ok" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>这版说明清楚了</h3>
+      <p>可以继续扩展 Trigger / Wakeup 差异和装配差异</p>
+    </div>
+  </div>
+  <div class="option" data-choice="reenter-explained-adjust" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>还要再补充</h3>
+      <p>链路或每一步说明还不够清楚</p>
+    </div>
+  </div>
+</div>

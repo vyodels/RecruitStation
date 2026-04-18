@@ -1,0 +1,143 @@
+<h2>C-lite vs 通用 Agent OS：结构和执行过程对比</h2>
+<p class="subtitle">这版保留英文术语，并在后面补中文后缀解释，方便你对照理解。</p>
+
+<div class="section">
+  <div class="label">一、结构对比</div>
+  <div class="split" style="align-items:start; gap:20px;">
+    <div class="mockup" data-choice="c-lite-structure" onclick="toggleSelect(this)">
+      <div class="mockup-header">C-lite：最小内核 + 领域外壳</div>
+      <div class="mockup-body">
+        <div class="mock-content" style="text-align:center; margin-bottom:10px;"><strong>Loop Agent（常驻循环 Agent） / Assistant Agent（按需对话 Agent）</strong></div>
+        <div style="text-align:center; margin:8px 0; color:var(--muted);">↓ 使用统一内核能力</div>
+        <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-bottom:12px;">
+          <div class="mock-sidebar">Policy / Approval（权限与审批）</div>
+          <div class="mock-sidebar">Memory Retrieval（记忆检索）</div>
+          <div class="mock-sidebar">Skill Lifecycle（技能生命周期）</div>
+        </div>
+        <div class="mock-content" style="text-align:center; margin-bottom:10px;"><strong>Agent Kernel（最小公共底座）</strong></div>
+        <div style="text-align:center; margin:8px 0; color:var(--muted);">↓ 通过领域接口访问业务世界</div>
+        <div style="display:grid; grid-template-columns:repeat(2,1fr); gap:10px; margin-bottom:12px;">
+          <div class="mock-sidebar">RecruitingWorldStateProvider（招聘世界状态提供器）</div>
+          <div class="mock-sidebar">RecruitingActionAdapters（招聘动作适配器）</div>
+        </div>
+        <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:10px;">
+          <div class="mock-content">Candidate / Application / JD 表（业务真实数据）</div>
+          <div class="mock-content">Recruiting Runtime / Queue / Run（招聘执行运行时）</div>
+          <div class="mock-content">Recruiting Memory Schemas（招聘记忆结构）</div>
+        </div>
+        <p style="margin-top:14px;"><strong>含义：</strong>招聘表继续是招聘表；Kernel 不拥有业务世界，只是访问和驱动它。</p>
+      </div>
+    </div>
+
+    <div class="mockup" data-choice="generic-structure" onclick="toggleSelect(this)">
+      <div class="mockup-header">通用 Agent OS：大一统平台</div>
+      <div class="mockup-body">
+        <div class="mock-content" style="text-align:center; margin-bottom:10px;"><strong>Loop Agent / Assistant Agent / 其他 Agent（多个顶层智能体）</strong></div>
+        <div style="text-align:center; margin:8px 0; color:var(--muted);">↓ 全都挂统一平台</div>
+        <div class="mock-content" style="text-align:center; margin-bottom:10px;"><strong>Universal Agent Kernel（通用 Agent 内核）</strong></div>
+        <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-bottom:12px;">
+          <div class="mock-sidebar">Universal World State（通用世界状态层）</div>
+          <div class="mock-sidebar">Generic Memory Store（通用记忆存储）</div>
+          <div class="mock-sidebar">Unified Runtime（统一运行时）</div>
+        </div>
+        <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-bottom:12px;">
+          <div class="mock-sidebar">Generic Entity Records（通用实体记录）</div>
+          <div class="mock-sidebar">Generic Workflow State（通用工作流状态）</div>
+          <div class="mock-sidebar">Generic Action Bus（通用动作总线）</div>
+        </div>
+        <div class="mock-content" style="text-align:center;">Recruiting / Sales / Support 插件（领域插件）</div>
+        <p style="margin-top:14px;"><strong>含义：</strong>为了追求平台统一，容易诱导你把招聘表语义也抽掉，变成通用实体系统。</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="label">二、一次 Loop Tick 的时序对比</div>
+  <div class="split" style="align-items:start; gap:20px;">
+    <div class="mockup" data-choice="c-lite-seq" onclick="toggleSelect(this)">
+      <div class="mockup-header">C-lite 执行时序</div>
+      <div class="mockup-body">
+<pre style="white-space:pre-wrap; font-size:13px; line-height:1.45; margin:0;">
+Scheduler（调度器）
+  → wake Loop Agent（唤醒 Loop Agent）
+Loop Agent（常驻 Agent）
+  → Kernel: assemble stable context（组装稳定上下文）
+  → RecruitingWorldStateProvider: query DB snapshot（查询数据库快照）
+  → MemoryIndexProvider: list relevant memory indices（列出相关记忆索引）
+  → LLM: decide next actions（决定下一步动作）
+  → if need detail（如需详情）:
+       MemoryDetailReader: read selected detail（读取详情）
+       LLM: refine action（细化动作）
+  → RecruitingActionAdapter / WorkerRuntime（招聘动作适配器 / 执行运行时）
+       - enqueue run / call skill / write business data（入队执行 / 调 skill / 改业务数据）
+  → EventBus / Approval / SleepPolicy（事件总线 / 审批 / 休眠策略）
+  → return next wake condition（返回下次唤醒条件）
+</pre>
+        <p style="margin-top:12px;"><strong>特点：</strong>世界状态直接来自招聘 DB；memory 是两阶段；Loop tick 是独立的，不依赖长消息历史。</p>
+      </div>
+    </div>
+
+    <div class="mockup" data-choice="generic-seq" onclick="toggleSelect(this)">
+      <div class="mockup-header">通用 Agent OS 执行时序</div>
+      <div class="mockup-body">
+<pre style="white-space:pre-wrap; font-size:13px; line-height:1.45; margin:0;">
+Scheduler（调度器）
+  → wake Loop Agent（唤醒 Loop Agent）
+Loop Agent（顶层 Agent）
+  → Universal Kernel: fetch generic world state（取通用世界状态）
+  → WorldState Normalizer: map recruiting data into universal entities（把招聘数据标准化成通用实体）
+  → Generic Memory Store: retrieve context（从通用记忆层取上下文）
+  → LLM: decide next actions（决定下一步动作）
+  → Generic Action Bus（通用动作总线）
+       → Recruiting plugin rehydrates business meaning（招聘插件还原业务语义）
+       → enqueue run / call skill / write data（入队执行 / 调 skill / 改数据）
+  → Universal Event / Approval / Sleep（通用事件 / 审批 / 休眠）
+  → return next wake condition（返回下次唤醒条件）
+</pre>
+        <p style="margin-top:12px;"><strong>特点：</strong>先抽象成通用状态，再还原回招聘语义；理论更统一，但中间多了一层翻译层。</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="label">三、关键执行差异</div>
+  <div class="cards">
+    <div class="card">
+      <div class="card-body">
+        <h3>C-lite</h3>
+        <p><strong>读世界：</strong>直接查招聘表</p>
+        <p><strong>LLM 看见的是：</strong>招聘语义的真实快照</p>
+        <p><strong>改数据：</strong>通过 recruiting action adapter（招聘动作适配器）</p>
+        <p><strong>复杂度来源：</strong>领域逻辑本身</p>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-body">
+        <h3>通用 Agent OS</h3>
+        <p><strong>读世界：</strong>先标准化成通用实体</p>
+        <p><strong>LLM 看见的是：</strong>一层抽象后的通用状态</p>
+        <p><strong>改数据：</strong>通过 generic action bus（通用动作总线）再映射回领域</p>
+        <p><strong>复杂度来源：</strong>领域逻辑 + 抽象/翻译层</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="options" style="margin-top:20px;">
+  <div class="option" data-choice="prefer-c-lite" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>倾向 C-lite</h3>
+      <p>统一 Kernel，但世界状态仍走招聘领域外壳</p>
+    </div>
+  </div>
+  <div class="option" data-choice="prefer-generic-os" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>倾向通用 Agent OS</h3>
+      <p>接受通用 world state / action bus / plugin 层</p>
+    </div>
+  </div>
+</div>

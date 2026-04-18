@@ -1,0 +1,153 @@
+<h2>Tick Cycle 补充：Re-enter Loop 调用链路图</h2>
+<p class="subtitle">重点说明：为什么一个 tick 内可以多轮 assistant → tool → assistant，以及 Re-enter Loop 到底回到哪一层。</p>
+
+<div class="section">
+  <div class="label">1. Re-enter Loop 的位置</div>
+  <div class="mockup">
+    <div class="mockup-header">Re-enter Loop 只发生在内层 LLM Turn Loop，不会重新开始整个 Tick</div>
+    <div class="mockup-body">
+<pre style="white-space:pre-wrap; font-size:13px; line-height:1.5; margin:0;">
+外层 Tick Cycle:
+Trigger / Wakeup
+→ Bootstrap
+→ Sense
+→ Update Context
+→ Assemble Request
+→ [进入内层 LLM Turn Loop]
+→ Evaluate
+→ Update Memory
+→ Continue / Sleep / Respond / Escalate
+
+内层 LLM Turn Loop:
+Call LLM
+→ Assistant Turn
+→ Guard / Policy Check
+→ Act
+→ Observe
+→ Re-enter Loop
+    ↳ 回到 Call LLM（不是回到 Trigger / Bootstrap）
+</pre>
+      <p style="margin-top:10px;"><strong>关键点：</strong>Re-enter Loop 只是在同一个 tick 内，把新的 tool result 再喂给 LLM 继续推理，不代表重新开始一个新 tick。</p>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="label">2. 调用链路图</div>
+  <div class="mockup">
+    <div class="mockup-header">Assistant → Tool → Observe → Re-enter Loop</div>
+    <div class="mockup-body">
+<pre style="white-space:pre-wrap; font-size:13px; line-height:1.45; margin:0;">
+Agent Assembly
+  ↓ 提供 prompt/context/tool/memory/policy
+Agent Kernel
+  ↓
+Assemble Request
+  ↓
+Call LLM
+  ↓
+Assistant Turn
+  ├─ 情况 A：直接给 Final Result
+  │    → 退出内层 loop
+  │
+  └─ 情况 B：发起 Tool Call
+       ↓
+    Guard / Policy Check
+       ├─ 不允许 / 需审批
+       │    → 返回审批事件 / 阻断结果
+       │    → 退出内层 loop
+       │
+       └─ 允许执行
+            ↓
+         Act
+            ↓
+         Tool / Skill / Worker
+            ↓
+         Observe
+            ↓
+         生成 tool_result / side effect summary / error
+            ↓
+         Append result into current tick context
+            ↓
+         Re-enter Loop
+            ↓
+         Call LLM（同一个 tick 内的下一轮）
+</pre>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="label">3. Re-enter Loop 时，到底新增了什么</div>
+  <div class="cards">
+    <div class="card">
+      <div class="card-body">
+        <h3>不会重做的</h3>
+        <p>不会重新 Trigger / Wakeup</p>
+        <p>不会重新 Bootstrap 整个 Assembly</p>
+        <p>不会重新完整 Sense 世界状态</p>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-body">
+        <h3>会新增的</h3>
+        <p>新增一个 tool_result</p>
+        <p>新增 side effect summary / error</p>
+        <p>必要时补充少量新的 context detail</p>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-body">
+        <h3>然后回到哪</h3>
+        <p>回到 <strong>Call LLM</strong></p>
+        <p>让 assistant 基于新增结果继续决策</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="label">4. 一个具体例子</div>
+  <div class="mockup">
+    <div class="mockup-header">例：Loop Agent 想同步候选人简历</div>
+    <div class="mockup-body">
+<pre style="white-space:pre-wrap; font-size:13px; line-height:1.5; margin:0;">
+Call LLM
+→ assistant: "调用 sync_resume(candidate_id=123)"
+→ Guard: 权限允许
+→ Act: 执行 sync_resume
+→ Observe: 返回 error = "resume missing"
+→ Append tool_result: {status:error, reason:"resume missing"}
+→ Re-enter Loop
+→ Call LLM again
+→ assistant: "先调用 parse_resume(candidate_id=123)"
+→ Guard
+→ Act
+→ Observe: parse 成功，得到 resume artifact
+→ Re-enter Loop
+→ Call LLM again
+→ assistant: "再次调用 sync_resume(candidate_id=123)"
+→ ...
+→ 最终 assistant 输出："同步完成"
+</pre>
+      <p style="margin-top:10px;"><strong>含义：</strong>这个过程都发生在同一个 tick 内，只是 LLM 经过了多轮工具反馈才拿到最终结果。</p>
+    </div>
+  </div>
+</div>
+
+<div class="options" style="margin-top:20px;">
+  <div class="option" data-choice="reenter-ok" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>这个解释对</h3>
+      <p>继续下一步：补 Trigger/Wakeup 差异和 Loop/Assistant 装配差异</p>
+    </div>
+  </div>
+  <div class="option" data-choice="reenter-adjust" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>还要调整</h3>
+      <p>Re-enter Loop 的解释还不够准确</p>
+    </div>
+  </div>
+</div>

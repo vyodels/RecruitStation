@@ -1,4 +1,7 @@
+from unittest import mock
+
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import IntegrityError
 
 from scene_pilot.core.app import create_app
 from scene_pilot.core.settings import AppSettings
@@ -104,6 +107,37 @@ def create_subject(
         application_window=application_window,
     )
     return {"person": person, "application": application}
+
+
+def test_ensure_primary_recruit_agent_profile_recovers_from_unique_race(tmp_path):
+    from scene_pilot.services import recruit_agent as recruit_agent_service
+
+    with make_client(tmp_path) as client:
+        container = client.app.state.container
+        with container.session_factory() as session:
+            existing = RecruitAgentProfileRepository(session).create(recruit_agent_service.default_recruit_agent_profile())
+            state = {"primary_calls": 0}
+
+            class _RaceRepo:
+                def __init__(self, _session):
+                    self.session = _session
+
+                def primary(self):
+                    state["primary_calls"] += 1
+                    return None if state["primary_calls"] == 1 else existing
+
+                def create(self, payload):
+                    raise IntegrityError("INSERT", payload, Exception("duplicate agent_key"))
+
+                def update(self, item, update_data):
+                    item.prompt_config = update_data["prompt_config"]
+                    return item
+
+            with mock.patch.object(recruit_agent_service, "RecruitAgentProfileRepository", _RaceRepo):
+                resolved = recruit_agent_service.ensure_primary_recruit_agent_profile(session)
+
+            assert resolved.id == existing.id
+            assert resolved.agent_key == "recruit-agent"
 
 
 def test_recruit_agent_candidate_thread_state_and_memory(tmp_path):
@@ -527,6 +561,8 @@ def test_recruit_agent_goal_creation_and_operator_interaction_resolution(tmp_pat
         goals_response = client.get("/api/recruit-agent/goals")
         assert goals_response.status_code == 200
         assert len(goals_response.json()) == 1
+        assert isinstance(goals_response.json()[0]["created_at"], int)
+        assert isinstance(goals_response.json()[0]["updated_at"], int)
 
         runtime_session = client.get("/api/recruit-agent/runtime/session")
         assert runtime_session.status_code == 200
@@ -557,6 +593,8 @@ def test_recruit_agent_goal_creation_and_operator_interaction_resolution(tmp_pat
         interactions_response = client.get("/api/recruit-agent/runtime/operator-interactions")
         assert interactions_response.status_code == 200
         assert len(interactions_response.json()) == 1
+        assert isinstance(interactions_response.json()[0]["surfaced_at"], int)
+        assert isinstance(interactions_response.json()[0]["created_at"], int)
 
         resolve_response = client.post(
             f"/api/recruit-agent/runtime/operator-interactions/{interaction.id}/resolve",

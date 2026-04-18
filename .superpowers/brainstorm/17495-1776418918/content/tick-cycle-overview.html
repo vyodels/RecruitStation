@@ -1,0 +1,162 @@
+<h2>Agent Kernel / Agent Assembly / Tick Cycle 总览</h2>
+<p class="subtitle">把你刚才要的 4 块内容放在一个页面里：概念图、表格、Tick 交互流程、LLM 交互流程。你可以一次性对照看。</p>
+
+<div class="section">
+  <div class="label">1. 概念关系图</div>
+  <div class="mockup">
+    <div class="mockup-header">Agent Kernel + Agent Assembly + Tick Cycle</div>
+    <div class="mockup-body">
+      <div class="mock-content" style="text-align:center; margin-bottom:12px;"><strong>Agent Kernel（统一能力底座）</strong></div>
+      <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-bottom:16px;">
+        <div class="mock-sidebar">LLM invocation<br/><span class="subtitle">调模型</span></div>
+        <div class="mock-sidebar">context assembler<br/><span class="subtitle">组上下文</span></div>
+        <div class="mock-sidebar">tool / skill execution<br/><span class="subtitle">执行工具与技能</span></div>
+        <div class="mock-sidebar">memory retrieval<br/><span class="subtitle">记忆检索</span></div>
+        <div class="mock-sidebar">policy / approval<br/><span class="subtitle">权限与审批</span></div>
+        <div class="mock-sidebar">summary / persistence<br/><span class="subtitle">摘要与持久化</span></div>
+      </div>
+
+      <div style="text-align:center; margin:8px 0 12px; color:var(--muted);">↓ 同一个 Kernel，上面挂不同装配</div>
+
+      <div style="display:flex; gap:14px; margin-bottom:16px;">
+        <div class="mock-content" style="flex:1; text-align:center; min-height:84px;">
+          <strong>Loop Agent Assembly</strong><br/>
+          prompt / context / tool / memory / policy / wakeup
+        </div>
+        <div class="mock-content" style="flex:1; text-align:center; min-height:84px;">
+          <strong>Assistant Agent Assembly</strong><br/>
+          prompt / context / tool / memory / policy / session
+        </div>
+      </div>
+
+      <div style="text-align:center; margin:8px 0 12px; color:var(--muted);">↓ 两者都跑同一个 Tick Cycle</div>
+
+      <div class="mock-content" style="text-align:center; min-height:88px;">
+        <strong>Tick Cycle（唯一执行骨架）</strong><br/>
+        Trigger → Bootstrap → Sense → Update Context → Assemble Request → Call LLM → Assistant Turn → Guard → Act → Observe → Re-enter Loop → Evaluate → Update Memory → Continue / Sleep / Respond / Escalate
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="label">2. Tick Cycle 表格</div>
+  <div class="mockup">
+    <div class="mockup-header">统一 Tick Cycle（表格视图）</div>
+    <div class="mockup-body">
+      <div style="overflow:auto;">
+        <table style="width:100%; border-collapse:collapse; font-size:13px;">
+          <thead>
+            <tr>
+              <th style="text-align:left; padding:8px; border-bottom:1px solid var(--border);">节点</th>
+              <th style="text-align:left; padding:8px; border-bottom:1px solid var(--border);">作用</th>
+              <th style="text-align:left; padding:8px; border-bottom:1px solid var(--border);">LLM 对应</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td style="padding:8px; border-bottom:1px solid var(--border);">Trigger / Wakeup</td><td style="padding:8px; border-bottom:1px solid var(--border);">触发一次 tick</td><td style="padding:8px; border-bottom:1px solid var(--border);">尚未进 LLM</td></tr>
+            <tr><td style="padding:8px; border-bottom:1px solid var(--border);">Bootstrap</td><td style="padding:8px; border-bottom:1px solid var(--border);">加载 Assembly</td><td style="padding:8px; border-bottom:1px solid var(--border);">尚未进 LLM</td></tr>
+            <tr><td style="padding:8px; border-bottom:1px solid var(--border);">Sense</td><td style="padding:8px; border-bottom:1px solid var(--border);">收集输入/状态</td><td style="padding:8px; border-bottom:1px solid var(--border);">为请求准备原料</td></tr>
+            <tr><td style="padding:8px; border-bottom:1px solid var(--border);">Update Context</td><td style="padding:8px; border-bottom:1px solid var(--border);">筛选上下文</td><td style="padding:8px; border-bottom:1px solid var(--border);">context 细分</td></tr>
+            <tr><td style="padding:8px; border-bottom:1px solid var(--border);">Assemble Request</td><td style="padding:8px; border-bottom:1px solid var(--border);">组装请求</td><td style="padding:8px; border-bottom:1px solid var(--border);">system / user / tools</td></tr>
+            <tr><td style="padding:8px; border-bottom:1px solid var(--border);">Call LLM</td><td style="padding:8px; border-bottom:1px solid var(--border);">调模型</td><td style="padding:8px; border-bottom:1px solid var(--border);">LLM request</td></tr>
+            <tr><td style="padding:8px; border-bottom:1px solid var(--border);">Assistant Turn</td><td style="padding:8px; border-bottom:1px solid var(--border);">接收模型输出</td><td style="padding:8px; border-bottom:1px solid var(--border);">assistant</td></tr>
+            <tr><td style="padding:8px; border-bottom:1px solid var(--border);">Guard / Policy Check</td><td style="padding:8px; border-bottom:1px solid var(--border);">动作守卫</td><td style="padding:8px; border-bottom:1px solid var(--border);">assistant → tool 前</td></tr>
+            <tr><td style="padding:8px; border-bottom:1px solid var(--border);">Act</td><td style="padding:8px; border-bottom:1px solid var(--border);">执行动作</td><td style="padding:8px; border-bottom:1px solid var(--border);">tool execution</td></tr>
+            <tr><td style="padding:8px; border-bottom:1px solid var(--border);">Observe</td><td style="padding:8px; border-bottom:1px solid var(--border);">读取结果</td><td style="padding:8px; border-bottom:1px solid var(--border);">tool result</td></tr>
+            <tr><td style="padding:8px; border-bottom:1px solid var(--border);">Re-enter Loop</td><td style="padding:8px; border-bottom:1px solid var(--border);">必要时回到 LLM</td><td style="padding:8px; border-bottom:1px solid var(--border);">tool result → next assistant</td></tr>
+            <tr><td style="padding:8px; border-bottom:1px solid var(--border);">Evaluate</td><td style="padding:8px; border-bottom:1px solid var(--border);">评估是否推进目标</td><td style="padding:8px; border-bottom:1px solid var(--border);">loop 后判断</td></tr>
+            <tr><td style="padding:8px; border-bottom:1px solid var(--border);">Update Memory</td><td style="padding:8px; border-bottom:1px solid var(--border);">写记忆/摘要/计划</td><td style="padding:8px; border-bottom:1px solid var(--border);">不一定当前轮可见</td></tr>
+            <tr><td style="padding:8px;">Continue / Sleep / Respond / Escalate</td><td style="padding:8px;">决定出口</td><td style="padding:8px;">tick 结束</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="label">3. Tick 交互流程（外层）</div>
+  <div class="mockup">
+    <div class="mockup-header">Tick Cycle 外层流程</div>
+    <div class="mockup-body">
+<pre style="white-space:pre-wrap; font-size:13px; line-height:1.5; margin:0;">
+Trigger / Wakeup
+→ Bootstrap
+→ Sense
+→ Update Context
+→ Assemble Request
+→ LLM Turn Loop
+→ Evaluate
+→ Update Memory
+→ Continue / Sleep / Respond / Escalate
+</pre>
+      <p style="margin-top:10px;"><strong>含义：</strong>这是完整的一次 tick。Loop Agent 和 Assistant Agent 共用这个骨架，差异不在流程，而在装配输入和出口状态。</p>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="label">4. 与 LLM 的直接交互流程（内层）</div>
+  <div class="mockup">
+    <div class="mockup-header">LLM Turn Loop 内层链路</div>
+    <div class="mockup-body">
+<pre style="white-space:pre-wrap; font-size:13px; line-height:1.5; margin:0;">
+Assemble Request
+→ Call LLM
+→ Assistant Turn
+→ Guard / Policy Check
+→ Act
+→ Observe
+→ Re-enter Loop（如需要）
+</pre>
+      <p style="margin-top:10px;"><strong>含义：</strong>一个 tick 内部可以包含多轮 assistant → tool → assistant。真正与 LLM 直接往返的核心链路就在这里。</p>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="label">5. Context 的内部细分</div>
+  <div class="mockup">
+    <div class="mockup-header">Update Context 的组成</div>
+    <div class="mockup-body">
+<pre style="white-space:pre-wrap; font-size:13px; line-height:1.5; margin:0;">
+Context =
+  Background
++ Current Input
++ World State Summary
++ History
++ Memory Index
++ Memory Detail (on demand)
++ Plan State
++ Tool / Skill Availability
++ Policy Constraints
+</pre>
+      <div class="cards" style="margin-top:14px;">
+        <div class="card"><div class="card-body"><h3>Background</h3><p>长期目标、persona、稳定 prompt 约束</p></div></div>
+        <div class="card"><div class="card-body"><h3>Current Input</h3><p>用户消息、定时触发原因、外部事件</p></div></div>
+        <div class="card"><div class="card-body"><h3>World State Summary</h3><p>当前真实业务状态快照</p></div></div>
+        <div class="card"><div class="card-body"><h3>History</h3><p>历史对话或最近事件摘要</p></div></div>
+        <div class="card"><div class="card-body"><h3>Memory Index / Detail</h3><p>先索引，后按需读详情</p></div></div>
+        <div class="card"><div class="card-body"><h3>Plan / Tools / Policy</h3><p>计划状态、能力可用性、权限边界</p></div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="options" style="margin-top:20px;">
+  <div class="option" data-choice="tick-overview-ok" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>这版表达对</h3>
+      <p>继续下一步：在这张图基础上画 Loop / Assistant 的装配差异</p>
+    </div>
+  </div>
+  <div class="option" data-choice="tick-overview-adjust" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>还要调整</h3>
+      <p>概念对，但还要改结构、术语或顺序</p>
+    </div>
+  </div>
+</div>

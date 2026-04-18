@@ -1,0 +1,158 @@
+<h2>改进后的 C 方案：C-lite（最小内核 + 双模式 + 领域外壳）</h2>
+<p class="subtitle">这版不是“大一统 Agent OS”，而是吸收参考文档后的收缩版：世界状态外部化、memory 两阶段检索、Loop/Assistant 双模式分离、Recruiting 先作为第一个领域外壳。</p>
+
+<div class="section">
+  <div class="label">为什么要改原始 C</div>
+  <div class="cards">
+    <div class="card">
+      <div class="card-body">
+        <h3>文档原则 1</h3>
+        <p>世界状态应外部化，优先 SQL / DB，不靠长 messages[] 维持。</p>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-body">
+        <h3>文档原则 2</h3>
+        <p>Memory 要“索引 + 详情”两阶段，不应该每次全量塞进 context。</p>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-body">
+        <h3>文档原则 3</h3>
+        <p>Loop Agent 和 Assistant Agent 运行模式不同，不能都建模成聊天机器人。</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="label">整体结构图</div>
+  <div class="mockup">
+    <div class="mockup-header">C-lite 架构</div>
+    <div class="mockup-body">
+      <div style="display:flex; gap:16px; margin-bottom:16px;">
+        <div class="mock-content" style="flex:1; text-align:center; min-height:70px;">
+          <strong>Loop Agent</strong><br/>loop_mode<br/><span class="subtitle">常驻、自主、tick 驱动</span>
+        </div>
+        <div class="mock-content" style="flex:1; text-align:center; min-height:70px;">
+          <strong>Assistant Agent</strong><br/>chat_mode<br/><span class="subtitle">按需唤起、对话驱动</span>
+        </div>
+      </div>
+
+      <div style="text-align:center; margin:8px 0 14px; color:var(--muted);">↓ 都走同一个最小 Agent Kernel，但模式不同</div>
+
+      <div style="border:1px solid var(--border); border-radius:14px; padding:16px; background:var(--panel-2); margin-bottom:16px;">
+        <div class="mock-content" style="text-align:center; margin-bottom:14px;"><strong>Agent Kernel（最小内核）</strong></div>
+        <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:12px;">
+          <div class="mock-sidebar" style="min-height:88px;">
+            <strong>Invocation Protocol</strong><br/>
+            run_once / run_loop_tick / run_chat_turn
+          </div>
+          <div class="mock-sidebar" style="min-height:88px;">
+            <strong>Context Assembler</strong><br/>
+            stable system / dynamic user 分层
+          </div>
+          <div class="mock-sidebar" style="min-height:88px;">
+            <strong>Policy & Approval</strong><br/>
+            中间型权限 + 可配置范围
+          </div>
+          <div class="mock-sidebar" style="min-height:88px;">
+            <strong>Memory Retrieval</strong><br/>
+            list_index → read_detail
+          </div>
+          <div class="mock-sidebar" style="min-height:88px;">
+            <strong>Skill Lifecycle</strong><br/>
+            draft / review / apply / retire
+          </div>
+          <div class="mock-sidebar" style="min-height:88px;">
+            <strong>Scheduler & Events</strong><br/>
+            wakeup / sleep / event bus / checkpoints
+          </div>
+        </div>
+      </div>
+
+      <div style="text-align:center; margin:8px 0 14px; color:var(--muted);">↓ Kernel 不直接拥有业务世界状态，只通过领域外壳访问</div>
+
+      <div style="border:1px dashed var(--border); border-radius:14px; padding:16px; background:var(--panel); margin-bottom:16px;">
+        <div class="mock-content" style="text-align:center; margin-bottom:14px;"><strong>Recruiting Domain Shell（第一阶段唯一领域实现）</strong></div>
+        <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:12px;">
+          <div class="mock-sidebar" style="min-height:84px;">
+            <strong>WorldStateProvider</strong><br/>
+            candidates / applications / funnel / stats
+          </div>
+          <div class="mock-sidebar" style="min-height:84px;">
+            <strong>Worker Runtime</strong><br/>
+            AgentRun / WorkItem / Queue / Checkpoint
+          </div>
+          <div class="mock-sidebar" style="min-height:84px;">
+            <strong>Memory Schemas</strong><br/>
+            Global / Candidate / JD
+          </div>
+          <div class="mock-sidebar" style="min-height:84px;">
+            <strong>Action Adapters</strong><br/>
+            sync / outreach / score / search / parse
+          </div>
+        </div>
+      </div>
+
+      <div style="display:flex; gap:12px;">
+        <div class="mock-content" style="flex:1; min-height:74px; text-align:center;">
+          <strong>结构化状态</strong><br/>SQL / repositories / state machine
+        </div>
+        <div class="mock-content" style="flex:1; min-height:74px; text-align:center;">
+          <strong>记忆存储</strong><br/>memory index + detail / disclosure preview/model_context
+        </div>
+        <div class="mock-content" style="flex:1; min-height:74px; text-align:center;">
+          <strong>技能存储</strong><br/>skill registry / drafts / creator-assisted refinement
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="label">和原始 C 的差异</div>
+  <div class="pros-cons">
+    <div class="pros">
+      <h4>保留 C 的地方</h4>
+      <ul>
+        <li>先抽统一 Kernel，而不是只做 Loop 特化层</li>
+        <li>Loop / Assistant 从第一天就是两个顶层 agent</li>
+        <li>policy / memory / skill lifecycle 统一抽象</li>
+      </ul>
+    </div>
+    <div class="cons">
+      <h4>对原始 C 的收缩</h4>
+      <ul>
+        <li>不先抽大一统世界状态平台</li>
+        <li>不先把招聘表和 runtime 全部中性化</li>
+        <li>不把 Loop 错建成 chat session agent</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="label">我当前建议</div>
+  <div class="mock-content">
+    <strong>如果走 C，就走这版 C-lite。</strong><br/>
+    它保留统一 Kernel 的方向，但避免一上来过度平台化，更符合参考文档的上下文、memory、API 分层原则。
+  </div>
+</div>
+
+<div class="options" style="margin-top:20px;">
+  <div class="option" data-choice="c-lite-ok" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>C-lite 方向对</h3>
+      <p>继续展开下一层：Loop / Assistant 的运行边界与数据流</p>
+    </div>
+  </div>
+  <div class="option" data-choice="c-lite-adjust" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>还要调整</h3>
+      <p>这个大方向可以，但结构或边界还要改</p>
+    </div>
+  </div>
+</div>

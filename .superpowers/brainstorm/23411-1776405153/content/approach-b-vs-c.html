@@ -1,0 +1,114 @@
+<h2>Loop Agent 架构方案对比</h2>
+<p class="subtitle">左边是方案 B（先拉出 Loop Agent），右边是方案 C（先抽统一 Agent OS）。重点看：改动位置、演进方向、当前落地成本。</p>
+
+<div class="split" style="align-items:start; gap:20px;">
+  <div class="mockup" data-choice="b" onclick="toggleSelect(this)">
+    <div class="mockup-header">方案 B：Loop Agent 在上，复用现有 Worker Runtime</div>
+    <div class="mockup-body">
+      <div class="section">
+        <div class="label">结构图</div>
+        <div style="border:1px solid var(--border); border-radius:12px; padding:16px; background:var(--panel);">
+          <div class="mock-content" style="margin-bottom:10px; text-align:center; font-weight:600;">Loop Agent（新）</div>
+          <div style="text-align:center; margin:8px 0; color:var(--muted);">↓ 派发 worker tasks</div>
+          <div class="mock-content" style="margin-bottom:10px; text-align:center;">现有 Worker Runtime</div>
+          <div style="display:flex; gap:10px; margin-bottom:10px;">
+            <div class="mock-sidebar" style="flex:1; min-height:80px;">AgentRun / WorkItem</div>
+            <div class="mock-sidebar" style="flex:1; min-height:80px;">Queue / Checkpoint</div>
+          </div>
+          <div style="text-align:center; margin:8px 0; color:var(--muted);">↓ 调用</div>
+          <div style="display:flex; gap:10px;">
+            <div class="mock-sidebar" style="flex:1; min-height:72px;">Skill / Tool</div>
+            <div class="mock-sidebar" style="flex:1; min-height:72px;">Memory / Policy</div>
+          </div>
+        </div>
+      </div>
+      <div class="pros-cons">
+        <div class="pros">
+          <h4>优点</h4>
+          <ul>
+            <li>最快落地 Loop Agent</li>
+            <li>保留现有 runtime 资产</li>
+            <li>风险低，改动集中在 orchestration 层</li>
+          </ul>
+        </div>
+        <div class="cons">
+          <h4>代价</h4>
+          <ul>
+            <li>后面做 Assistant 还要再抽一轮共性</li>
+            <li>存在一个阶段性的不完全对称结构</li>
+          </ul>
+        </div>
+      </div>
+      <p><strong>适合现在：</strong> 先验证“常驻智能 Loop Agent”这个产品形态。</p>
+    </div>
+  </div>
+
+  <div class="mockup" data-choice="c" onclick="toggleSelect(this)">
+    <div class="mockup-header">方案 C：先抽 Agent OS，再挂 Loop / Assistant</div>
+    <div class="mockup-body">
+      <div class="section">
+        <div class="label">结构图</div>
+        <div style="border:1px solid var(--border); border-radius:12px; padding:16px; background:var(--panel);">
+          <div class="mock-content" style="margin-bottom:10px; text-align:center; font-weight:600;">Agent Kernel（新）</div>
+          <div style="display:flex; gap:10px; margin-bottom:10px;">
+            <div class="mock-sidebar" style="flex:1; min-height:86px;">Prompt Exec<br/>Policy<br/>Approvals</div>
+            <div class="mock-sidebar" style="flex:1; min-height:86px;">Memory<br/>Skill Lifecycle<br/>Ctx Mgmt</div>
+          </div>
+          <div style="text-align:center; margin:8px 0; color:var(--muted);">↓ 两个顶层 agent 共用</div>
+          <div style="display:flex; gap:10px; margin-bottom:10px;">
+            <div class="mock-content" style="flex:1; text-align:center;">Loop Agent</div>
+            <div class="mock-content" style="flex:1; text-align:center;">Assistant Agent</div>
+          </div>
+          <div style="text-align:center; margin:8px 0; color:var(--muted);">↓ 再连接 runtime / tools</div>
+          <div style="display:flex; gap:10px;">
+            <div class="mock-sidebar" style="flex:1; min-height:72px;">Worker Runtime</div>
+            <div class="mock-sidebar" style="flex:1; min-height:72px;">Skills / Tools</div>
+          </div>
+        </div>
+      </div>
+      <div class="pros-cons">
+        <div class="pros">
+          <h4>优点</h4>
+          <ul>
+            <li>结构最干净</li>
+            <li>Loop / Assistant 从第一天就对称</li>
+            <li>更利于长期扩展更多 agent</li>
+          </ul>
+        </div>
+        <div class="cons">
+          <h4>代价</h4>
+          <ul>
+            <li>现在要先重构底层概念</li>
+            <li>很容易过度平台化</li>
+            <li>会延缓 Loop Agent 的验证</li>
+          </ul>
+        </div>
+      </div>
+      <p><strong>适合现在：</strong> 你已经确定要先做 Agent OS，而不只是先落地 Loop Agent。</p>
+    </div>
+  </div>
+</div>
+
+<div class="section" style="margin-top:20px;">
+  <div class="label">我当前推荐</div>
+  <div class="mock-content">
+    <strong>B → C 演进式路线</strong>：现在先做 B，把 Loop Agent 做成真正的顶层 agent；设计时把 profile、memory、policy、skill lifecycle 抽成中性接口，后续再自然长成 C。
+  </div>
+</div>
+
+<div class="options" style="margin-top:20px;">
+  <div class="option" data-choice="pick-b" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>先按 B 设计</h3>
+      <p>优先把 Loop Agent 落地，后面平滑演进到 C</p>
+    </div>
+  </div>
+  <div class="option" data-choice="pick-c" onclick="toggleSelect(this)">
+    <div class="letter">C</div>
+    <div class="content">
+      <h3>直接按 C 设计</h3>
+      <p>先做统一 Agent Kernel，再挂 Loop / Assistant</p>
+    </div>
+  </div>
+</div>

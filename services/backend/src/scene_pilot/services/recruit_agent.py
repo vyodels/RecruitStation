@@ -4,6 +4,7 @@ import json
 from datetime import datetime
 from typing import Any
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from scene_pilot.models import AgentGlobalMemory, CandidatePersonMemory, JobDescriptionMemory, RecruitAgentProfile
@@ -573,8 +574,19 @@ def ensure_primary_recruit_agent_profile(session: Session) -> RecruitAgentProfil
             prompt_config["context_policy"] = resolved_policy
             existing = repo.update(existing, {"prompt_config": prompt_config})
         return existing
-    created = repo.create(default_recruit_agent_profile())
-    return created
+    try:
+        return repo.create(default_recruit_agent_profile())
+    except IntegrityError:
+        session.rollback()
+        existing = repo.primary()
+        if existing is None:
+            raise
+        prompt_config = dict(existing.prompt_config or {})
+        resolved_policy = resolve_context_policy(prompt_config)
+        if prompt_config.get("context_policy") != resolved_policy:
+            prompt_config["context_policy"] = resolved_policy
+            existing = repo.update(existing, {"prompt_config": prompt_config})
+        return existing
 
 
 def ensure_candidate_person_memory(

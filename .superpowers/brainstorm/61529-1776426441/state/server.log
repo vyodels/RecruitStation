@@ -1,0 +1,7 @@
+{"type":"server-started","port":50066,"host":"127.0.0.1","url_host":"localhost","url":"http://localhost:50066","screen_dir":"/Users/didi/AgentProjects/scene-pilot/.superpowers/brainstorm/61529-1776426441/content","state_dir":"/Users/didi/AgentProjects/scene-pilot/.superpowers/brainstorm/61529-1776426441/state"}
+{"type":"screen-added","file":"/Users/didi/AgentProjects/scene-pilot/.superpowers/brainstorm/61529-1776426441/content/reenter-loop-call-chain-explained.html"}
+{"type":"screen-added","file":"/Users/didi/AgentProjects/scene-pilot/.superpowers/brainstorm/61529-1776426441/content/reenter-loop-inline-explained.html"}
+{"type":"screen-added","file":"/Users/didi/AgentProjects/scene-pilot/.superpowers/brainstorm/61529-1776426441/content/reenter-loop-inline-single-line.html"}
+{"type":"screen-added","file":"/Users/didi/AgentProjects/scene-pilot/.superpowers/brainstorm/61529-1776426441/content/reenter-loop-return-arrow.html"}
+{"type":"screen-added","file":"/Users/didi/AgentProjects/scene-pilot/.superpowers/brainstorm/61529-1776426441/content/reenter-loop-box-diagram.html"}
+{"type":"server-stopped","reason":"idle timeout"}

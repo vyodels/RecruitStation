@@ -1,0 +1,112 @@
+<h2>Re-enter Loop 调用链路图（节点内直接解释）</h2>
+<p class="subtitle">这版把每一步的说明直接写在节点后面，顺着一条链看就能明白，不需要上下对照。</p>
+
+<div class="section">
+  <div class="label">链路图</div>
+  <div class="mockup">
+    <div class="mockup-header">Assistant → Tool → Observe → Re-enter Loop</div>
+    <div class="mockup-body">
+<pre style="white-space:pre-wrap; font-size:13px; line-height:1.55; margin:0;">
+Agent Assembly
+  └─ 提供这次执行所需的装配配置：prompt profile、context profile、tool profile、memory profile、policy profile、wakeup/session profile
+
+↓
+
+Agent Kernel
+  └─ 统一执行底座开始工作，负责上下文组装、LLM 调用、工具执行、审批判断、结果回流等流程控制
+
+↓
+
+Assemble Request
+  └─ 组装这次发给 LLM 的完整请求：system prompt、dynamic user context、tools、memory index，必要时补充 memory detail
+
+↓
+
+Call LLM
+  └─ 发起一次真实的模型调用，把当前这次 tick 内已经准备好的信息交给 LLM
+
+↓
+
+Assistant Turn
+  └─ 接收模型这一轮输出；它可能直接给 final result，也可能发起一个 tool call
+
+  ├─ 情况 A：Final Result
+  │    └─ 模型认为已经拿到足够信息，直接输出最终结果；此时退出内层 loop，回到外层 tick 的 Evaluate / Update Memory / 出口阶段
+  │
+  └─ 情况 B：Tool Call
+       └─ 模型要求进一步行动，例如调一个 tool、skill、worker，或继续获取更多信息
+
+       ↓
+
+    Guard / Policy Check
+       └─ 在真正执行前检查权限和边界：是否允许自动执行、是否需要审批、是否超预算、是否重复执行、是否有高风险副作用
+
+       ├─ 不允许 / 需审批
+       │    └─ 不进入执行阶段，而是返回审批事件、阻断结果或等待状态；当前内层 loop 在这里结束
+       │
+       └─ 允许执行
+            └─ 通过策略检查，进入真正执行阶段
+
+            ↓
+
+         Act
+            └─ 执行模型决定的动作：调用 tool、调用 skill、调用 worker，或直接修改业务数据
+
+            ↓
+
+         Tool / Skill / Worker
+            └─ 真正干活的执行体：Tool 偏轻量能力，Skill 偏封装能力资产，Worker 偏较重的后台执行单元
+
+            ↓
+
+         Observe
+            └─ 读取执行结果，拿到成功/失败/部分成功/异常/产物生成/状态变化等真实反馈
+
+            ↓
+
+         生成 tool_result / side effect summary / error
+            └─ 把刚才的执行反馈标准化成当前 tick 可继续使用的事实，例如 tool_result、错误信息、副作用摘要、状态变化、artifact 输出
+
+            ↓
+
+         Append result into current tick context
+            └─ 把新的结果追加回“当前这个 tick 的上下文”，注意这里只更新本 tick，不会重新开始一个新 tick
+
+            ↓
+
+         Re-enter Loop
+            └─ 表示：在同一个 tick 内，把新增结果重新喂给 LLM，再继续推理下一步怎么办
+
+            ↓
+
+         Call LLM（同一个 tick 内的下一轮）
+            └─ 再次调用 LLM；这次它能看到刚刚新增的 tool_result，因此可以改计划、换工具、补动作，或者直接结束
+</pre>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="label">关键结论</div>
+  <div class="mock-content">
+    <strong>Re-enter Loop 不等于重新开始一个新 tick。</strong><br/>
+    它只表示：当前这个 tick 内，完成了一次 assistant → tool → observe 之后，把新结果回流给 LLM，再继续当前这轮执行。
+  </div>
+</div>
+
+<div class="options" style="margin-top:20px;">
+  <div class="option" data-choice="reenter-inline-ok" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>这版对</h3>
+      <p>节点内说明更容易顺着看</p>
+    </div>
+  </div>
+  <div class="option" data-choice="reenter-inline-adjust" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>还要调整</h3>
+      <p>节点内说明还不够清楚</p>
+    </div>
+  </div>
+</div>

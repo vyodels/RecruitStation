@@ -1,0 +1,72 @@
+<h2>Re-enter Loop 调用链路图（框图箭头版）</h2>
+<p class="subtitle">这版用框图和回跳箭头显示 Re-enter Loop 到底回到哪里。重点看右侧的回流箭头：它回到 <strong>Call LLM</strong>，而不是重新开始整个 tick。</p>
+
+<div class="section">
+  <div class="label">主链路</div>
+  <div class="mockup">
+    <div class="mockup-header">Assistant → Tool → Observe → Re-enter Loop</div>
+    <div class="mockup-body">
+      <div style="display:flex; flex-direction:column; gap:12px; align-items:center;">
+        <div class="mock-content" style="width:78%; text-align:left;"><strong>Agent Assembly</strong> — 提供这次执行所需的装配配置：prompt、context、tool、memory、policy、wakeup/session profiles</div>
+        <div style="color:var(--muted);">↓</div>
+        <div class="mock-content" style="width:78%; text-align:left;"><strong>Agent Kernel</strong> — 统一执行底座开始工作，负责上下文组装、LLM 调用、工具执行、审批判断、结果回流</div>
+        <div style="color:var(--muted);">↓</div>
+        <div class="mock-content" style="width:78%; text-align:left;"><strong>Assemble Request</strong> — 组装这次发给 LLM 的完整请求：system prompt、dynamic user context、tools、memory index，必要时补 memory detail</div>
+        <div style="color:var(--muted);">↓</div>
+        <div id="call-llm-box" class="mock-content" style="width:78%; text-align:left; border:2px solid #5aa9ff;"><strong>Call LLM</strong> — 发起一次真实的模型调用，把当前 tick 内已经准备好的信息交给 LLM</div>
+        <div style="color:var(--muted);">↓</div>
+        <div class="mock-content" style="width:78%; text-align:left;"><strong>Assistant Turn</strong> — 接收模型输出；可能直接给 Final Result，也可能发起 Tool Call</div>
+      </div>
+
+      <div class="split" style="margin-top:18px; gap:18px; align-items:start;">
+        <div class="mockup" style="flex:1; margin:0;">
+          <div class="mockup-header">路径 A：直接结束</div>
+          <div class="mockup-body">
+            <div class="mock-content"><strong>Final Result</strong> — 模型已经拿到足够信息，直接输出最终结果</div>
+            <div style="text-align:center; margin:10px 0; color:var(--muted);">↓</div>
+            <div class="mock-content"><strong>Exit Inner Loop</strong> — 退出内层 LLM loop，回到外层 tick 的 Evaluate / Update Memory / 出口阶段</div>
+          </div>
+        </div>
+
+        <div class="mockup" style="flex:1.4; margin:0; border-color:#5aa9ff;">
+          <div class="mockup-header">路径 B：Tool Call 后 Re-enter Loop</div>
+          <div class="mockup-body">
+            <div class="mock-content"><strong>Tool Call</strong> — 模型要求进一步行动，例如调 tool、skill、worker，或继续获取信息</div>
+            <div style="text-align:center; margin:10px 0; color:var(--muted);">↓</div>
+            <div class="mock-content"><strong>Guard / Policy Check</strong> — 检查权限、审批、预算、重复执行、高风险副作用</div>
+            <div style="text-align:center; margin:10px 0; color:var(--muted);">↓</div>
+            <div class="mock-content"><strong>Act</strong> — 执行动作：调用 tool、skill、worker，或修改业务数据</div>
+            <div style="text-align:center; margin:10px 0; color:var(--muted);">↓</div>
+            <div class="mock-content"><strong>Observe</strong> — 读取执行结果，拿到成功 / 失败 / 部分成功 / 异常 / 状态变化</div>
+            <div style="text-align:center; margin:10px 0; color:var(--muted);">↓</div>
+            <div class="mock-content"><strong>Append Result</strong> — 把 tool_result / error / side-effect summary 追加回当前 tick context</div>
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-top:14px; gap:12px;">
+              <div class="mock-content" style="flex:1;"><strong>Re-enter Loop</strong> — 不重新开始 tick，只是在同一个 tick 内继续下一轮 LLM 推理</div>
+              <div style="font-size:28px; color:#5aa9ff; font-weight:700;">↺</div>
+              <div class="mock-content" style="flex:1; border:2px solid #5aa9ff;"><strong>Back to Call LLM</strong> — 回到当前 tick 内的下一轮 Call LLM</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="mock-content" style="margin-top:18px;"><strong>关键结论：</strong> Re-enter Loop 的回跳目标是 <strong>Call LLM</strong>，不是 Trigger / Wakeup，不是 Bootstrap，也不是重新开始一个新 tick。</div>
+    </div>
+  </div>
+</div>
+
+<div class="options" style="margin-top:20px;">
+  <div class="option" data-choice="box-diagram-ok" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>这版对</h3>
+      <p>框图箭头版更直观</p>
+    </div>
+  </div>
+  <div class="option" data-choice="box-diagram-adjust" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>还要调整</h3>
+      <p>回流箭头或分支表达还不够理想</p>
+    </div>
+  </div>
+</div>
