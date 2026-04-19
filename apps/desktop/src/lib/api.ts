@@ -2062,20 +2062,20 @@ function createFetchClient(baseUrl: string): DesktopApiClient {
     getRuntimeWorkspaceData: async () => {
       const [compilerContract, domainPacks, taskSpecs, plans, episodes, snapshots, capabilityDrivers, environmentAssessments, templates, patches, replans] =
         await Promise.all([
-        requestJson<unknown>(baseUrl, `${recruitAgentExecutionApiBase}/compiler-contract`),
-        requestJson<unknown>(baseUrl, `${recruitAgentExecutionApiBase}/profiles`),
-        requestJson<unknown>(baseUrl, `${recruitAgentExecutionApiBase}/playbooks`),
-        requestJson<unknown>(baseUrl, `${recruitAgentExecutionApiBase}/plans`),
-        requestJson<unknown>(baseUrl, `${recruitAgentExecutionApiBase}/runs`),
-        requestJson<unknown>(baseUrl, `${recruitAgentExecutionApiBase}/snapshots`),
+        requestOptionalJson<unknown>(baseUrl, `${recruitAgentExecutionApiBase}/compiler-contract`),
+        requestOptionalJson<unknown>(baseUrl, `${recruitAgentExecutionApiBase}/profiles`),
+        requestOptionalJson<unknown>(baseUrl, `${recruitAgentExecutionApiBase}/playbooks`),
+        requestOptionalJson<unknown>(baseUrl, `${recruitAgentExecutionApiBase}/plans`),
+        requestOptionalJson<unknown>(baseUrl, `${recruitAgentExecutionApiBase}/runs`),
+        requestOptionalJson<unknown>(baseUrl, `${recruitAgentExecutionApiBase}/snapshots`),
         requestOptionalJson<unknown>(baseUrl, `${recruitAgentExecutionApiBase}/capabilities`),
         requestOptionalJson<unknown>(baseUrl, `${recruitAgentExecutionApiBase}/environment-assessments`),
-        requestJson<unknown>(baseUrl, `${recruitAgentExecutionApiBase}/playbook-versions`),
-        requestJson<unknown>(baseUrl, `${recruitAgentExecutionApiBase}/adjustments`),
+        requestOptionalJson<unknown>(baseUrl, `${recruitAgentExecutionApiBase}/playbook-versions`),
+        requestOptionalJson<unknown>(baseUrl, `${recruitAgentExecutionApiBase}/adjustments`),
         requestOptionalJson<unknown>(baseUrl, `${recruitAgentExecutionApiBase}/replans`),
       ]);
       return {
-        compilerContract: normalizeRuntimeCompilerContract(compilerContract),
+        compilerContract: compilerContract ? normalizeRuntimeCompilerContract(compilerContract) : null,
         domainPacks: asArray(domainPacks).map(normalizeDomainPack),
         taskSpecs: asArray(taskSpecs).map(normalizeRuntimeTask),
         plans: asArray(plans).map(normalizeRuntimePlan),

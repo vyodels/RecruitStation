@@ -158,7 +158,23 @@ class AssistantAgent:
         if active is None:
             return {"conversation_id": conversation_id, "cancelled": False}
         active.token.cancel("operator_cancelled")
-        return {"conversation_id": conversation_id, "cancelled": True, "turn_id": active.turn_id}
+        active.queue.put(
+            (
+                "turn_cancelling",
+                {
+                    "conversation_id": conversation_id,
+                    "turn_id": active.turn_id,
+                    "reason": active.token.reason,
+                },
+            )
+        )
+        active.worker.join(timeout=0.2)
+        return {
+            "conversation_id": conversation_id,
+            "cancelled": True,
+            "turn_id": active.turn_id,
+            "active": active.worker.is_alive(),
+        }
 
     def _execute_turn(
         self,
@@ -203,7 +219,7 @@ class AssistantAgent:
             )
             conversation = self.session_store.get_session(conversation_id)
             if conversation is not None:
-                self.session_store.append_jsonl(
+                compaction_event = self.session_store.append_jsonl(
                     conversation,
                     {
                         "role": "assistant",
@@ -213,6 +229,8 @@ class AssistantAgent:
                         "tool_calls": tool_calls,
                     },
                 )
+                if compaction_event is not None:
+                    _emit("compacted", compaction_event)
             _emit("turn_completed", {"turn_id": assistant_turn_id, "status": status})
         except Exception as exc:
             self.session_store.update_turn(

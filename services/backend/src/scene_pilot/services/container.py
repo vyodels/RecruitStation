@@ -19,11 +19,9 @@ from scene_pilot.execution_units.browser_worker import run_browser_worker
 from scene_pilot.execution_units.runner import ExecutionUnitRunner
 from scene_pilot.execution_units.store import ExecutionUnitStore
 from scene_pilot.kernel.kernel import AgentKernel
-from scene_pilot.mcp.registry import McpRegistry
 from scene_pilot.plugins.host import PluginHost
 from scene_pilot.plugins.loader import install_manifest
 from scene_pilot.plugins.recruit.manifest import RecruitPluginManifest
-from scene_pilot.runtime.models import LLMResponse, Message
 from scene_pilot.runtime.providers import (
     AnthropicProvider,
     LLMProvider,
@@ -33,23 +31,14 @@ from scene_pilot.runtime.providers import (
     UnavailableProvider,
 )
 from scene_pilot.runtime.tools import ToolRegistry, register_core_tools
-
-
-@dataclass(slots=True)
-class DeterministicProvider:
-    provider_name: str = "deterministic"
-
-    def generate(
-        self,
-        messages: list[Message],
-        *,
-        tools: list[dict[str, Any]] | None = None,
-        task: dict[str, Any] | None = None,
-        max_tokens: int | None = None,
-        temperature: float | None = None,
-    ) -> LLMResponse:
-        latest_user_message = next((message.content for message in reversed(messages) if message.role == "user"), "")
-        return LLMResponse(content=f"ack:{latest_user_message[:120]}")
+from scene_pilot.scheduler.queue import SqlAlchemyQueue
+from scene_pilot.scheduler.scheduler import SerialScheduler
+from scene_pilot.services.dashboard import DashboardService
+from scene_pilot.services.events import EventStreamService
+from scene_pilot.services.feature_flags import FeatureFlagService
+from scene_pilot.services.mcp_registry import McpRegistryService
+from scene_pilot.services.sync import SyncService
+from scene_pilot.services.system_commands import SystemCommandService
 
 
 @dataclass(slots=True)
@@ -57,6 +46,7 @@ class AppContainer:
     settings: AppSettings
     session_factory: sessionmaker[Session]
     provider: LLMProvider
+    providers: ProviderRegistry
     tool_registry: ToolRegistry
     plugin_host: PluginHost
     kernel: AgentKernel
@@ -69,7 +59,13 @@ class AppContainer:
     learning_writer: LearningWriter
     evolution_queue: EvolutionQueue
     promotion: PromotionService
-    mcp_registry: McpRegistry
+    mcp_registry: McpRegistryService
+    events: EventStreamService
+    flags: FeatureFlagService
+    system_commands: SystemCommandService
+    sync: SyncService
+    dashboard: DashboardService
+    scheduler: SerialScheduler
 
     @classmethod
     def build(cls, settings: AppSettings | None = None) -> "AppContainer":
@@ -78,7 +74,7 @@ class AppContainer:
         initialize_database(engine)
         session_factory = create_session_factory(engine)
 
-        provider = _build_provider(resolved_settings)
+        providers, provider = _build_provider_bundle(resolved_settings)
         tool_registry = ToolRegistry()
         register_core_tools(tool_registry)
 
@@ -108,12 +104,23 @@ class AppContainer:
         )
         evolution_queue = EvolutionQueue(session_factory)
         promotion = PromotionService(session_factory)
-        mcp_registry = McpRegistry(session_factory)
-
+        events = EventStreamService()
+        flags = _build_flags(resolved_settings)
+        sync = _build_sync_service(resolved_settings, session_factory)
+        dashboard = DashboardService(settings=resolved_settings, events=events, sync_service=sync)
+        scheduler = SerialScheduler(queue=SqlAlchemyQueue(session_factory))
+        system_commands = SystemCommandService(
+            session_factory=session_factory,
+            flags=flags,
+            events=events,
+            execution_enabled=resolved_settings.feature_flags.enable_system_commands,
+        )
+        mcp_registry = McpRegistryService(session_factory)
         return cls(
             settings=resolved_settings,
             session_factory=session_factory,
             provider=provider,
+            providers=providers,
             tool_registry=tool_registry,
             plugin_host=plugin_host,
             kernel=kernel,
@@ -127,10 +134,34 @@ class AppContainer:
             evolution_queue=evolution_queue,
             promotion=promotion,
             mcp_registry=mcp_registry,
+            events=events,
+            flags=flags,
+            system_commands=system_commands,
+            sync=sync,
+            dashboard=dashboard,
+            scheduler=scheduler,
         )
 
+    def reload_settings(self, settings: AppSettings) -> None:
+        self.settings = settings
+        self.providers, self.provider = _build_provider_bundle(settings)
+        self.kernel.provider = self.provider
+        self.dashboard.settings = settings
 
-def _build_provider(settings: AppSettings) -> LLMProvider:
+        self.flags.flags.clear()
+        self.flags.merge(
+            {
+                "skills.system_command": settings.feature_flags.enable_system_commands,
+                "skills.auto_activate": bool(settings.provider_config.get("skills_auto_activate", False)),
+            }
+        )
+
+        self.sync.intranet_enabled = settings.feature_flags.enable_intranet_sync
+        self.sync.target = _build_sync_target(settings)
+        self.system_commands.execution_enabled = settings.feature_flags.enable_system_commands
+
+
+def _build_provider_bundle(settings: AppSettings) -> tuple[ProviderRegistry, LLMProvider]:
     registry = ProviderRegistry()
     runtime_settings = settings.provider_runtime_settings()
     if runtime_settings.openai_api_key:
@@ -139,7 +170,34 @@ def _build_provider(settings: AppSettings) -> LLMProvider:
         registry.register(AnthropicProvider(settings.build_provider_config("anthropic")))
     if registry.providers:
         preferred = registry.fallback_order[0]
-        return ProviderRegistryAdapter(registry=registry, preferred_provider=preferred)
-    return UnavailableProvider(
+        return registry, ProviderRegistryAdapter(registry=registry, preferred_provider=preferred)
+    return registry, UnavailableProvider(
         reason="provider unavailable: configure RECRUIT_AGENT_PROVIDER_CONFIG__OPENAI_API_KEY or RECRUIT_AGENT_PROVIDER_CONFIG__ANTHROPIC_API_KEY",
+    )
+
+
+def _build_flags(settings: AppSettings) -> FeatureFlagService:
+    flags = FeatureFlagService()
+    flags.merge(
+        {
+            "skills.system_command": settings.feature_flags.enable_system_commands,
+            "skills.auto_activate": bool(settings.provider_config.get("skills_auto_activate", False)),
+        }
+    )
+    return flags
+
+
+def _build_sync_target(settings: AppSettings) -> dict[str, Any]:
+    return {
+        "kind": "intranet",
+        "base_url": settings.intranet_sync.base_url,
+        "api_path": settings.intranet_sync.api_path,
+    }
+
+
+def _build_sync_service(settings: AppSettings, session_factory: sessionmaker[Session]) -> SyncService:
+    return SyncService(
+        intranet_enabled=settings.feature_flags.enable_intranet_sync,
+        session_factory=session_factory,
+        target=_build_sync_target(settings),
     )

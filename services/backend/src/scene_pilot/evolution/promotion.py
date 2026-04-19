@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session, sessionmaker
 
-from scene_pilot.models.domain import Skill
+from scene_pilot.models.domain import PromptOverlayRevision, Skill
 from scene_pilot.skills.registry import SkillRegistry
 
 
@@ -25,9 +25,7 @@ class PromotionService:
             skill = session.get(Skill, skill_pk)
             if skill is None:
                 raise KeyError(f"unknown skill: {skill_pk}")
-            skill.status = "active"
-            skill.confirmed_at = datetime.now(UTC)
-            skill.confirmed_by = skill.confirmed_by or "system"
+            activate_skill(skill, reviewer="system")
             session.commit()
             session.refresh(skill)
             return skill
@@ -54,6 +52,37 @@ def evaluate_trial_metrics(metrics: dict[str, object]) -> dict[str, object]:
             "min_success_rate": AUTO_PROMOTE_MIN_SUCCESS_RATE,
         },
     }
+
+
+def activate_skill(skill: Skill, *, reviewer: str | None) -> Skill:
+    skill.status = "active"
+    skill.confirmed_at = datetime.now(UTC)
+    skill.confirmed_by = reviewer or skill.confirmed_by or "system"
+    return skill
+
+
+def reject_skill(skill: Skill) -> Skill:
+    if skill.status == "trial":
+        skill.status = "draft"
+    return skill
+
+
+def activate_prompt_revision(
+    revision: PromptOverlayRevision,
+    *,
+    baseline_metrics: dict[str, object] | None = None,
+) -> PromptOverlayRevision:
+    revision.status = "active"
+    revision.activated_at = datetime.now(UTC)
+    if baseline_metrics is not None:
+        revision.baseline_metrics = dict(baseline_metrics)
+    return revision
+
+
+def reject_prompt_revision(revision: PromptOverlayRevision) -> PromptOverlayRevision:
+    revision.status = "rejected"
+    revision.archived_at = datetime.now(UTC)
+    return revision
 
 
 def _to_int(value: object, *, default: int = 0) -> int:

@@ -17,12 +17,14 @@ def test_execution_unit_wait_is_nonblocking_for_inflight_work() -> None:
     runner = ExecutionUnitRunner(store=ExecutionUnitStore(), workers={"browser": _worker})
     unit = runner.create_execution_unit("browser", {"url": "https://example.com"})
 
-    snapshot = runner.wait_unit(unit.unit_id)
+    started_at = time.time()
+    snapshot = runner.wait_unit(unit.unit_id, timeout_seconds=0.05, until_statuses={"succeeded"})
+    elapsed = time.time() - started_at
     assert snapshot.status in {"queued", "running"}
+    assert elapsed < 0.2
 
     blocker.set()
-    deadline = time.time() + 2
-    while runner.wait_unit(unit.unit_id).status != "succeeded" and time.time() < deadline:
-        time.sleep(0.02)
+    finished = runner.wait_unit(unit.unit_id, timeout_seconds=1, until_statuses={"succeeded"})
 
+    assert finished.status == "succeeded"
     assert runner.unit_result(unit.unit_id).status == "succeeded"

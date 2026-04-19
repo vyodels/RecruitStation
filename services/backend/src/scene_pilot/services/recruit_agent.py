@@ -15,7 +15,7 @@ from scene_pilot.repositories import (
     RecruitAgentProfileRepository,
 )
 from scene_pilot.runtime.models import Message
-from scene_pilot.runtime.providers import ProviderError, ProviderRegistry
+from scene_pilot.runtime.providers import LLMProvider, ProviderError
 
 
 AUTO_COMPACT_THRESHOLD = 1_000_000
@@ -757,7 +757,7 @@ def _fallback_compaction_payload(content: dict[str, Any], *, scope: str) -> dict
 
 def compact_memory_payload(
     *,
-    providers: ProviderRegistry,
+    provider: LLMProvider,
     scope: str,
     content: dict[str, Any],
     reason: str,
@@ -774,7 +774,7 @@ def compact_memory_payload(
         f"- 当前 compact reason: {reason}\n"
     )
     try:
-        response = providers.generate(
+        response = provider.generate(
             [
                 Message(role="system", content=prompt),
                 Message(role="user", content=json.dumps(content or {}, ensure_ascii=False)),
@@ -794,14 +794,14 @@ def compact_memory_payload(
 def apply_memory_compaction(
     record: CandidatePersonMemory | JobDescriptionMemory | AgentGlobalMemory,
     *,
-    providers: ProviderRegistry,
+    provider: LLMProvider,
     scope: str,
     reason: str,
     compacted_at: datetime,
 ) -> CandidatePersonMemory | JobDescriptionMemory | AgentGlobalMemory:
     original_raw_content = dict(record.raw_content or {}) or dict(record.content or {})
     compacted = compact_memory_payload(
-        providers=providers,
+        provider=provider,
         scope=scope,
         content=original_raw_content,
         reason=reason,

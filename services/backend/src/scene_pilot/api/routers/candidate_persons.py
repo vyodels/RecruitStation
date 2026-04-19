@@ -116,7 +116,7 @@ def update_candidate_person_memory(
     if auto_compact and needs_compaction(dict(updated.content or {}), threshold=threshold):
         apply_memory_compaction(
             updated,
-            providers=container.providers,
+            provider=container.provider,
             scope=f"candidate-person:{person.id}",
             reason="auto_compact_threshold_exceeded",
             compacted_at=_now(),
@@ -154,7 +154,7 @@ def compact_candidate_person_memory(
         return CandidateMemoryRead.model_validate(item)
     apply_memory_compaction(
         item,
-        providers=container.providers,
+        provider=container.provider,
         scope=f"candidate-person:{person.id}",
         reason=payload.reason,
         compacted_at=_now(),

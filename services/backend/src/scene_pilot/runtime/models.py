@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from threading import Event
 from typing import Any, Literal
 import json
 
@@ -299,22 +300,24 @@ class TickOutcome:
 class CancellationToken:
     cancelled: bool = False
     reason: str | None = None
+    _event: Event = field(default_factory=Event, init=False, repr=False)
 
     def cancel(self, reason: str | None = None) -> None:
         self.cancelled = True
         self.reason = reason
+        self._event.set()
+
+    def wait(self, timeout: float | None = None) -> bool:
+        return self._event.wait(timeout)
 
 
 def _compact_tool_output_for_model(tool_name: str, output: Any) -> Any:
     if isinstance(output, list) and output and all(isinstance(item, dict) for item in output):
-        candidate_like = [item for item in output if isinstance(item, dict) and ("candidate_id" in item or "platform_candidate_id" in item)]
-        if candidate_like:
-            items = [_compact_candidate_output(item, detail=False) for item in candidate_like[:4]]
-            return {
-                "candidate_count": len(candidate_like),
-                "candidates": items,
-                "truncated": len(candidate_like) > len(items),
-            }
+        return {
+            "item_count": len(output),
+            "items": [_compact_generic_value(item, depth=1) for item in output[:4]],
+            "truncated": len(output) > 4,
+        }
     if isinstance(output, dict):
         tabs_payload = output.get("tabs")
         if isinstance(tabs_payload, list) and tabs_payload and all(isinstance(item, dict) for item in tabs_payload):
@@ -371,70 +374,7 @@ def _compact_tool_output_for_model(tool_name: str, output: Any) -> Any:
             },
             depth=0,
         )
-    if isinstance(output, dict) and ("candidate_id" in output or "platform_candidate_id" in output):
-        return _compact_candidate_output(output, detail=True)
-    if tool_name == "record_observation" and isinstance(output, dict):
-        payload = output.get("payload") if isinstance(output.get("payload"), dict) else {}
-        return {
-            "accepted": bool(output.get("accepted")),
-            "step_id": payload.get("step_id"),
-            "capability": payload.get("capability"),
-            "summary": _truncate_text(payload.get("summary"), 200),
-            "signals": list(payload.get("signals") or [])[:4],
-        }
-    if tool_name == "advance_plan_step" and isinstance(output, dict):
-        payload = output.get("payload") if isinstance(output.get("payload"), dict) else {}
-        return {
-            "accepted": bool(output.get("accepted")),
-            "step_id": payload.get("step_id"),
-            "status": payload.get("status"),
-            "summary": _truncate_text(payload.get("summary"), 160),
-        }
-    if tool_name == "submit_result" and isinstance(output, dict):
-        payload = output.get("payload") if isinstance(output.get("payload"), dict) else {}
-        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
-        return {
-            "accepted": bool(output.get("accepted")),
-            "status": payload.get("status"),
-            "data_keys": sorted(data.keys()),
-        }
     return _compact_generic_value(output, depth=0)
-
-
-def _compact_candidate_output(candidate: dict[str, Any], *, detail: bool) -> dict[str, Any]:
-    evidence = candidate.get("profile_or_resume_evidence") if isinstance(candidate.get("profile_or_resume_evidence"), dict) else {}
-    summary = ""
-    if isinstance(candidate.get("contact_info"), dict):
-        summary = str(candidate["contact_info"].get("summary") or "")
-    if not summary:
-        summary = str(candidate.get("summary") or evidence.get("summary") or "")
-    profile_text = str(candidate.get("online_resume_text") or evidence.get("text_excerpt") or "")
-    compact = {
-        "candidate_id": candidate.get("candidate_id"),
-        "platform_candidate_id": candidate.get("platform_candidate_id"),
-        "name": candidate.get("name"),
-        "platform": candidate.get("platform"),
-        "current_status": candidate.get("current_status"),
-        "summary": _truncate_text(summary, 220),
-        "resume_artifact_status": candidate.get("resume_artifact_status"),
-        "upload_status": candidate.get("upload_status"),
-        "source_scene": _compact_generic_value(candidate.get("source_scene"), depth=1),
-    }
-    if detail:
-        compact["profile_or_resume_evidence"] = {
-            "kind": evidence.get("kind"),
-            "summary": _truncate_text(evidence.get("summary"), 220),
-            "text_excerpt": _truncate_text(evidence.get("text_excerpt") or profile_text, 700),
-        }
-    else:
-        compact["profile_or_resume_evidence"] = {
-            "kind": evidence.get("kind"),
-            "summary": _truncate_text(evidence.get("summary"), 180),
-        }
-    if detail:
-        compact["contact_info"] = _compact_generic_value(candidate.get("contact_info"), depth=1)
-        compact["raw_scene_locator"] = _compact_generic_value(candidate.get("raw_scene_locator"), depth=1)
-    return compact
 
 
 def _compact_generic_value(value: Any, *, depth: int) -> Any:

@@ -62,7 +62,8 @@ def test_evolution_pipeline_records_learning_and_promotes_trial_skill(tmp_path: 
 
         approve = client.post(f"/api/evolution/queue/{pending[0].id}/approve")
         assert approve.status_code == 200
-        assert approve.json()["status"] == "approved"
+        assert approve.json()["status"] == "applied"
+        assert approve.json()["artifact_kind"] == "skill_draft"
 
         active_skills = client.get("/api/evolution/skills", params={"status": "active"}).json()
         assert active_skills[0]["name"] == "candidate-greeting"

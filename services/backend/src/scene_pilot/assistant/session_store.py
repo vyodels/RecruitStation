@@ -58,12 +58,12 @@ class AssistantSessionStore:
                 jsonl_path.unlink()
             return True
 
-    def append_jsonl(self, conversation: ConversationSession, entry: dict[str, Any]) -> None:
+    def append_jsonl(self, conversation: ConversationSession, entry: dict[str, Any]) -> dict[str, Any] | None:
         path = Path(conversation.jsonl_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
-        self._refresh_compaction(conversation.conversation_id)
+        return self._refresh_compaction(conversation.conversation_id)
 
     def load_history(self, conversation: ConversationSession) -> list[dict[str, Any]]:
         path = Path(conversation.jsonl_path)
@@ -177,15 +177,16 @@ class AssistantSessionStore:
         with self.session_factory() as session:
             return session.scalars(select(ConversationTurn).where(ConversationTurn.turn_id == turn_id)).first()
 
-    def _refresh_compaction(self, conversation_id: str) -> None:
+    def _refresh_compaction(self, conversation_id: str) -> dict[str, Any] | None:
         with self.session_factory() as session:
             conversation = session.scalars(select(ConversationSession).where(ConversationSession.conversation_id == conversation_id)).first()
             if conversation is None:
-                return
+                return None
             path = Path(conversation.jsonl_path)
             history = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()] if path.exists() else []
             token_count = sum(len(str(item.get("content") or "") .split()) for item in history)
             conversation.messages_token_count = token_count
+            compacted_payload: dict[str, Any] | None = None
             if len(history) >= 6:
                 summary_parts = [
                     f"{item.get('role')}: {str(item.get('content') or '')[:120]}"
@@ -194,12 +195,22 @@ class AssistantSessionStore:
                 ]
                 summary = " | ".join(summary_parts)
                 if summary and summary != conversation.context_summary:
+                    tokens_after = len(summary.split())
+                    compacted_payload = {
+                        "conversation_id": conversation.conversation_id,
+                        "summary": summary,
+                        "summary_digest": summary[:255],
+                        "tokens_before": conversation.messages_token_count,
+                        "tokens_after": tokens_after,
+                        "items_before": len(history),
+                        "items_after": min(len(history), 4),
+                    }
                     session.add(
                         CompactionEvent(
                             level="conversation",
                             target_ref=conversation.conversation_id,
                             tokens_before=conversation.messages_token_count,
-                            tokens_after=len(summary.split()),
+                            tokens_after=tokens_after,
                             items_before=len(history),
                             items_after=min(len(history), 4),
                             summary_digest=summary[:255],
@@ -210,3 +221,4 @@ class AssistantSessionStore:
                 conversation.last_compact_at = utcnow()
             conversation.last_active_at = utcnow()
             session.commit()
+            return compacted_payload

@@ -25,6 +25,7 @@ def test_record_learning_enters_review_queue_when_metrics_do_not_meet_threshold(
     pending = queue.list_pending()
     assert pending
     assert pending[0].id == recorded["artifact_id"]
+    assert pending[0].artifact_metadata["judgment"]["auto_promote"] is False
     with session_factory() as session:
         skill = session.get(Skill, recorded["skill_id"])
         assert skill is not None

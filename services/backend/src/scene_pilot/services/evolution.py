@@ -7,7 +7,6 @@ from sqlalchemy.orm import Session
 
 from scene_pilot.db.base import utcnow
 from scene_pilot.repositories import SkillRepository
-from scene_pilot.services.feature_flags import FeatureFlagService
 
 
 def _slugify(value: str) -> str:
@@ -66,7 +65,7 @@ def resolve_promoted_skill_snapshot(payload: dict[str, Any] | None) -> dict[str,
 def promote_skill_draft_contract(
     session: Session,
     *,
-    flags: FeatureFlagService,
+    auto_activate: bool,
     draft: dict[str, Any],
     reviewer: str | None,
     reason: str | None,
@@ -100,7 +99,7 @@ def promote_skill_draft_contract(
         incoming_health_check_config = {"expected_result_status": "pass"}
     incoming_skill_metadata = dict(contract.get("skill_metadata") or contract.get("metadata") or {})
 
-    status = "active" if flags.is_enabled("skills.auto_activate") else "approved"
+    status = "active" if auto_activate else "approved"
     platform = (
         str(contract.get("platform") or "").strip()
         or str(fallback_platform or "").strip()

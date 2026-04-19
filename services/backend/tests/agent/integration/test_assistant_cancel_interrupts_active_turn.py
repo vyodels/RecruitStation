@@ -65,5 +65,6 @@ def test_assistant_cancel_interrupts_active_turn(tmp_path: Path) -> None:
         worker.join(timeout=5)
 
         assert cancelled["cancelled"] is True
+        assert "event: turn_cancelling" in response_box["body"]
         assert "event: turn_cancelled" in response_box["body"]
         assert conversation_id not in agent.active_turns

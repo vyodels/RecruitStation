@@ -92,7 +92,7 @@ def update_job_description_memory(
     if auto_compact and needs_compaction(dict(updated.content or {}), threshold=threshold):
         apply_memory_compaction(
             updated,
-            providers=container.providers,
+            provider=container.provider,
             scope=f"job-description:{job_description_id}",
             reason="auto_compact_threshold_exceeded",
             compacted_at=_now(),
@@ -130,7 +130,7 @@ def compact_job_description_memory(
         return JobMemoryRead.model_validate(memory)
     apply_memory_compaction(
         memory,
-        providers=container.providers,
+        provider=container.provider,
         scope=f"job-description:{job_description_id}",
         reason=payload.reason,
         compacted_at=_now(),

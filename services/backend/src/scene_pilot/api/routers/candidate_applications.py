@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from scene_pilot.api.deps import get_session
-from scene_pilot.api.routers.recruit_agent import (
+from scene_pilot.api.routers._candidate_application_support import (
     build_application_thread,
     create_application_assignment,
     create_application_assessment,

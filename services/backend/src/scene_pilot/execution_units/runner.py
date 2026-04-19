@@ -5,6 +5,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from threading import Event, Thread
+from time import sleep
 from typing import Any
 from uuid import uuid4
 
@@ -46,13 +47,21 @@ class ExecutionUnitRunner:
         worker = Thread(target=self._run_async, args=(unit.unit_id,), daemon=True)
         self._threads[unit.unit_id] = worker
         worker.start()
-        return self.wait_unit(unit.unit_id)
-
-    def wait_unit(self, unit_id: str) -> ExecutionUnit:
-        unit = self.store.get(unit_id)
-        if unit is None:
-            raise KeyError(f"unknown execution unit: {unit_id}")
         return unit
+
+    def wait_unit(
+        self,
+        unit_id: str,
+        *,
+        timeout_seconds: float | None = None,
+        until_statuses: set[str] | None = None,
+    ) -> ExecutionUnit:
+        if timeout_seconds is None and until_statuses is None:
+            unit = self.store.get(unit_id)
+            if unit is None:
+                raise KeyError(f"unknown execution unit: {unit_id}")
+            return unit
+        return self.store.wait(unit_id, timeout_seconds=timeout_seconds, until_statuses=until_statuses)
 
     def unit_result(self, unit_id: str) -> ExecutionUnitResult:
         unit = self.wait_unit(unit_id)
@@ -78,11 +87,29 @@ class ExecutionUnitRunner:
             finished_at=datetime.now(UTC),
         )
         self.store.update(cancelled)
+        self._tokens.pop(unit_id, None)
         return cancelled
 
     def _run_async(self, unit_id: str) -> None:
         unit = self.store.get(unit_id)
         if unit is None:
+            return
+        token = self._tokens.get(unit_id)
+        self._wait_for_cooldown(unit, token=token)
+        unit = self.store.get(unit_id)
+        if unit is None:
+            return
+        if token is not None and token.cancelled:
+            self.store.update(
+                replace(
+                    unit,
+                    status="cancelled",
+                    error=token.reason or "execution unit cancelled",
+                    finished_at=datetime.now(UTC),
+                )
+            )
+            self._tokens.pop(unit_id, None)
+            self._threads.pop(unit_id, None)
             return
         worker = self.workers.get(unit.worker_name)
         if worker is None:
@@ -94,12 +121,12 @@ class ExecutionUnitRunner:
                     finished_at=datetime.now(UTC),
                 )
             )
+            self._tokens.pop(unit_id, None)
             return
 
         running = replace(unit, status="running", started_at=datetime.now(UTC))
         self.store.update(running)
         timeout_seconds = float(running.metadata.get("timeout_seconds") or 0)
-        token = self._tokens.get(unit_id)
 
         result_holder: dict[str, Any] = {}
         error_holder: dict[str, str] = {}
@@ -118,6 +145,8 @@ class ExecutionUnitRunner:
         if timeout_seconds > 0:
             thread.join(timeout_seconds)
             if thread.is_alive():
+                if token is not None:
+                    token.cancel("execution_unit_timed_out")
                 timed_out = replace(
                     running,
                     status="timed_out",
@@ -125,6 +154,8 @@ class ExecutionUnitRunner:
                     finished_at=datetime.now(UTC),
                 )
                 self.store.update(timed_out)
+                self._tokens.pop(unit_id, None)
+                self._threads.pop(unit_id, None)
                 return
         else:
             thread.join()
@@ -138,15 +169,41 @@ class ExecutionUnitRunner:
                     finished_at=datetime.now(UTC),
                 )
             )
+            self._tokens.pop(unit_id, None)
+            self._threads.pop(unit_id, None)
             return
 
         if "error" in error_holder:
             failed = replace(running, status="failed", error=error_holder["error"], finished_at=datetime.now(UTC))
             self.store.update(failed)
+            self._tokens.pop(unit_id, None)
+            self._threads.pop(unit_id, None)
             return
 
         transitioned = _transition_unit(running, result_holder.get("value"))
         self.store.update(transitioned)
+        self._tokens.pop(unit_id, None)
+        self._threads.pop(unit_id, None)
+
+    def _wait_for_cooldown(self, unit: ExecutionUnit, *, token: CancellationToken | None) -> None:
+        available_after_raw = unit.metadata.get("available_after")
+        if not isinstance(available_after_raw, str) or not available_after_raw:
+            return
+        try:
+            available_after = datetime.fromisoformat(available_after_raw)
+        except ValueError:
+            return
+        while True:
+            remaining = (available_after - datetime.now(UTC)).total_seconds()
+            if remaining <= 0:
+                return
+            if token is not None and token.cancelled:
+                return
+            wait_window = min(remaining, 0.1)
+            if token is not None and token.wait(wait_window):
+                return
+            if token is None:
+                sleep(wait_window)
 
 
 def _transition_unit(unit: ExecutionUnit, worker_result: Any) -> ExecutionUnit:

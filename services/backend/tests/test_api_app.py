@@ -75,6 +75,33 @@ class ApiAppTests(unittest.TestCase):
         self.assertEqual(evolution.status_code, 200)
         self.assertEqual(evolution.json(), [])
 
+    def test_workspace_bootstrap_surfaces(self) -> None:
+        responses = {
+            "/api/settings": self.client.get("/api/settings"),
+            "/api/dashboard": self.client.get("/api/dashboard"),
+            "/api/approvals": self.client.get("/api/approvals"),
+            "/api/skills": self.client.get("/api/skills"),
+            "/api/sync/status": self.client.get("/api/sync/status"),
+            "/api/mcp/presets": self.client.get("/api/mcp/presets"),
+            "/api/mcp/servers": self.client.get("/api/mcp/servers"),
+            "/api/recruit-agent/profile": self.client.get("/api/recruit-agent/profile"),
+            "/api/recruit-agent/goals": self.client.get("/api/recruit-agent/goals"),
+            "/api/recruit-agent/runtime/traces": self.client.get("/api/recruit-agent/runtime/traces"),
+            "/api/recruit-agent/runtime/graphs": self.client.get("/api/recruit-agent/runtime/graphs"),
+            "/api/recruit-agent/runtime/strategy-fragments": self.client.get("/api/recruit-agent/runtime/strategy-fragments"),
+            "/api/recruit-agent/runtime/operator-interactions": self.client.get("/api/recruit-agent/runtime/operator-interactions"),
+            "/api/candidate-persons/memories": self.client.get("/api/candidate-persons/memories"),
+            "/api/job-descriptions/memories": self.client.get("/api/job-descriptions/memories"),
+            "/api/recruit-agent/global-memory": self.client.get("/api/recruit-agent/global-memory"),
+            "/api/candidate-applications/threads": self.client.get("/api/candidate-applications/threads"),
+            "/api/state-machine": self.client.get("/api/state-machine"),
+            "/api/recruit-agent/evolution-artifacts": self.client.get("/api/recruit-agent/evolution-artifacts"),
+        }
+
+        for path, response in responses.items():
+            with self.subTest(path=path):
+                self.assertEqual(response.status_code, 200, path)
+
 
 if __name__ == "__main__":
     unittest.main()

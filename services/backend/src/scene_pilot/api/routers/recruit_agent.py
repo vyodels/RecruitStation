@@ -88,6 +88,7 @@ from scene_pilot.schemas import (
 )
 from scene_pilot.services.container import AppContainer
 from scene_pilot.services.application_subjects import application_payload_from_application
+from scene_pilot.services.agent_control import AgentControlService
 from scene_pilot.services.events import EventStreamService
 from scene_pilot.services.evolution import promote_skill_draft_contract, resolve_promoted_skill_snapshot
 from scene_pilot.services.recruit_agent import (
@@ -557,7 +558,7 @@ def update_agent_global_memory(
     if auto_compact and needs_compaction(dict(updated.content or {}), threshold=threshold):
         apply_memory_compaction(
             updated,
-            providers=container.providers,
+            provider=container.provider,
             scope="agent_global",
             reason="auto_compact_threshold_exceeded",
             compacted_at=_now(),
@@ -591,7 +592,7 @@ def compact_agent_global_memory(
         return AgentGlobalMemoryRead.model_validate(item)
     apply_memory_compaction(
         item,
-        providers=container.providers,
+        provider=container.provider,
         scope="agent_global",
         reason=payload.reason,
         compacted_at=_now(),
@@ -923,6 +924,7 @@ def create_goal_spec(
     container: AppContainer = Depends(get_container),
 ) -> GoalSpecRead:
     profile = ensure_primary_recruit_agent_profile(session)
+    agent_control = AgentControlService(container.session_factory)
     goal = GoalSpecRepository(session).create(
         {
             "agent_profile_id": profile.id,
@@ -946,7 +948,7 @@ def create_goal_spec(
             },
         }
     )
-    container.agent_control.enqueue_task(
+    agent_control.enqueue_task(
         "goal_intake",
         payload={
             "goal_id": goal.id,
@@ -1154,6 +1156,7 @@ def resolve_operator_interaction(
     container: AppContainer = Depends(get_container),
 ) -> OperatorInteractionRead:
     repo = OperatorInteractionRepository(session)
+    agent_control = AgentControlService(container.session_factory)
     item = repo.get(interaction_id)
     if item is None:
         raise HTTPException(status_code=404, detail="Operator interaction not found")
@@ -1165,7 +1168,7 @@ def resolve_operator_interaction(
     effect_summary = None
     if approval is not None:
         if action in {"confirm", "approve", "retry", "correct", "teach"}:
-            updated_approval = container.agent_control.apply_approval_resolution(
+            updated_approval = agent_control.apply_approval_resolution(
                 session,
                 approval,
                 status="approved",
@@ -1180,7 +1183,7 @@ def resolve_operator_interaction(
             )
             effect_summary = "已按操作员确认恢复运行。"
         elif action in {"reject", "stop", "handoff"}:
-            updated_approval = container.agent_control.apply_approval_resolution(
+            updated_approval = agent_control.apply_approval_resolution(
                 session,
                 approval,
                 status="rejected",
@@ -1298,7 +1301,7 @@ def update_evolution_artifact(
         if promoted_skill is None:
             promoted_skill = promote_skill_draft_contract(
                 session,
-                flags=container.flags,
+                auto_activate=bool(container.settings.provider_config.get("skills_auto_activate", False)),
                 draft=dict(next_body or {}),
                 reviewer=payload.reviewed_by,
                 reason=str(artifact_metadata.get("review_reason") or "").strip() or None,

@@ -11,23 +11,13 @@ from scene_pilot.schemas import (
     ApprovalDecisionRequest,
     ApprovalRead,
     ApprovalUpdate,
-    EpisodeConfirmRequest,
-    PlaybookPatchDecisionRequest,
 )
 from scene_pilot.services.container import AppContainer
 from scene_pilot.services.evolution import promote_skill_draft_contract, resolve_promoted_skill_snapshot
-from scene_pilot.services.runtime import PersistedRuntimeService
+from scene_pilot.services.agent_control import AgentControlService
 from scene_pilot.api.deps import get_container
 
 router = APIRouter(prefix="/api/approvals", tags=["approvals"])
-
-
-def _runtime_service(container: AppContainer, session: Session) -> PersistedRuntimeService:
-    return PersistedRuntimeService(
-        session=session,
-        providers=container.providers,
-        tools=container.tools,
-    )
 
 
 def _apply_runtime_review(
@@ -38,31 +28,37 @@ def _apply_runtime_review(
     container: AppContainer,
     session: Session,
 ) -> ApprovalRead:
-    runtime = _runtime_service(container, session)
-    if approval.target_type == "playbook_patch":
-        runtime.review_playbook_patch(
-            approval.target_id,
-            PlaybookPatchDecisionRequest(
-                reviewer=payload.reviewer,
-                reason=payload.reason,
-                apply_immediately=approve,
-            ),
-            approve=approve,
-        )
-    elif approval.target_type == "template_candidate":
-        runtime.review_episode_confirmation(
-            approval.target_id,
-            EpisodeConfirmRequest(
-                reviewer=payload.reviewer,
-                reason=payload.reason,
-                activate_template=approve,
-            ),
-            approve=approve,
-        )
-    refreshed = ApprovalRepository(session).get(approval.id)
-    if refreshed is None:
-        raise HTTPException(status_code=404, detail="Approval not found")
-    return ApprovalRead.model_validate(refreshed)
+    _ = container
+    payload_snapshot = dict(approval.payload or {})
+    payload_snapshot["resolution"] = _build_resolution_snapshot(
+        status="approved" if approve else "rejected",
+        reviewer=payload.reviewer,
+        reason=payload.reason,
+        resumed_task=None,
+    )
+    payload_snapshot["runtime_review"] = {
+        "target_type": approval.target_type,
+        "target_id": approval.target_id,
+        "handled_by": "approval_router",
+        "review_kind": "approve" if approve else "reject",
+    }
+    approval.payload = payload_snapshot
+    updated = ApprovalRepository(session).mark_review(
+        approval,
+        "approved" if approve else "rejected",
+        reviewer=payload.reviewer,
+        notes=payload.reason,
+    )
+    _sync_operator_interactions(
+        session,
+        approval_id=updated.id,
+        status="resolved",
+        reviewer=payload.reviewer,
+        action="approve" if approve else "reject",
+        reason=payload.reason,
+        effect_summary="已记录运行时审查结果。",
+    )
+    return ApprovalRead.model_validate(updated)
 
 
 @router.get("", response_model=list[ApprovalRead])
@@ -90,6 +86,7 @@ def update_approval(
     session: Session = Depends(get_session),
 ) -> ApprovalRead:
     repo = ApprovalRepository(session)
+    agent_control = AgentControlService(container.session_factory)
     item = repo.get(approval_id)
     if item is None:
         raise HTTPException(status_code=404, detail="Approval not found")
@@ -117,7 +114,7 @@ def approve_approval(
             session=session,
         )
     if item.target_type == "blocked_task":
-        item = container.agent_control.apply_approval_resolution(
+        item = agent_control.apply_approval_resolution(
             session,
             item,
             status="approved",
@@ -154,7 +151,7 @@ def approve_approval(
         if resumed_task is not None:
             payload_snapshot["resumed_task_id"] = resumed_task.get("task_id")
             payload_snapshot["resumed_at"] = resolution["reviewed_at"]
-            container.agent_control.enqueue_task(
+            agent_control.enqueue_task(
                 str(resumed_task["task_type"]),
                 task_id=str(resumed_task.get("task_id") or approval_id),
                 payload=dict(resumed_task.get("payload") or {}),
@@ -191,6 +188,7 @@ def reject_approval(
     session: Session = Depends(get_session),
 ) -> ApprovalRead:
     repo = ApprovalRepository(session)
+    agent_control = AgentControlService(container.session_factory)
     item = repo.get(approval_id)
     if item is None:
         raise HTTPException(status_code=404, detail="Approval not found")
@@ -203,7 +201,7 @@ def reject_approval(
             session=session,
         )
     if item.target_type == "blocked_task":
-        item = container.agent_control.apply_approval_resolution(
+        item = agent_control.apply_approval_resolution(
             session,
             item,
             status="rejected",
@@ -339,7 +337,7 @@ def _promote_skill_draft(
     learning = learning_repo.get(str(learning_id)) if isinstance(learning_id, str) and learning_id else None
     promoted = promote_skill_draft_contract(
         session,
-        flags=container.flags,
+        auto_activate=bool(container.settings.provider_config.get("skills_auto_activate", False)),
         draft=draft,
         reviewer=reviewer,
         reason=reason,

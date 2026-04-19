@@ -5,7 +5,11 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from scene_pilot.evolution.promotion import evaluate_trial_metrics
+from scene_pilot.evolution.promotion import (
+    activate_prompt_revision,
+    activate_skill,
+    evaluate_trial_metrics,
+)
 from scene_pilot.models.domain import AgentLearning, EvolutionArtifact, PromptOverlayRevision, Skill
 
 
@@ -27,26 +31,41 @@ class LearningWriter:
         with self.session_factory() as session:
             learning = AgentLearning(content=content, tags=list(tags))
             session.add(learning)
+            session.flush()
 
             skill: Skill | None = None
-            promotion_decision: dict[str, Any] | None = None
+            skill_judgment: dict[str, Any] | None = None
             if promote:
                 resolved_skill_name = skill_name or "trial-skill"
                 skill = self._upsert_skill(session, resolved_skill_name, content)
                 merged_metrics = _merge_trial_metrics(dict(skill.trial_metrics or {}), dict(trial_metrics or {}))
-                promotion_decision = evaluate_trial_metrics(merged_metrics)
-                skill.trial_metrics = promotion_decision
-                skill.status = "active" if bool(promotion_decision["auto_promote"]) else "trial"
+                skill_judgment = evaluate_trial_metrics(merged_metrics)
+                skill.trial_metrics = skill_judgment
+                if bool(skill_judgment["auto_promote"]):
+                    activate_skill(skill, reviewer="system")
+                else:
+                    skill.status = "trial"
 
             revision: PromptOverlayRevision | None = None
+            revision_judgment: dict[str, Any] | None = None
             if job_description_id is not None:
                 revision = self._create_prompt_revision(session, job_description_id, content, dict(trial_metrics or {}))
+                revision_judgment = evaluate_trial_metrics(dict(revision.trial_metrics or {}))
+                revision.trial_metrics = {
+                    **dict(revision.trial_metrics or {}),
+                    **revision_judgment,
+                }
+                if bool(revision_judgment["auto_promote"]):
+                    activate_prompt_revision(revision, baseline_metrics=revision.trial_metrics)
+                else:
+                    revision.status = "trial"
 
-            resolved_artifact_kind = artifact_kind or ("skill_draft" if promote else "prompt_lesson")
+            resolved_artifact_kind = artifact_kind or ("skill_draft" if promote else "prompt_overlay_revision" if revision is not None else "prompt_lesson")
+            active_judgment = skill_judgment if skill_judgment is not None else revision_judgment
             artifact = EvolutionArtifact(
                 artifact_kind=resolved_artifact_kind,
-                title=skill_name or "learning-artifact",
-                status="auto_promoted" if promotion_decision and promotion_decision["auto_promote"] else "pending_review",
+                title=skill_name or _prompt_revision_title(job_description_id, revision) or "learning-artifact",
+                status="auto_promoted" if active_judgment and active_judgment["auto_promote"] else "pending_review",
                 artifact_body={
                     "content": content,
                     "tags": tags,
@@ -54,6 +73,14 @@ class LearningWriter:
                     "job_description_id": job_description_id,
                 },
                 related_skill_id=None if skill is None else skill.id,
+                artifact_metadata={
+                    "learning_id": learning.id,
+                    "queue_state": "auto_promoted" if active_judgment and active_judgment["auto_promote"] else "pending_review",
+                    "judgment": dict(active_judgment or {}),
+                    "prompt_revision_id": None if revision is None else revision.id,
+                    "prompt_revision_status": None if revision is None else revision.status,
+                    "skill_id": None if skill is None else skill.id,
+                },
             )
             session.add(artifact)
             session.commit()
@@ -63,8 +90,9 @@ class LearningWriter:
                 "artifact_id": artifact.id,
                 "skill_id": None if skill is None else skill.id,
                 "prompt_revision_id": None if revision is None else revision.id,
-                "auto_promoted": bool(promotion_decision and promotion_decision["auto_promote"]),
-                "queued": not bool(promotion_decision and promotion_decision["auto_promote"]),
+                "auto_promoted": bool(active_judgment and active_judgment["auto_promote"]),
+                "queued": not bool(active_judgment and active_judgment["auto_promote"]),
+                "judgment": dict(active_judgment or {}),
             }
 
     def _upsert_skill(self, session: Session, skill_name: str, content: str) -> Skill:
@@ -120,3 +148,10 @@ def _merge_trial_metrics(current: dict[str, Any], incoming: dict[str, Any]) -> d
     if runs == 0 and (successes or failures):
         runs = successes + failures
     return {"runs": runs, "successes": successes, "failures": failures}
+
+
+def _prompt_revision_title(job_description_id: str | None, revision: PromptOverlayRevision | None) -> str | None:
+    if revision is None:
+        return None
+    scope = job_description_id or revision.job_description_id
+    return f"prompt-overlay:{scope}:v{revision.version}"
