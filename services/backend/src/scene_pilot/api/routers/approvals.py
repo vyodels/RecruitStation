@@ -86,7 +86,6 @@ def update_approval(
     session: Session = Depends(get_session),
 ) -> ApprovalRead:
     repo = ApprovalRepository(session)
-    agent_control = AgentControlService(container.session_factory)
     item = repo.get(approval_id)
     if item is None:
         raise HTTPException(status_code=404, detail="Approval not found")
@@ -102,6 +101,7 @@ def approve_approval(
     session: Session = Depends(get_session),
 ) -> ApprovalRead:
     repo = ApprovalRepository(session)
+    agent_control = AgentControlService(container.session_factory)
     item = repo.get(approval_id)
     if item is None:
         raise HTTPException(status_code=404, detail="Approval not found")

@@ -102,6 +102,33 @@ class ApiAppTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(response.status_code, 200, path)
 
+    def test_approval_update_and_blocked_task_approve_surfaces(self) -> None:
+        created = self.client.post(
+            "/api/approvals",
+            json={
+                "target_type": "blocked_task",
+                "target_id": "approval-target-1",
+                "title": "Resume blocked task",
+                "payload": {"blocked_task": {"task_type": "goal_intake", "payload": {"goal_id": "g-1"}}},
+            },
+        )
+        self.assertEqual(created.status_code, 201)
+        approval_id = created.json()["id"]
+
+        patched = self.client.patch(
+            f"/api/approvals/{approval_id}",
+            json={"notes": "updated from api test"},
+        )
+        self.assertEqual(patched.status_code, 200)
+        self.assertEqual(patched.json()["notes"], "updated from api test")
+
+        approved = self.client.post(
+            f"/api/approvals/{approval_id}/approve",
+            json={"reviewer": "api-test", "reason": "resume now"},
+        )
+        self.assertEqual(approved.status_code, 200)
+        self.assertEqual(approved.json()["status"], "approved")
+
 
 if __name__ == "__main__":
     unittest.main()
