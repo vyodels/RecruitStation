@@ -11,8 +11,10 @@ from scene_pilot.models.domain import (
     AgentGlobalMemory,
     AgentRun,
     AgentRuntimeEvent,
+    Candidate,
     CandidatePersonMemory,
     ConversationSession,
+    JobDescription,
     JobDescriptionMemory,
 )
 
@@ -51,7 +53,8 @@ class MemoryService:
         agent_profile_id: str | None = None,
     ) -> list[dict[str, Any]]:
         model: Any = _memory_model(scope_kind)
-        stmt = select(model).where(_scope_column(model) == scope_ref)
+        resolved_scope_ref = self._resolve_scope_ref(scope_kind, scope_ref)
+        stmt = select(model).where(_scope_column(model) == resolved_scope_ref)
         if agent_profile_id is not None:
             stmt = stmt.where(model.agent_profile_id == agent_profile_id)
         stmt = stmt.order_by(model.updated_at.desc(), model.id.asc())
@@ -85,6 +88,7 @@ class MemoryService:
         evidence_refs: list[Any] | None = None,
     ) -> dict[str, Any]:
         model: Any = _memory_model(scope_kind)
+        resolved_scope_ref = self._resolve_scope_ref(scope_kind, scope_ref)
         record: Any = self.session.scalars(select(model).where(model.memory_item_id == memory_item_id)).first()
         if record is None:
             record = model(
@@ -100,7 +104,7 @@ class MemoryService:
                 trust_level=trust_level,
                 evidence_refs=list(evidence_refs or []),
             )
-            setattr(record, _scope_attr_name(scope_kind), scope_ref)
+            setattr(record, _scope_attr_name(scope_kind), resolved_scope_ref)
             self.session.add(record)
         else:
             if expected_version is not None and int(record.version or 0) != int(expected_version):
@@ -199,6 +203,28 @@ class MemoryService:
         data = asdict(payload)
         data["updated_at"] = record.updated_at
         return data
+
+    def _resolve_scope_ref(self, scope_kind: str, scope_ref: str) -> str:
+        normalized = scope_kind.strip().lower()
+        if normalized == "candidate":
+            candidate = self.session.scalars(
+                select(Candidate).where(
+                    (Candidate.candidate_person_id == scope_ref) | (Candidate.id == scope_ref)
+                )
+            ).first()
+            if candidate is None:
+                raise KeyError(f"unknown candidate scope: {scope_ref}")
+            return candidate.id
+        if normalized == "job":
+            job = self.session.scalars(
+                select(JobDescription).where(
+                    (JobDescription.job_description_id == scope_ref) | (JobDescription.id == scope_ref)
+                )
+            ).first()
+            if job is None:
+                raise KeyError(f"unknown job scope: {scope_ref}")
+            return job.id
+        return scope_ref
 
 
 def _memory_model(scope_kind: str) -> Any:

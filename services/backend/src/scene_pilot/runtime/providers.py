@@ -9,7 +9,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlparse
 from urllib.request import ProxyHandler, Request, build_opener, urlopen
 
-from .models import LLMResponse, Message
+from .models import CancellationToken, LLMResponse, Message
 
 
 class ProviderError(RuntimeError):
@@ -27,6 +27,7 @@ class LLMProvider(Protocol):
         task: dict[str, Any] | None = None,
         max_tokens: int | None = None,
         temperature: float | None = None,
+        cancel_token: CancellationToken | None = None,
     ) -> LLMResponse: ...
 
 
@@ -63,13 +64,34 @@ class ScriptedProvider:
         task: dict[str, Any] | None = None,
         max_tokens: int | None = None,
         temperature: float | None = None,
+        cancel_token: CancellationToken | None = None,
     ) -> LLMResponse:
         if not self.responses:
             raise ProviderError(f"{self.provider_name} has no scripted responses left")
         response = self.responses.pop(0)
         if response.usage.total_tokens == 0 and self.default_usage_total:
             response.usage.total_tokens = self.default_usage_total
+        if cancel_token is not None and cancel_token.cancelled:
+            raise ProviderError(cancel_token.reason or "provider generation cancelled")
         return response
+
+
+@dataclass(slots=True)
+class UnavailableProvider:
+    reason: str
+    provider_name: str = "unavailable"
+
+    def generate(
+        self,
+        messages: list[Message],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        task: dict[str, Any] | None = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        cancel_token: CancellationToken | None = None,
+    ) -> LLMResponse:
+        raise ProviderError(self.reason)
 
 
 @dataclass(slots=True)
@@ -89,6 +111,7 @@ class OpenAICompatibleProvider:
         task: dict[str, Any] | None = None,
         max_tokens: int | None = None,
         temperature: float | None = None,
+        cancel_token: CancellationToken | None = None,
     ) -> LLMResponse:
         if self.transport is None:
             if self.config.has_http_credentials():
@@ -170,6 +193,7 @@ class AnthropicProvider:
         task: dict[str, Any] | None = None,
         max_tokens: int | None = None,
         temperature: float | None = None,
+        cancel_token: CancellationToken | None = None,
     ) -> LLMResponse:
         if self.transport is None:
             if self.config.has_http_credentials():
@@ -251,6 +275,7 @@ class ProviderRegistry:
         task: dict[str, Any] | None = None,
         max_tokens: int | None = None,
         temperature: float | None = None,
+        cancel_token: CancellationToken | None = None,
     ) -> LLMResponse:
         ordered = [preferred_provider] if preferred_provider else []
         ordered.extend(name for name in self.fallback_order if name not in ordered)
@@ -269,10 +294,38 @@ class ProviderRegistry:
                     task=task,
                     max_tokens=max_tokens,
                     temperature=temperature,
+                    cancel_token=cancel_token,
                 )
             except Exception as exc:  # pragma: no cover - fallback path
                 last_error = exc
         raise ProviderError("All providers failed") from last_error
+
+
+@dataclass(slots=True)
+class ProviderRegistryAdapter:
+    registry: ProviderRegistry
+    preferred_provider: str | None = None
+    provider_name: str = "provider_registry"
+
+    def generate(
+        self,
+        messages: list[Message],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        task: dict[str, Any] | None = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        cancel_token: CancellationToken | None = None,
+    ) -> LLMResponse:
+        return self.registry.generate(
+            messages,
+            preferred_provider=self.preferred_provider,
+            tools=tools,
+            task=task,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            cancel_token=cancel_token,
+        )
 
 
 def _post_json(

@@ -24,7 +24,14 @@ from scene_pilot.plugins.host import PluginHost
 from scene_pilot.plugins.loader import install_manifest
 from scene_pilot.plugins.recruit.manifest import RecruitPluginManifest
 from scene_pilot.runtime.models import LLMResponse, Message
-from scene_pilot.runtime.providers import LLMProvider
+from scene_pilot.runtime.providers import (
+    AnthropicProvider,
+    LLMProvider,
+    OpenAICompatibleProvider,
+    ProviderRegistry,
+    ProviderRegistryAdapter,
+    UnavailableProvider,
+)
 from scene_pilot.runtime.tools import ToolRegistry, register_core_tools
 
 
@@ -71,7 +78,7 @@ class AppContainer:
         initialize_database(engine)
         session_factory = create_session_factory(engine)
 
-        provider = DeterministicProvider()
+        provider = _build_provider(resolved_settings)
         tool_registry = ToolRegistry()
         register_core_tools(tool_registry)
 
@@ -79,21 +86,26 @@ class AppContainer:
         install_manifest(plugin_host, RecruitPluginManifest(session_factory))
         tool_registry.merge(plugin_host.tool_registry)
 
-        kernel = AgentKernel(provider=provider, tool_registry=tool_registry, plugin_host=plugin_host)
+        learning_writer = LearningWriter(session_factory)
+        kernel = AgentKernel(
+            provider=provider,
+            tool_registry=tool_registry,
+            plugin_host=plugin_host,
+            learning_writer=learning_writer,
+        )
         autonomous_agent = AutonomousAgent(session_factory=session_factory, kernel=kernel)
         heartbeat = Heartbeat(session_factory=session_factory, autonomous_agent=autonomous_agent)
 
         data_dir = resolved_settings.resolved_data_dir()
         data_dir.mkdir(parents=True, exist_ok=True)
         session_store = AssistantSessionStore(session_factory=session_factory, base_dir=Path(data_dir) / "assistant-jsonl")
-        assistant_agent = AssistantAgent(provider=provider, tool_registry=tool_registry, session_store=session_store)
+        assistant_agent = AssistantAgent(kernel=kernel, session_factory=session_factory, session_store=session_store)
 
         execution_unit_store = ExecutionUnitStore()
         execution_unit_runner = ExecutionUnitRunner(
             store=execution_unit_store,
             workers={"browser": run_browser_worker},
         )
-        learning_writer = LearningWriter(session_factory)
         evolution_queue = EvolutionQueue(session_factory)
         promotion = PromotionService(session_factory)
         mcp_registry = McpRegistry(session_factory)
@@ -116,3 +128,18 @@ class AppContainer:
             promotion=promotion,
             mcp_registry=mcp_registry,
         )
+
+
+def _build_provider(settings: AppSettings) -> LLMProvider:
+    registry = ProviderRegistry()
+    runtime_settings = settings.provider_runtime_settings()
+    if runtime_settings.openai_api_key:
+        registry.register(OpenAICompatibleProvider(settings.build_provider_config("openai")))
+    if runtime_settings.anthropic_api_key:
+        registry.register(AnthropicProvider(settings.build_provider_config("anthropic")))
+    if registry.providers:
+        preferred = registry.fallback_order[0]
+        return ProviderRegistryAdapter(registry=registry, preferred_provider=preferred)
+    return UnavailableProvider(
+        reason="provider unavailable: configure RECRUIT_AGENT_PROVIDER_CONFIG__OPENAI_API_KEY or RECRUIT_AGENT_PROVIDER_CONFIG__ANTHROPIC_API_KEY",
+    )

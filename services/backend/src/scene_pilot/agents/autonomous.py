@@ -8,7 +8,8 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from scene_pilot.db.base import utcnow
 from scene_pilot.kernel.kernel import AgentKernel
-from scene_pilot.models.domain import AgentRun, AgentRuntimeEvent, AgentTickRecord, AgentTurnRecord
+from scene_pilot.memory.service import MemoryService
+from scene_pilot.models.domain import AgentRun, AgentRuntimeEvent, AgentSession, AgentTickRecord, AgentTurnRecord, McpServer, Skill
 from scene_pilot.runtime.models import GoalRef, Observation, TickOutcome
 
 
@@ -24,6 +25,9 @@ class AutonomousAgent:
             if run.started_at is None:
                 run.started_at = utcnow()
             next_seq = self._next_tick_seq(session, run.id)
+            memory_service = MemoryService(session)
+            agent_session = session.get(AgentSession, run.session_id)
+            agent_profile_id = None if agent_session is None else agent_session.agent_profile_id
             tick = AgentTickRecord(
                 run_pk=run.id,
                 seq=next_seq,
@@ -39,18 +43,28 @@ class AutonomousAgent:
                 scope_kind=str(envelope.get("scope_kind") or run.lane or "global"),
                 scope_ref=str(envelope.get("scope_ref") or run.candidate_id or run.job_description_id or run.id),
                 goal_text=str(run.context_manifest.get("goal") or run.run_type or "Autonomous execution"),
+                constraints={
+                    "run_pk": run.id,
+                    "agent_profile_id": agent_profile_id,
+                    "global_scope_ref": agent_profile_id,
+                },
             )
             observation = Observation(
                 world_snapshot=dict(envelope.get("world_snapshot") or {}),
                 scope_kind=goal.scope_kind,
                 scope_ref=goal.scope_ref,
-                recent_events=[],
+                recent_events=memory_service.fetch_recent_events(run_id=run.id, limit=8),
                 available_tools=sorted(self.kernel.tool_registry.tools.keys()),
-                available_skills=[],
-                available_mcps=[],
+                available_skills=self._available_skill_names(session),
+                available_mcps=self._available_mcp_names(session),
                 hash=str(envelope.get("observation_hash") or tick.tick_id),
             )
-            outcome = self.kernel.run_tick(goal, observation)
+            outcome = self.kernel.run_tick(
+                goal,
+                observation,
+                memory_service=memory_service,
+                learning_writer=self.kernel.learning_writer,
+            )
 
             turn = AgentTurnRecord(
                 tick_pk=tick.id,
@@ -115,6 +129,14 @@ class AutonomousAgent:
     def _next_tick_seq(self, session: Session, run_pk: str) -> int:
         stmt = select(func.max(AgentTickRecord.seq)).where(AgentTickRecord.run_pk == run_pk)
         return int(session.scalar(stmt) or 0) + 1
+
+    def _available_skill_names(self, session: Session) -> list[str]:
+        stmt = select(Skill.name).where(Skill.status.in_(("trial", "active"))).order_by(Skill.name.asc())
+        return [str(name) for name in session.scalars(stmt).all()]
+
+    def _available_mcp_names(self, session: Session) -> list[str]:
+        stmt = select(McpServer.name).order_by(McpServer.name.asc())
+        return [str(name) for name in session.scalars(stmt).all()]
 
 
 def _map_outcome_status(status: str) -> str:

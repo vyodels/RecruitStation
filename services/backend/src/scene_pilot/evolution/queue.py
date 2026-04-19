@@ -3,7 +3,7 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
-from scene_pilot.models.domain import EvolutionArtifact
+from scene_pilot.models.domain import EvolutionArtifact, Skill
 
 
 class EvolutionQueue:
@@ -21,6 +21,10 @@ class EvolutionQueue:
             if artifact is None:
                 raise KeyError(f"unknown artifact: {artifact_id}")
             artifact.status = "approved"
+            if artifact.related_skill_id:
+                skill = session.get(Skill, artifact.related_skill_id)
+                if skill is not None:
+                    skill.status = "active"
             session.commit()
             session.refresh(artifact)
             return artifact
@@ -31,6 +35,10 @@ class EvolutionQueue:
             if artifact is None:
                 raise KeyError(f"unknown artifact: {artifact_id}")
             artifact.status = "rejected"
+            if artifact.related_skill_id:
+                skill = session.get(Skill, artifact.related_skill_id)
+                if skill is not None and skill.status == "trial":
+                    skill.status = "draft"
             session.commit()
             session.refresh(artifact)
             return artifact

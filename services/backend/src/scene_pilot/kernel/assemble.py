@@ -15,11 +15,23 @@ def assemble_messages(
     plugin_host: PluginHost | None = None,
     memory_service: Any | None = None,
     tool_registry: ToolRegistry | None = None,
+    history_messages: list[Message] | None = None,
+    input_message: str | None = None,
 ) -> list[Message]:
     persona_fragments = plugin_host.collect_persona_fragments() if plugin_host is not None else []
-    memory_entries = []
+    scope_memory_entries = []
+    global_memory_entries = []
     if memory_service is not None and observation.scope_kind and observation.scope_ref:
-        memory_entries = memory_service.read(scope_kind=observation.scope_kind, scope_ref=observation.scope_ref, limit=5)
+        try:
+            scope_memory_entries = memory_service.read(scope_kind=observation.scope_kind, scope_ref=observation.scope_ref, limit=5)
+        except Exception:
+            scope_memory_entries = []
+    global_scope_ref = str(goal.constraints.get("global_scope_ref") or "").strip()
+    if memory_service is not None and global_scope_ref:
+        try:
+            global_memory_entries = memory_service.read(scope_kind="global", scope_ref=global_scope_ref, limit=5)
+        except Exception:
+            global_memory_entries = []
 
     system_parts = [goal.goal_text or goal.title or "Complete the assigned goal."]
     if persona_fragments:
@@ -31,11 +43,14 @@ def assemble_messages(
         "goal_id": goal.goal_id,
         "scope_kind": goal.scope_kind,
         "scope_ref": goal.scope_ref,
+        "input_message": input_message,
         "world_snapshot": observation.world_snapshot,
-        "recent_events": observation.recent_events,
-        "memory": memory_entries,
+        "recent_events": list(observation.recent_events)[-8:],
+        "memory": scope_memory_entries,
+        "global_memory": global_memory_entries,
     }
-    return [
-        Message(role="system", content="\n\n".join(part for part in system_parts if part)),
-        Message(role="user", content=json.dumps(user_payload, ensure_ascii=False, default=str)),
-    ]
+    messages = [Message(role="system", content="\n\n".join(part for part in system_parts if part))]
+    if history_messages:
+        messages.extend(history_messages)
+    messages.append(Message(role="user", content=json.dumps(user_payload, ensure_ascii=False, default=str)))
+    return messages

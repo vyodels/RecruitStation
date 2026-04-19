@@ -20,7 +20,15 @@ from .models import (
     ToolExecutionResult,
     WakeupRequest,
 )
-from .providers import AnthropicProvider, OpenAICompatibleProvider, ProviderConfig, ProviderRegistry, ScriptedProvider
+from .providers import (
+    AnthropicProvider,
+    OpenAICompatibleProvider,
+    ProviderConfig,
+    ProviderRegistry,
+    ProviderRegistryAdapter,
+    ScriptedProvider,
+    UnavailableProvider,
+)
 from .retry import RetryPolicy, retry_async
 from .tools import ToolDefinition, ToolRegistry, register_core_tools
 
@@ -45,6 +53,7 @@ __all__ = [
     "OpenAICompatibleProvider",
     "ProviderConfig",
     "ProviderRegistry",
+    "ProviderRegistryAdapter",
     "RetryPolicy",
     "RuntimeLimits",
     "ScriptedProvider",
@@ -53,6 +62,7 @@ __all__ = [
     "ToolDefinition",
     "ToolExecutionResult",
     "ToolRegistry",
+    "UnavailableProvider",
     "WakeupRequest",
     "register_core_tools",
     "retry_async",

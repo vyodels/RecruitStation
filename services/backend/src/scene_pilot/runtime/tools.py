@@ -335,7 +335,11 @@ def register_core_tools(registry: ToolRegistry) -> None:
         ToolDefinition(
             name="read_memory",
             description="Read memory entries for a scope.",
-            parameters={"type": "object", "properties": {"scope_kind": {"type": "string"}, "scope_ref": {"type": "string"}}},
+            parameters={
+                "type": "object",
+                "properties": {"scope_kind": {"type": "string"}, "scope_ref": {"type": "string"}},
+                "additionalProperties": True,
+            },
             handler=lambda arguments: {"accepted": True, "action": "read_memory", "arguments": arguments},
             category="core",
             external_target=False,
@@ -346,7 +350,11 @@ def register_core_tools(registry: ToolRegistry) -> None:
         ToolDefinition(
             name="record_learning",
             description="Record a learning candidate for evolution.",
-            parameters={"type": "object", "properties": {"kind": {"type": "string"}, "payload": {"type": "object"}}},
+            parameters={
+                "type": "object",
+                "properties": {"kind": {"type": "string"}, "payload": {"type": "object"}},
+                "additionalProperties": True,
+            },
             handler=lambda arguments: {"accepted": True, "action": "record_learning", "arguments": arguments},
             category="core",
             external_target=False,
@@ -357,7 +365,11 @@ def register_core_tools(registry: ToolRegistry) -> None:
         ToolDefinition(
             name="enqueue_follow_up",
             description="Schedule a follow up task for later execution.",
-            parameters={"type": "object", "properties": {"task_type": {"type": "string"}, "payload": {"type": "object"}}},
+            parameters={
+                "type": "object",
+                "properties": {"task_type": {"type": "string"}, "payload": {"type": "object"}},
+                "additionalProperties": True,
+            },
             handler=lambda arguments: {"accepted": True, "action": "enqueue_follow_up", "arguments": arguments},
             category="core",
             external_target=False,
@@ -368,7 +380,11 @@ def register_core_tools(registry: ToolRegistry) -> None:
         ToolDefinition(
             name="schedule_self_wakeup",
             description="Request a future wakeup for the current run.",
-            parameters={"type": "object", "properties": {"delay_seconds": {"type": "integer"}, "reason": {"type": "string"}}},
+            parameters={
+                "type": "object",
+                "properties": {"delay_seconds": {"type": "integer"}, "reason": {"type": "string"}},
+                "additionalProperties": True,
+            },
             handler=lambda arguments: {"accepted": True, "action": "schedule_self_wakeup", "arguments": arguments},
             category="core",
             external_target=False,
@@ -379,7 +395,11 @@ def register_core_tools(registry: ToolRegistry) -> None:
         ToolDefinition(
             name="invoke_skill",
             description="Invoke a registered skill by identifier.",
-            parameters={"type": "object", "properties": {"skill_id": {"type": "string"}, "input": {"type": "object"}}},
+            parameters={
+                "type": "object",
+                "properties": {"skill_id": {"type": "string"}, "input": {"type": "object"}},
+                "additionalProperties": True,
+            },
             handler=lambda arguments: {"accepted": True, "action": "invoke_skill", "arguments": arguments},
             category="skill",
             external_target=False,

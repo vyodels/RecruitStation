@@ -64,12 +64,8 @@ def test_evolution_pipeline_records_learning_and_promotes_trial_skill(tmp_path: 
         assert approve.status_code == 200
         assert approve.json()["status"] == "approved"
 
-        trial_skills = client.get("/api/evolution/skills", params={"status": "trial"}).json()
-        assert trial_skills[0]["name"] == "candidate-greeting"
-
-        promote = client.post(f"/api/evolution/skills/{trial_skills[0]['id']}/promote")
-        assert promote.status_code == 200
-        assert promote.json()["status"] == "active"
+        active_skills = client.get("/api/evolution/skills", params={"status": "active"}).json()
+        assert active_skills[0]["name"] == "candidate-greeting"
 
         health = summarize_mcp_health(McpRegistry(session_factory).list_servers())
         assert health["healthy"] == 1

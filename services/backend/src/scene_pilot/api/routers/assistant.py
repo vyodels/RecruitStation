@@ -62,7 +62,7 @@ def build_router(agent: AssistantAgent) -> APIRouter:
     @router.post("/conversations/{conversation_id}/turn")
     def create_turn(conversation_id: str, payload: TurnRequest) -> StreamingResponse:
         def _stream():
-            for event, data in agent.run_turn(conversation_id, payload.message):
+            for event, data in agent.run_turn_stream(conversation_id, payload.message):
                 yield format_sse_event(event, data)
 
         return StreamingResponse(_stream(), media_type="text/event-stream")
