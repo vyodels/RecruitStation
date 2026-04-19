@@ -6,6 +6,7 @@ import time
 
 from fastapi.testclient import TestClient
 
+from scene_pilot.api.routers.agent import AUTONOMOUS_PRIMARY_CONVERSATION_ID
 from scene_pilot.core.settings import load_settings
 from scene_pilot.models.domain import (
     AgentGlobalMemory,
@@ -45,6 +46,13 @@ def test_agents_routes_expose_builtin_profiles_and_runtime_collections(tmp_path:
     client, app = _build_client(tmp_path)
     client.__enter__()
     try:
+        expected_global_memory_summary = "尚未沉淀长期可复用的全局业务知识。"
+        autonomous_global_memory_seed = (
+            '{"status":"blocked","created":0,"updated":0,"skipped":0,"blocked":1,'
+            '"evidence":["当前浏览器仅有 1 个标签页：\'CLI Proxy API Management Center\'",'
+            '"活动页 URL: http://127.0.0.1:8317/management.html#/auth-files"],'
+            '"next_step":"Agent 应先复用现有页面或自行打开招聘平台页面，再继续同步。"}'
+        )
         assistant_agent = app.state.container.assistant_agent
         conversation = assistant_agent.create_conversation(user_id="desktop-user", title="Desk chat")
         assistant_agent.session_store.append_turn(
@@ -89,9 +97,9 @@ def test_agents_routes_expose_builtin_profiles_and_runtime_collections(tmp_path:
                     ),
                     AgentGlobalMemory(
                         agent_profile_id=autonomous.id,
-                        summary="autonomous global memory",
-                        content={"owner": "autonomous"},
-                        raw_content={"owner": "autonomous"},
+                        summary=autonomous_global_memory_seed,
+                        content={"text": autonomous_global_memory_seed},
+                        raw_content={"text": autonomous_global_memory_seed},
                     ),
                     AgentGlobalMemory(
                         agent_profile_id=assistant.id,
@@ -127,7 +135,7 @@ def test_agents_routes_expose_builtin_profiles_and_runtime_collections(tmp_path:
                 status="waiting_human",
                 checkpoint_status="open",
                 context_manifest={"goal": goal.goal_text, "title": goal.title},
-                runtime_metadata={"goal_title": goal.title, "conversation_id": goal.id},
+                runtime_metadata={"goal_title": goal.title, "conversation_id": AUTONOMOUS_PRIMARY_CONVERSATION_ID},
             )
             session.add(run)
             session.flush()
@@ -237,8 +245,25 @@ def test_agents_routes_expose_builtin_profiles_and_runtime_collections(tmp_path:
         autonomous_workspace = client.get("/api/agents/autonomous/workspace")
         assert autonomous_workspace.status_code == 200
         assert autonomous_workspace.json()["agent"]["kind"] == "autonomous"
-        assert autonomous_workspace.json()["conversations"][0]["id"] == goal.id
+        assert autonomous_workspace.json()["agent"]["memory_policy"]["agent_global_memory"]["schema"] == [
+            "facts",
+            "decisions",
+            "open_questions",
+            "next_actions",
+            "risk_flags",
+            "evidence_refs",
+            "confidence",
+        ]
+        assert autonomous_workspace.json()["agent"]["activeTask"] == "Fetch one candidate：等待人工处理后继续。"
+        assert autonomous_workspace.json()["conversations"][0]["id"] == AUTONOMOUS_PRIMARY_CONVERSATION_ID
+        assert autonomous_workspace.json()["conversations"][0]["preview"] == "Fetch one candidate：等待人工处理后继续。"
         assert autonomous_workspace.json()["runs"][0]["runId"] == "run-autonomous-1"
+        assert autonomous_workspace.json()["runs"][0]["summary"] == "Fetch one candidate：等待人工处理后继续。"
+        workspace_global_memory = next(item for item in autonomous_workspace.json()["memories"] if item["scope"] == "global")
+        assert "标签页" not in workspace_global_memory["summary"]
+        assert "http://" not in workspace_global_memory["summary"]
+        assert "请先在浏览器中打开并切换到招聘平台" not in workspace_global_memory["summary"]
+        assert workspace_global_memory["summary"] == expected_global_memory_summary
         scene_templates = client.get("/api/agents/shared-scene-templates")
         assert scene_templates.status_code == 200
         assert [item["key"] for item in scene_templates.json()] == [
@@ -254,10 +279,13 @@ def test_agents_routes_expose_builtin_profiles_and_runtime_collections(tmp_path:
         assert "共享工作区" in sync_incremental_template["summary"]
         assert "差异对比" in sync_incremental_template["defaultGoalText"]
 
-        autonomous_conversation = client.get(f"/api/agents/autonomous/conversations/{goal.id}")
+        autonomous_conversation = client.get(
+            f"/api/agents/autonomous/conversations/{AUTONOMOUS_PRIMARY_CONVERSATION_ID}"
+        )
         assert autonomous_conversation.status_code == 200
-        assert autonomous_conversation.json()["conversation"]["id"] == goal.id
-        assert autonomous_conversation.json()["messages"][0]["content"] == goal.goal_text
+        assert autonomous_conversation.json()["conversation"]["id"] == AUTONOMOUS_PRIMARY_CONVERSATION_ID
+        assert autonomous_conversation.json()["messages"][0]["content"] == "Fetch one candidate：等待人工处理后继续。"
+        assert len(autonomous_conversation.json()["messages"]) == 2
 
         runs = client.get("/api/agents/autonomous/runs")
         assert runs.status_code == 200
@@ -284,6 +312,14 @@ def test_agents_routes_expose_builtin_profiles_and_runtime_collections(tmp_path:
         assistant_global_memory = client.get("/api/agents/assistant/memory/global")
         assert assistant_global_memory.status_code == 200
         assert [item["summary"] for item in assistant_global_memory.json()] == ["assistant global memory"]
+
+        autonomous_global_memory = client.get("/api/agents/autonomous/memory/global")
+        assert autonomous_global_memory.status_code == 200
+        assert "标签页" not in autonomous_global_memory.json()[0]["summary"]
+        assert "http://" not in autonomous_global_memory.json()[0]["summary"]
+        assert "请先在浏览器中打开并切换到招聘平台" not in autonomous_global_memory.json()[0]["summary"]
+        assert autonomous_global_memory.json()[0]["summary"] == expected_global_memory_summary
+        assert workspace_global_memory["summary"] == autonomous_global_memory.json()[0]["summary"]
 
         skills = client.get("/api/agents/autonomous/skills")
         assert skills.status_code == 200
@@ -450,6 +486,180 @@ def test_autonomy_loop_processes_goal_without_manual_run_once(tmp_path: Path) ->
         load_settings.cache_clear()
 
 
+def test_app_startup_recovers_stale_autonomous_runs(tmp_path: Path) -> None:
+    os.environ["RECRUIT_AGENT_DATA_DIR"] = str(tmp_path)
+    load_settings.cache_clear()
+    app = create_app()
+
+    with app.state.session_factory() as session:
+        autonomous = session.query(RecruitAgentProfile).filter_by(agent_key="autonomous").one()
+        agent_session = AgentSession(agent_profile_id=autonomous.id, session_key="primary")
+        session.add(agent_session)
+        session.flush()
+
+        goal = GoalSpec(
+            agent_profile_id=autonomous.id,
+            title="Recover stale run",
+            goal_text="A stale run should be marked interrupted on startup.",
+            status="running",
+            source="operator",
+            requested_by="api-test",
+        )
+        session.add(goal)
+        session.flush()
+
+        run = AgentRun(
+            session_id=agent_session.id,
+            goal_spec_id=goal.id,
+            run_id="run-stale-1",
+            agent_kind="autonomous",
+            status="running",
+            context_manifest={"goal": goal.goal_text, "title": goal.title},
+            runtime_metadata={"goal_title": goal.title, "conversation_id": AUTONOMOUS_PRIMARY_CONVERSATION_ID},
+        )
+        session.add(run)
+        session.commit()
+        stale_run_id = run.id
+        stale_goal_id = goal.id
+
+    client = TestClient(app)
+    client.__enter__()
+    try:
+        with app.state.session_factory() as session:
+            recovered_run = session.get(AgentRun, stale_run_id)
+            recovered_goal = session.get(GoalSpec, stale_goal_id)
+            assert recovered_run is not None
+            assert recovered_goal is not None
+            assert recovered_run.status == "interrupted"
+            assert recovered_run.finished_at is not None
+            assert recovered_goal.status == "interrupted"
+    finally:
+        client.__exit__(None, None, None)
+        os.environ.pop("RECRUIT_AGENT_DATA_DIR", None)
+        load_settings.cache_clear()
+
+
+def test_app_startup_keeps_only_latest_open_autonomous_run(tmp_path: Path) -> None:
+    os.environ["RECRUIT_AGENT_DATA_DIR"] = str(tmp_path)
+    load_settings.cache_clear()
+    app = create_app()
+
+    with app.state.session_factory() as session:
+        autonomous = session.query(RecruitAgentProfile).filter_by(agent_key="autonomous").one()
+        agent_session = AgentSession(agent_profile_id=autonomous.id, session_key="primary")
+        session.add(agent_session)
+        session.flush()
+
+        older_goal = GoalSpec(
+            agent_profile_id=autonomous.id,
+            title="Older blocked run",
+            goal_text="This older open run should be superseded on startup.",
+            status="blocked",
+            source="operator",
+            requested_by="api-test",
+        )
+        latest_goal = GoalSpec(
+            agent_profile_id=autonomous.id,
+            title="Latest blocked run",
+            goal_text="This latest open run should remain resumable on startup.",
+            status="blocked",
+            source="operator",
+            requested_by="api-test",
+        )
+        session.add_all([older_goal, latest_goal])
+        session.flush()
+
+        older_run = AgentRun(
+            session_id=agent_session.id,
+            goal_spec_id=older_goal.id,
+            run_id="run-open-older",
+            agent_kind="autonomous",
+            status="blocked",
+            context_manifest={"goal": older_goal.goal_text, "title": older_goal.title},
+        )
+        latest_run = AgentRun(
+            session_id=agent_session.id,
+            goal_spec_id=latest_goal.id,
+            run_id="run-open-latest",
+            agent_kind="autonomous",
+            status="blocked",
+            context_manifest={"goal": latest_goal.goal_text, "title": latest_goal.title},
+        )
+        session.add_all([older_run, latest_run])
+        session.commit()
+        older_run_id = older_run.id
+        latest_run_id = latest_run.id
+
+    client = TestClient(app)
+    client.__enter__()
+    try:
+        with app.state.session_factory() as session:
+            older = session.get(AgentRun, older_run_id)
+            latest = session.get(AgentRun, latest_run_id)
+            assert older is not None
+            assert latest is not None
+            assert older.status == "interrupted"
+            assert older.finished_at is not None
+            assert latest.status == "blocked"
+    finally:
+        client.__exit__(None, None, None)
+        os.environ.pop("RECRUIT_AGENT_DATA_DIR", None)
+        load_settings.cache_clear()
+
+
+def test_autonomous_goal_creation_rejects_when_open_run_exists(tmp_path: Path) -> None:
+    client, app = _build_client(tmp_path)
+    client.__enter__()
+    try:
+        session_factory = app.state.session_factory
+        with session_factory() as session:
+            autonomous = session.query(RecruitAgentProfile).filter_by(agent_key="autonomous").one()
+            agent_session = AgentSession(agent_profile_id=autonomous.id, session_key="primary")
+            session.add(agent_session)
+            session.flush()
+            goal = GoalSpec(
+                agent_profile_id=autonomous.id,
+                title="Existing goal",
+                goal_text="Already queued",
+                status="queued",
+                source="operator",
+                source_text="Already queued",
+                requested_by="api-test",
+            )
+            session.add(goal)
+            session.flush()
+            session.add(
+                AgentRun(
+                    session_id=agent_session.id,
+                    goal_spec_id=goal.id,
+                    run_id="run-open-1",
+                    agent_kind="autonomous",
+                    status="queued",
+                    checkpoint_status="none",
+                    context_manifest={"goal": goal.goal_text, "conversation_id": AUTONOMOUS_PRIMARY_CONVERSATION_ID},
+                    runtime_metadata={"goal_title": goal.title, "conversation_id": AUTONOMOUS_PRIMARY_CONVERSATION_ID},
+                )
+            )
+            session.commit()
+
+        created = client.post(
+            "/api/agents/autonomous/goals",
+            json={
+                "title": "Blocked by open run",
+                "goal_text": "Should be rejected while another run is open.",
+                "requested_by": "api-test",
+            },
+        )
+        assert created.status_code == 409
+        assert created.json()["detail"] == (
+            "Autonomous already has an open run. Wait for it to finish or resume it before creating a new goal."
+        )
+    finally:
+        client.__exit__(None, None, None)
+        os.environ.pop("RECRUIT_AGENT_DATA_DIR", None)
+        load_settings.cache_clear()
+
+
 def test_sync_jds_action_enqueues_generic_autonomous_goal(tmp_path: Path) -> None:
     client, app = _build_client(tmp_path)
     client.__enter__()
@@ -495,7 +705,7 @@ def test_sync_jds_action_enqueues_generic_autonomous_goal(tmp_path: Path) -> Non
             assert goal.success_criteria["write_policy"] == "upsert_changed_roles_skip_unchanged"
             assert goal.context_hints["trigger"] == "scene_template_panel"
             assert goal.context_hints["scene_template_key"] == "sync_jd_incremental"
-            assert run.context_manifest["conversation_id"] == goal.id
+            assert run.context_manifest["conversation_id"] == AUTONOMOUS_PRIMARY_CONVERSATION_ID
             assert run.context_manifest["goal"] == goal.goal_text
             assert run.goal_spec_id == goal.id
     finally:
@@ -773,7 +983,7 @@ def test_autonomous_conversation_keeps_blocked_status_and_runtime_events(tmp_pat
                 status="blocked",
                 checkpoint_status="none",
                 context_manifest={"goal": goal.goal_text, "title": goal.title},
-                runtime_metadata={"goal_title": goal.title, "conversation_id": goal.id},
+                runtime_metadata={"goal_title": goal.title, "conversation_id": AUTONOMOUS_PRIMARY_CONVERSATION_ID},
             )
             session.add(run)
             session.flush()
@@ -818,25 +1028,19 @@ def test_autonomous_conversation_keeps_blocked_status_and_runtime_events(tmp_pat
             )
             session.commit()
 
-        response = client.get(f"/api/agents/autonomous/conversations/{goal.id}")
+        response = client.get(f"/api/agents/autonomous/conversations/{AUTONOMOUS_PRIMARY_CONVERSATION_ID}")
         assert response.status_code == 200
         payload = response.json()
         assert payload["conversation"]["status"] == "blocked"
-        runtime_messages = [
-            item
-            for item in payload["messages"]
-            if (item.get("metadata") or {}).get("event_type") == "provider.started"
-        ]
-        completed_messages = [
-            item
-            for item in payload["messages"]
-            if (item.get("metadata") or {}).get("event_type") == "turn.completed"
-        ]
-        assert len(runtime_messages) == 1
-        assert len(completed_messages) == 1
-        assert runtime_messages[0]["status"] == "active"
-        assert runtime_messages[0]["content"] == "calling model"
-        assert completed_messages[0]["status"] == "completed"
+        assert all((item.get("metadata") or {}).get("message_type") != "event" for item in payload["messages"])
+        assert payload["messages"][0]["content"] == "同步 JD（初始）：当前受阻，等待继续执行条件满足。"
+        run_detail = client.get("/api/agents/autonomous/runs/run-blocked-1")
+        assert run_detail.status_code == 200
+        runtime_events = run_detail.json()["events"]
+        provider_started = next(item for item in runtime_events if item["event_type"] == "provider.started")
+        turn_completed = next(item for item in runtime_events if item["event_type"] == "turn.completed")
+        assert provider_started["message"] == "calling model"
+        assert turn_completed["event_type"] == "turn.completed"
     finally:
         client.__exit__(None, None, None)
         os.environ.pop("RECRUIT_AGENT_DATA_DIR", None)

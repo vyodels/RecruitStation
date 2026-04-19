@@ -41,17 +41,17 @@ class ApiAppTests(unittest.TestCase):
         self.assertEqual(health.status_code, 200)
         self.assertEqual(health.json()["status"], "ready")
 
-        heartbeat = self.client.get("/api/agent/heartbeat/status")
+        heartbeat = self.client.get("/api/agents/heartbeat/status")
         self.assertEqual(heartbeat.status_code, 200)
         self.assertIn("autonomous_paused", heartbeat.json())
 
         task = self.client.post(
-            "/api/agent/tasks",
+            "/api/agents/tasks",
             json={"task_type": "autonomous_turn", "priority": 100, "payload": {"scope_kind": "global", "scope_ref": "system"}},
         )
         self.assertEqual(task.status_code, 200)
 
-        queue = self.client.get("/api/agent/queue")
+        queue = self.client.get("/api/agents/queue")
         self.assertEqual(queue.status_code, 200)
         self.assertEqual(len(queue.json()), 1)
 
@@ -79,6 +79,13 @@ class ApiAppTests(unittest.TestCase):
         responses = {
             "/api/settings": self.client.get("/api/settings"),
             "/api/dashboard": self.client.get("/api/dashboard"),
+            "/api/agents": self.client.get("/api/agents"),
+            "/api/agents/autonomous": self.client.get("/api/agents/autonomous"),
+            "/api/agents/autonomous/runs": self.client.get("/api/agents/autonomous/runs"),
+            "/api/agents/autonomous/approvals": self.client.get("/api/agents/autonomous/approvals"),
+            "/api/agents/autonomous/memory/global": self.client.get("/api/agents/autonomous/memory/global"),
+            "/api/agents/autonomous/skills": self.client.get("/api/agents/autonomous/skills"),
+            "/api/agents/autonomous/mcp": self.client.get("/api/agents/autonomous/mcp"),
             "/api/approvals": self.client.get("/api/approvals"),
             "/api/skills": self.client.get("/api/skills"),
             "/api/sync/status": self.client.get("/api/sync/status"),
@@ -101,6 +108,31 @@ class ApiAppTests(unittest.TestCase):
         for path, response in responses.items():
             with self.subTest(path=path):
                 self.assertEqual(response.status_code, 200, path)
+
+    def test_dashboard_learning_alerts_use_business_summary(self) -> None:
+        from scene_pilot.models.domain import AgentLearning
+
+        with self.client.app.state.session_factory() as session:
+            session.add(
+                AgentLearning(
+                    content=(
+                        '{"goal_title":"同步 JD（增量）","status":"blocked","created":0,"updated":0,"skipped":0,"blocked":1,'
+                        '"evidence":["当前浏览器仅有 1 个标签页：\'CLI Proxy API Management Center\'",'
+                        '"活动页 URL: http://127.0.0.1:8317/management.html#/auth-files"],'
+                        '"next_step":"请先在浏览器中打开并切换到招聘平台的职位列表或职位详情页面，然后继续同步。"}'
+                    ),
+                    tags=["autonomous", "global"],
+                    is_active=True,
+                )
+            )
+            session.commit()
+
+        dashboard = self.client.get("/api/dashboard")
+        self.assertEqual(dashboard.status_code, 200)
+        learning_alert = next(item for item in dashboard.json()["alerts"] if item["label"] == "可用学习草案")
+        self.assertNotIn("标签页", learning_alert["detail"])
+        self.assertNotIn("http://", learning_alert["detail"])
+        self.assertEqual(learning_alert["detail"], "同步 JD（增量）：当前受阻，等待继续执行条件满足。")
 
     def test_approval_update_and_blocked_task_approve_surfaces(self) -> None:
         created = self.client.post(

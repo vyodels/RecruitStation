@@ -33,10 +33,13 @@ from scene_pilot.runtime.providers import (
 from scene_pilot.runtime.tools import ToolRegistry, register_core_tools
 from scene_pilot.scheduler.queue import SqlAlchemyQueue
 from scene_pilot.scheduler.scheduler import SerialScheduler
+from scene_pilot.services.recruit_agent import default_recruit_agent_profile, resolve_context_policy, resolve_memory_policy
 from scene_pilot.services.dashboard import DashboardService
 from scene_pilot.services.events import EventStreamService
 from scene_pilot.services.feature_flags import FeatureFlagService
+from scene_pilot.services.browser_mcp_bridge import BrowserMcpBridgeManager
 from scene_pilot.services.mcp_registry import McpRegistryService
+from scene_pilot.repositories.domain import RecruitAgentProfileRepository, SettingsRepository
 from scene_pilot.services.sync import SyncService
 from scene_pilot.services.system_commands import SystemCommandService
 
@@ -73,14 +76,17 @@ class AppContainer:
         engine = create_engine_from_settings(resolved_settings)
         initialize_database(engine)
         session_factory = create_session_factory(engine)
-
-        providers, provider = _build_provider_bundle(resolved_settings)
-        tool_registry = ToolRegistry()
-        register_core_tools(tool_registry)
+        with session_factory() as session:
+            stored_settings = SettingsRepository(session).load(resolved_settings)
+        resolved_settings = AppSettings.model_validate(stored_settings.model_dump())
+        _seed_builtin_agent_profiles(session_factory)
 
         plugin_host = PluginHost()
         install_manifest(plugin_host, RecruitPluginManifest(session_factory))
-        tool_registry.merge(plugin_host.tool_registry)
+        mcp_registry = McpRegistryService(session_factory, bridge_manager=BrowserMcpBridgeManager())
+
+        providers, provider = _build_provider_bundle(resolved_settings)
+        tool_registry = _build_runtime_tool_registry(plugin_host=plugin_host, mcp_registry=mcp_registry)
 
         learning_writer = LearningWriter(session_factory)
         kernel = AgentKernel(
@@ -115,7 +121,6 @@ class AppContainer:
             events=events,
             execution_enabled=resolved_settings.feature_flags.enable_system_commands,
         )
-        mcp_registry = McpRegistryService(session_factory)
         return cls(
             settings=resolved_settings,
             session_factory=session_factory,
@@ -146,6 +151,8 @@ class AppContainer:
         self.settings = settings
         self.providers, self.provider = _build_provider_bundle(settings)
         self.kernel.provider = self.provider
+        self.tool_registry = _build_runtime_tool_registry(plugin_host=self.plugin_host, mcp_registry=self.mcp_registry)
+        self.kernel.tool_registry = self.tool_registry
         self.dashboard.settings = settings
 
         self.flags.flags.clear()
@@ -201,3 +208,146 @@ def _build_sync_service(settings: AppSettings, session_factory: sessionmaker[Ses
         session_factory=session_factory,
         target=_build_sync_target(settings),
     )
+
+
+def _build_runtime_tool_registry(*, plugin_host: PluginHost, mcp_registry: McpRegistryService) -> ToolRegistry:
+    tool_registry = ToolRegistry()
+    register_core_tools(tool_registry)
+    tool_registry.merge(plugin_host.tool_registry)
+    mcp_registry.register_enabled_runtime_tools(tool_registry)
+    return tool_registry
+
+
+def _seed_builtin_agent_profiles(session_factory: sessionmaker[Session]) -> None:
+    with session_factory() as session:
+        repo = RecruitAgentProfileRepository(session)
+        assistant = repo.by_agent_key("assistant")
+        autonomous = repo.by_agent_key("autonomous")
+        legacy = repo.by_agent_key("recruit-agent")
+
+        if autonomous is None and legacy is not None:
+            autonomous = repo.update(
+                legacy,
+                {
+                    "agent_key": "autonomous",
+                    "is_primary": True,
+                    "name": legacy.name or "Autonomous Agent",
+                    "status": legacy.status or "active",
+                    "agent_metadata": _merge_agent_metadata(legacy.agent_metadata, kind="autonomous"),
+                },
+            )
+
+        if autonomous is None:
+            autonomous = repo.create(_default_autonomous_profile())
+        else:
+            autonomous_updates: dict[str, Any] = {}
+            if not autonomous.is_primary:
+                autonomous_updates["is_primary"] = True
+            merged_metadata = _merge_agent_metadata(autonomous.agent_metadata, kind="autonomous")
+            if merged_metadata != dict(autonomous.agent_metadata or {}):
+                autonomous_updates["agent_metadata"] = merged_metadata
+            prompt_config = dict(autonomous.prompt_config or {})
+            resolved_context_policy = resolve_context_policy(prompt_config)
+            if prompt_config.get("context_policy") != resolved_context_policy:
+                prompt_config["context_policy"] = resolved_context_policy
+                autonomous_updates["prompt_config"] = prompt_config
+            resolved_memory_policy = resolve_memory_policy(autonomous.memory_policy)
+            if resolved_memory_policy != dict(autonomous.memory_policy or {}):
+                autonomous_updates["memory_policy"] = resolved_memory_policy
+            if autonomous_updates:
+                autonomous = repo.update(autonomous, autonomous_updates)
+
+        if assistant is None:
+            assistant = repo.create(_default_assistant_profile())
+        else:
+            assistant_updates: dict[str, Any] = {}
+            if assistant.is_primary:
+                assistant_updates["is_primary"] = False
+            merged_metadata = _merge_agent_metadata(assistant.agent_metadata, kind="assistant")
+            if merged_metadata != dict(assistant.agent_metadata or {}):
+                assistant_updates["agent_metadata"] = merged_metadata
+            if assistant_updates:
+                repo.update(assistant, assistant_updates)
+
+        if legacy is not None and autonomous is not None and legacy.id != autonomous.id and legacy.is_primary:
+            repo.update(legacy, {"is_primary": False})
+
+
+def _default_autonomous_profile() -> dict[str, Any]:
+    payload = default_recruit_agent_profile()
+    payload["agent_key"] = "autonomous"
+    payload["name"] = "Autonomous Agent"
+    payload["agent_metadata"] = _merge_agent_metadata(payload.get("agent_metadata"), kind="autonomous")
+    return payload
+
+
+def _default_assistant_profile() -> dict[str, Any]:
+    return {
+        "agent_key": "assistant",
+        "name": "Assistant Agent",
+        "status": "active",
+        "description": "面向聊天界面的协作助手，负责解释状态、回答问题，并在需要时等待人工确认。",
+        "is_primary": False,
+        "role_definition": {
+            "identity": "对话协作助手",
+            "positioning": "在聊天窗口中协助用户理解系统状态、执行操作并保持确认意识。",
+            "duties": [
+                "回答用户问题并整理当前上下文。",
+                "在需要时调用工具并解释结果。",
+                "对高风险动作保留确认与暂停意识。",
+            ],
+            "tone": "clear, concise, collaborative",
+            "boundaries": [
+                "不要伪造系统状态或执行结果。",
+                "高风险写入、外部动作、命令执行必须等待确认。",
+                "不要把一个用户会话的上下文泄露到其他会话。",
+            ],
+            "success_criteria": [
+                "回复清晰且可执行。",
+                "工具结果与当前会话上下文一致。",
+                "需要确认时能够显式停住并说明原因。",
+            ],
+            "forbidden_actions": [
+                "未经确认执行高风险外部动作。",
+                "伪造已完成但实际上未发生的操作。",
+            ],
+        },
+        "prompt_config": {
+            "system_prompt": "你是 Assistant Agent。你的职责是在聊天界面中与用户协作，清晰解释状态、回答问题，并在高风险动作前等待确认。",
+            "context_policy": {
+                "memory_scope": "conversation",
+                "share_global_context": True,
+            },
+            "response_policy": {
+                "prefer_structured_output": False,
+                "require_evidence_refs": False,
+                "separate_fact_from_inference": True,
+            },
+        },
+        "playbook_blueprint": {},
+        "memory_policy": {
+            "candidate_memory": {"isolation": "strict_by_candidate"},
+            "job_memory": {"isolation": "strict_by_jd"},
+            "agent_global_memory": {
+                "scope": "agent_global",
+                "share_read": True,
+            },
+        },
+        "dashboard_config": {"layout": ["chat_sessions", "recent_activity"]},
+        "channel_config": {"chat": {"enabled": True, "requires_confirmation": True}},
+        "agent_metadata": _merge_agent_metadata({}, kind="assistant"),
+    }
+
+
+def _merge_agent_metadata(raw_metadata: Any, *, kind: str) -> dict[str, Any]:
+    metadata = dict(raw_metadata or {})
+    metadata.update(
+        {
+            "kind": kind,
+            "builtin": True,
+            "supports_builtin_agents": True,
+        }
+    )
+    if kind == "autonomous":
+        metadata["current_primary_agent"] = "autonomous"
+    return metadata
