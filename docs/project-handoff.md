@@ -1,44 +1,45 @@
-# Recruit Agent Handoff
+# Project Handoff
 
-## 当前结论
+## 目的
 
-`2026-04-15` 之后，这个仓库的有效产品方向已经收束为 `Recruit Agent`，不再把自己定义成早期执行控制台。
+这份文档只保留**稳定项目入口**，不再承载临时会话细节。
 
-当前主语是：
+- 项目级长期边界：看 [AGENTS.md](../AGENTS.md)
+- 当前产品与架构总入口：看 [README.md](../README.md) 和 [Plan.md](../Plan.md)
+- Agent V2 设计真相：看 [agent-v2-implementation-spec.md](./agent-v2-implementation-spec.md) 和 [agent-v2-design-summary.md](./agent-v2-design-summary.md)
+- 当前有效的临时会话交接：看 [session-handoff-2026-04-19-ui-recovery.md](./session-handoff-2026-04-19-ui-recovery.md)
 
-- 招聘 Agent 配置
-- 候选人进度与沟通确认
-- Candidate / JD / Global memory
-- skill 管理与自学习演进治理
+## 当前项目事实
 
-底层仍保留 runtime、plan、episode 等执行内核，但它们已经下沉为实现层，不再作为顶层产品对象。
+- 当前主路径是桌面端 `chat-overlay + floating bubble` 与后端 `assistant / autonomous + shared kernel`
+- 共享招聘业务能力应通过通用 `plugin / toolkit / MCP / tool surface` 暴露，不应建模成某个 Agent 私有动作目录
+- 外部招聘站点接入不能 hardcode 到主程序；主程序只提供通用流程语义、MCP 桥接、审批、记忆和持久化
+- UI 验收时，主程序页面只能通过 `chrome-devtools` 操作；`browser-mcp` 只保留给主程序内部驱动外部站点
 
-## 当前已完成
+## 桌面端重点入口
 
-- 桌面导航已改为 `概览 / 招聘 Agent / 工作台 / 沟通中心 / 自学习/演进 / 设置`
-- `RecruitAgentProfile`、隔离 memory、skill 管理、候选人线程与演进审批已经落地
-- 工作台已围绕候选人进度和 agent 运行结果重构
-- 旧的编排中心化桌面页面已从前端主产品面中清理
-- 后端仍保留兼容执行内核，但显示名称和文档已经转到 `Recruit Agent`
+- 工作台壳：[/apps/desktop/src/features/workspace/DesktopWorkspace.tsx](/Users/didi/AgentProjects/scene-pilot/apps/desktop/src/features/workspace/DesktopWorkspace.tsx:1)
+- Overlay 主体：[/apps/desktop/src/features/chat-overlay/ChatOverlay.tsx](/Users/didi/AgentProjects/scene-pilot/apps/desktop/src/features/chat-overlay/ChatOverlay.tsx:1)
+- 悬浮球：[/apps/desktop/src/features/chat-overlay/FloatingBubble.tsx](/Users/didi/AgentProjects/scene-pilot/apps/desktop/src/features/chat-overlay/FloatingBubble.tsx:1)
+- 仪表盘：[/apps/desktop/src/features/dashboard/DashboardView.tsx](/Users/didi/AgentProjects/scene-pilot/apps/desktop/src/features/dashboard/DashboardView.tsx:1)
+- 设置页：[/apps/desktop/src/features/settings/SettingsView.tsx](/Users/didi/AgentProjects/scene-pilot/apps/desktop/src/features/settings/SettingsView.tsx:1)
 
-## 继续接手时先看
+## 后端重点入口
 
-- [README.md](../README.md)
-- [Plan.md](../Plan.md)
-- [docs/session-handoff-2026-04-15.md](./session-handoff-2026-04-15.md)
-- [apps/desktop/src/features/workspace/DesktopWorkspace.tsx](../apps/desktop/src/features/workspace/DesktopWorkspace.tsx)
-- [apps/desktop/src/features/recruit-agent/RecruitAgentView.tsx](../apps/desktop/src/features/recruit-agent/RecruitAgentView.tsx)
-- [apps/desktop/src/features/communications/CommunicationsView.tsx](../apps/desktop/src/features/communications/CommunicationsView.tsx)
-- [services/backend/src/scene_pilot/services/recruit_agent.py](../services/backend/src/scene_pilot/services/recruit_agent.py)
-- [services/backend/src/scene_pilot/api/routers/recruit_agent.py](../services/backend/src/scene_pilot/api/routers/recruit_agent.py)
+- Agent 路由：[/services/backend/src/scene_pilot/api/routers/agent.py](/Users/didi/AgentProjects/scene-pilot/services/backend/src/scene_pilot/api/routers/agent.py:1)
+- Recruit 路由：[/services/backend/src/scene_pilot/api/routers/recruit_agent.py](/Users/didi/AgentProjects/scene-pilot/services/backend/src/scene_pilot/api/routers/recruit_agent.py:1)
+- Autonomous 主流程：[/services/backend/src/scene_pilot/agents/autonomous.py](/Users/didi/AgentProjects/scene-pilot/services/backend/src/scene_pilot/agents/autonomous.py:1)
+- Recruit 服务：[/services/backend/src/scene_pilot/services/recruit_agent.py](/Users/didi/AgentProjects/scene-pilot/services/backend/src/scene_pilot/services/recruit_agent.py:1)
+- 共享场景模板：[/services/backend/src/scene_pilot/services/scene_templates.py](/Users/didi/AgentProjects/scene-pilot/services/backend/src/scene_pilot/services/scene_templates.py:1)
 
-## 验证命令
+## 默认验证
 
 ```bash
 python3 -m pytest services/backend/tests -q
 npm run desktop:typecheck
 ```
 
-## 历史说明
+## 清理约定
 
-仓库的实现目录结构沿用当前工程布局，但对外 CLI、桌面启动入口和环境变量前缀已经统一切到 `recruit-agent` / `RECRUIT_AGENT_`。
+- `project-handoff.md` 只保留稳定入口，不追加一次性排障细节
+- 临时交接只保留**当前有效的一份**；旧会话 handoff 在失效后直接删除，不做累积归档
