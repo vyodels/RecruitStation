@@ -1,5 +1,5 @@
 from .circuit_breaker import CircuitBreaker, CircuitBreakerSnapshot
-from .limits import RuntimeLimits
+from .limits import RoundLimits, TurnLimits
 from .models import (
     AgentResult,
     CacheBlock,
@@ -11,11 +11,12 @@ from .models import (
     FairnessState,
     GoalRef,
     GuardVerdict,
+    InputEnvelope,
     LLMRequest,
     LLMResponse,
     Message,
     Observation,
-    TickOutcome,
+    RoundOutcome,
     ToolCall,
     ToolExecutionResult,
     WakeupRequest,
@@ -55,9 +56,11 @@ __all__ = [
     "ProviderRegistry",
     "ProviderRegistryAdapter",
     "RetryPolicy",
-    "RuntimeLimits",
+    "RoundLimits",
+    "TurnLimits",
     "ScriptedProvider",
-    "TickOutcome",
+    "InputEnvelope",
+    "RoundOutcome",
     "ToolCall",
     "ToolDefinition",
     "ToolExecutionResult",

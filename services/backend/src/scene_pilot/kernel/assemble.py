@@ -15,8 +15,6 @@ def assemble_messages(
     plugin_host: PluginHost | None = None,
     memory_service: Any | None = None,
     tool_registry: ToolRegistry | None = None,
-    history_messages: list[Message] | None = None,
-    input_message: str | None = None,
 ) -> list[Message]:
     persona_fragments = plugin_host.collect_persona_fragments() if plugin_host is not None else []
     scope_memory_entries = []
@@ -39,18 +37,19 @@ def assemble_messages(
     if tool_registry is not None:
         system_parts.append(f"Available tools: {', '.join(sorted(tool_registry.tools.keys()))}")
 
+    input_envelope = observation.input
     user_payload = {
         "goal_id": goal.goal_id,
         "scope_kind": goal.scope_kind,
         "scope_ref": goal.scope_ref,
-        "input_message": input_message,
+        "input_message": None if input_envelope is None else input_envelope.input_message,
         "world_snapshot": observation.world_snapshot,
         "recent_events": list(observation.recent_events)[-8:],
         "memory": scope_memory_entries,
         "global_memory": global_memory_entries,
     }
     messages = [Message(role="system", content="\n\n".join(part for part in system_parts if part))]
-    if history_messages:
-        messages.extend(history_messages)
+    if input_envelope is not None and input_envelope.history_messages:
+        messages.extend(input_envelope.history_messages)
     messages.append(Message(role="user", content=json.dumps(user_payload, ensure_ascii=False, default=str)))
     return messages

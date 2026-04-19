@@ -4,9 +4,9 @@
 > LLM API 协议设计等关键设计点，作为 scene-pilot 中 Autonomous Agent / Assistant Agent
 > 设计的参考资料。
 
-> **术语约定**：文中 **Observation** 指一次 tick 从 DB / 外部系统实时拉取的"真实世界快照"
+> **术语约定**：文中 **Observation** 指一次 turn 从 DB / 外部系统实时拉取的"真实世界快照"
 > （候选人数、待审队列长度、最近事件等），对应 ReAct 论文里的 observation 语义。
-> Observation 永远活在 user 消息里、每 tick 重新生成；不进 system，不打缓存。
+> Observation 永远活在 user 消息里、每 turn 重新生成；不进 system，不打缓存。
 
 ## 目录
 
@@ -44,7 +44,7 @@
   - [System vs User 的设计决策](#system-vs-user-的设计决策)
 - [Part 7：映射到 scene-pilot 的 Autonomous Agent 设计](#part-7映射到-scene-pilot-的-loop-agent-设计)
 - [Part 8：术语表与 cache_control 深入](#part-8术语表与-cache_control-深入)
-  - [术语：Tick / Turn / Run / Session](#术语tick--turn--run--session)
+  - [术语：Turn / Round / Run / Session](#术语turn--round--run--session)
   - [cache_control 深入：标记 ≠ 命令](#cache_control-深入标记--命令)
   - [Autonomous Agent 的缓存策略](#loop-agent-的缓存策略)
 
@@ -943,7 +943,7 @@ assistant 消息有 tool_use → 下一条必须是 tool_result
 
 | Claude Code      | Autonomous Agent                                                             | 现有代码状态            |
 | ---------------- | ---------------------------------------------------------------------------- | ----------------- |
-| 短期：messages[]    | tick 内 LLM 调用的临时上下文                                                          | ❌ 应该没有，每 tick 重组装 |
+| 短期：messages[]    | turn 内各 round 的临时上下文                                                         | ❌ 不做跨 turn 累积；每个 turn 起点重组装 |
 | 中期：压缩 summary    | `CandidateSession.context_summary` / `conversation_sessions.context_summary` | ✅ 已有              |
 | 中期：session.jsonl | `conversation_sessions.jsonl_path`（原始消息历史）                                   | ✅ Assistant 已定义   |
 | 事件流              | `AgentRuntimeEvent`（运行事件真相源，不承载 message history）                             | ✅ 已有              |
@@ -959,18 +959,18 @@ assistant 消息有 tool_use → 下一条必须是 tool_result
 
 ## 应该简化的
 
-- **不要**学 Claude Code 的短期 messages[] 累积。Autonomous Agent 每 tick 是独立决策，不需要「连续叙事」。
+- **不要**学 Claude Code 的短期 messages[] 跨 turn 累积。Autonomous Agent 每个 turn 都独立从最新 Observation 出发，不需要长期「连续叙事」。
 - **不要**学 Claude Code 的压缩机制。中期记忆是 DB 实时查询，不需要压缩。
 
 ## 应该学的
 
-1. **长期 → 短期的注入方式**：每 tick 把 GlobalMemory + 当前候选人的 CandidateMemory 注入到 LLM context。
+1. **长期 → 短期的注入方式**：每个 turn 把 GlobalMemory + 当前候选人的 CandidateMemory 注入到 LLM context。
 2. **「中期 → 长期」的升级机制**：当 Skill 学到通用规律时，写入 GlobalMemory（现在用 EvolutionArtifact 做这个，需要更顺畅的自动通道）。
 3. **记忆检索方式**：跟 Claude Code 一样用「索引 + LLM 判断」，**不要上 RAG**——候选人池规模够小、描述够精炼时，索引判断比向量检索更准。
 4. **MEMORY.md 风格的索引设计**：给每条 GlobalMemory 写一行精炼描述，让 Orchestrator LLM 不用读全文就能判断相关性。
-5. **元数据 + 详情分离**：`disclosure.preview` 当元数据，`disclosure.model_context` 当详情。每 tick 只注入元数据，按需读详情。
+5. **元数据 + 详情分离**：`disclosure.preview` 当元数据，`disclosure.model_context` 当详情。每个 turn 只注入元数据，按需读详情。
 
-## Autonomous Agent 一次 tick 的 LLM 调用结构
+## Autonomous Agent 一次 turn 的 LLM 调用结构
 
 按本文 Part 6 的协议，建议这样组织：
 
@@ -998,15 +998,15 @@ messages: [
     role: "user",
     content: "## 当前 Observation\n候选人池：18人（低于阈值20）\n待评分：5人\n..."
   }
-  ↑ 每 tick 现拼，不缓存
+  ↑ 每个 round 现拼；Observation 属于当前 turn 的动态输入，不打缓存
 ]
 ```
 
 **关键设计**：
 
 1. 把 system 设计得**尽量稳定**（拿满缓存折扣）
-2. 把每 tick 变化的「Observation」放 user
-3. GlobalMemory 用元数据 + 详情分离的方式注入，避免每 tick 全量塞进去
+2. 把每个 turn 变化的「Observation」放 user
+3. GlobalMemory 用元数据 + 详情分离的方式注入，避免每个 turn 全量塞进去
 
 ## 核心结论
 
@@ -1023,16 +1023,16 @@ Autonomous Agent 是**周期性决策**——每次只需要看「当前 Observa
 
 # Part 8：术语表与 cache_control 深入
 
-## 术语：Tick / Turn / Run / Session
+## 术语：Turn / Round / Run / Session
 
 这几个词在 agent 设计里很容易混。统一定义：
 
 
 | 术语          | 含义                                                               | 时间尺度  | 例子                                                                                      |
 | ----------- | ---------------------------------------------------------------- | ----- | --------------------------------------------------------------------------------------- |
-| **Tick**    | Autonomous Agent 调度器的一次"心跳"，包含**一次 LLM 决策 + 若干工具调用**             | 秒级    | 调度器每 30 秒醒来 → 选一个候选人 → 调一次 LLM → 执行 N 个工具 → 写状态 → 进入下一 tick                             |
-| **Turn**    | 一次 LLM 调用与其响应的来回（assistant → tool_result → assistant 再决策算多 turn） | 毫秒~秒级 | 一个 tick 内可能跑 2-8 个 turn（受 `max_turns=8` 约束）                                             |
-| **Run**     | 围绕**一个具体任务/目标**的完整执行（含多个 tick），对应数据库里的 `AgentRun`                | 分钟~小时 | "评估候选人 X" 这个任务从 queued → running → completed 是一个 run                                    |
+| **Turn**    | Driver 处理一次触发后的完整 LLM 驱动循环，直到遇到 `wait_human` / `complete` / `escalate` 等边界 | 秒级~分钟级 | Heartbeat 取到一个任务后，围绕它跑完若干次 `run_round()`，最终结束当前 turn                                   |
+| **Round**   | `AgentKernel.run_round()` 的一次 `model → tool → observe` 往返       | 毫秒~秒级 | 一个 turn 内可能跑 1-8 个 round（受 `max_rounds_per_turn=8` 约束）                                  |
+| **Run**     | 围绕**一个具体任务/目标**的完整执行（含多个 turn），对应数据库里的 `AgentRun`                | 分钟~小时 | "评估候选人 X" 这个任务从 queued → running → completed 是一个 run                                    |
 | **Session** | 一段连续的人机/agent 上下文边界，对应 `CandidateSession`、`Claude Code session`  | 小时~天  | 一个候选人从初次接触到最终结案是一个 candidate session；用户在 Claude Code 里 `--continue` 恢复同一上下文也是同一 session |
 
 
@@ -1041,12 +1041,12 @@ Autonomous Agent 是**周期性决策**——每次只需要看「当前 Observa
 ```
 Session (CandidateSession)
   └─ Run (AgentRun, 围绕一个 GoalSpec / TaskEnvelope)
-       └─ Tick (调度器一次心跳)
-            └─ Turn (一次 LLM 调用 + 工具反馈)
+       └─ Turn (一次触发后的完整执行壳)
+            └─ Round (`AgentKernel.run_round()`)
                  └─ Tool call (单个工具执行)
 ```
 
-调度器视角：调度器只关心 **Run** 和 **Tick**；Turn 是 AgentLoop 内部循环；Tool call 是 Turn 内的具体动作。
+Driver / 调度器视角：外层只关心 **Run** 和 **Turn**；Kernel 只关心 **Round**；Tool call 是 Round 内的具体动作。
 
 ## cache_control 深入：标记 ≠ 命令
 
@@ -1106,7 +1106,7 @@ system: [
   └─────────────────────────────┘ ← 书签 3（cache_control）
 ]
 messages: [
-  user: "## 当前 Observation\n候选人池 18 人\n..."   ← 每 tick 变，不打书签
+  user: "## 当前 Observation\n候选人池 18 人\n..."   ← 每 turn 变，不打书签
 ]
 ```
 
@@ -1117,7 +1117,7 @@ messages: [
 ```
 设 system prompt = 20K tokens（持续稳定）
    user / messages = 5K tokens（每次变）
-   每 tick 一次请求，每分钟 2 次
+   假设主线每个 round 一次请求，每分钟 2 次
 
 不用缓存（按 input $3/M tokens 估算）：
   每次：25K × $3/M = $0.075
@@ -1144,13 +1144,12 @@ messages: [
 | 书签 1（最稳定）  | Persona + 工具说明 + 行为规则             | 改 prompt 配置才变       | 极高               |
 | 书签 2（次稳定）  | `prompt_config` + GlobalMemory 索引 | profile 更新或全局记忆增减时变 | 高                |
 | 书签 3（动态稳定） | 当前 candidate / job 的 memory（按需）   | 切到下一个候选人就变          | 中（同一候选人 run 内复用） |
-| 不打书签       | 每 tick 的 Observation（DB 查询结果）     | 每 tick 都变           | —                |
+| 不打书签       | 每 turn 的 Observation（DB 查询结果）     | 每 turn 都变           | —                |
 
 
 **实操检查清单：**
 
 1. 同一个 run 内连续多次 LLM 调用应该命中书签 3
 2. 切换候选人时书签 1、2 仍命中，只有书签 3 失效
-3. **避免在 system 里塞每 tick 都变的内容**（比如时间戳、当前任务序号）——一塞就把整段缓存打废
+3. **避免在 system 里塞每 turn 都变的内容**（比如时间戳、当前任务序号）——一塞就把整段缓存打废
 4. **避免书签后又插入更稳定的内容**——前缀匹配是从前往后的，新插的"稳定"内容前面有不稳定段会污染缓存
-

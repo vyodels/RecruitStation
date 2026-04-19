@@ -29,4 +29,4 @@ def test_assistant_stream_emits_compacted_event_when_history_is_compacted(tmp_pa
         third = client.post(f"/api/assistant/conversations/{conversation_id}/turn", json={"message": "hello three"})
 
     assert "event: compacted" in third.text
-    assert "event: turn_completed" in third.text
+    assert "event: turn.completed" in third.text

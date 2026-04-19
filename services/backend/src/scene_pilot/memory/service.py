@@ -174,7 +174,6 @@ class MemoryService:
                 "event_type": event.event_type,
                 "source": event.source,
                 "message": event.message,
-                "tick_id": event.tick_id,
                 "turn_id": event.turn_id,
                 "conversation_id": event.conversation_id,
                 "payload": dict(event.payload or {}),

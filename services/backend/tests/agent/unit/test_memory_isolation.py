@@ -93,9 +93,9 @@ def test_memory_service_isolates_scope_indexes_and_fetches_context(tmp_path: Pat
                 session_id=agent_session.id,
                 run_id=run.id,
                 source="kernel",
-                event_type="tick_completed",
-                message="tick finished",
-                tick_id="tick-1",
+                event_type="turn.completed",
+                message="turn finished",
+                turn_id="turn-1",
                 seq=1,
             )
         )
@@ -114,6 +114,6 @@ def test_memory_service_isolates_scope_indexes_and_fetches_context(tmp_path: Pat
         assert service.fetch_run_context(run.id) == {"goal": "follow up candidates"}
         assert service.fetch_session_summary(conversation.id) is None
         recent_events = service.fetch_recent_events(run_id=run.id)
-        assert [event["tick_id"] for event in recent_events] == ["tick-1"]
+        assert [event["turn_id"] for event in recent_events] == ["turn-1"]
     finally:
         session.close()

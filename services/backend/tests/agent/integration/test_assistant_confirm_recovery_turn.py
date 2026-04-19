@@ -41,7 +41,7 @@ def test_assistant_confirm_creates_recovery_turn(tmp_path: Path) -> None:
             json={"message": "Send a greeting"},
         )
         assert initial.status_code == 200
-        assert "event: waiting_confirmation" in initial.text
+        assert "event: turn.waiting_human" in initial.text
 
         confirmed = client.post(f"/api/assistant/conversations/{conversation_id}/confirm").json()
         assert confirmed["confirmed"] is True

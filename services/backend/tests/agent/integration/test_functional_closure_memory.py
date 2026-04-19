@@ -43,8 +43,8 @@ def test_functional_closure_memory_service_is_in_autonomous_loop(tmp_path: Path)
         register_core_tools(tools)
         kernel = AgentKernel(provider=ContinuityProvider(), tool_registry=tools, plugin_host=PluginHost())
         agent = AutonomousAgent(session_factory=create_session_factory(session.get_bind()), kernel=kernel)
-        agent.run_tick_from_envelope({"run_pk": run.id, "scope_kind": "candidate", "scope_ref": candidate.candidate_person_id})
-        outcome = agent.run_tick_from_envelope({"run_pk": run.id, "scope_kind": "candidate", "scope_ref": candidate.candidate_person_id})
+        agent.run_turn_from_envelope({"run_pk": run.id, "scope_kind": "candidate", "scope_ref": candidate.candidate_person_id})
+        outcome = agent.run_turn_from_envelope({"run_pk": run.id, "scope_kind": "candidate", "scope_ref": candidate.candidate_person_id})
         assert outcome.final_output == "continued"
     finally:
         session.close()

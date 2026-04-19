@@ -4,6 +4,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from queue import Queue
 from threading import Thread
+import time
 from typing import Any, cast
 
 from sqlalchemy.orm import Session, sessionmaker
@@ -12,7 +13,8 @@ from scene_pilot.assistant.conversation import ConversationService
 from scene_pilot.assistant.session_store import AssistantSessionStore
 from scene_pilot.kernel.kernel import AgentKernel
 from scene_pilot.memory.service import MemoryService
-from scene_pilot.runtime.models import CancellationToken, GoalRef, Message, Observation, TickOutcome, ToolCall
+from scene_pilot.runtime.limits import TurnLimits
+from scene_pilot.runtime.models import CancellationToken, GoalRef, GuardVerdict, InputEnvelope, Message, Observation, RoundOutcome, ToolCall
 
 
 @dataclass(slots=True)
@@ -29,11 +31,14 @@ class AssistantAgent:
     kernel: AgentKernel
     session_factory: sessionmaker[Session]
     session_store: AssistantSessionStore
+    turn_limits: TurnLimits = field(default_factory=TurnLimits)
     active_turns: dict[str, ActiveTurn] = field(default_factory=dict)
     conversations: ConversationService = field(init=False)
+    _assistant_guard_registered: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.conversations = ConversationService(self.session_store)
+        self._register_assistant_guard()
 
     def create_conversation(self, *, user_id: str, title: str | None = None) -> Any:
         return self.conversations.create(user_id=user_id, title=title)
@@ -73,7 +78,7 @@ class AssistantAgent:
         event_queue: Queue[tuple[str, dict[str, Any]] | None] = Queue()
         worker = Thread(
             target=self._execute_turn,
-            args=(conversation_id, conversation.id, user_turn.turn_id, assistant_turn.turn_id, message, token, event_queue),
+            args=(conversation_id, conversation.id, user_turn.turn_id, assistant_turn.turn_id, message, None, token, event_queue),
             daemon=True,
         )
         self.active_turns[conversation_id] = ActiveTurn(
@@ -113,25 +118,21 @@ class AssistantAgent:
         tool_calls = [ToolCall.from_payload(payload) for payload in list(pending_turn.tool_calls or [])]
         token = CancellationToken()
         events: list[tuple[str, dict[str, Any]]] = []
-        outcome = self._run_shared_kernel_turn(
+        outcome = self._run_shared_kernel_turn_loop(
             conversation_id=conversation_id,
             conversation_pk=conversation.id,
-            message="Resume approved action.",
+            message=None,
             cancel_token=token,
             event_sink=lambda event, data: events.append((event, data)),
             seed_tool_calls=tool_calls,
         )
-        tool_results = outcome.metadata.get("tool_results", [])
-        status = "completed"
-        if outcome.status == "wait_human":
-            status = "waiting_human"
-        if token.cancelled or outcome.escalate_reason == "cancelled":
-            status = "cancelled"
+        tool_results = [_serialize_tool_result(item) for item in outcome.tool_results]
+        status = _assistant_status(outcome)
         self.session_store.update_turn(
             recovery_turn.turn_id,
-            content={"text": outcome.final_output},
-            tool_calls=list(pending_turn.tool_calls or []),
-            tool_results=[_serialize_tool_result(item) for item in tool_results],
+            content={"text": outcome.final_output or ""},
+            tool_calls=list(outcome.metadata.get("pending_tool_calls") or []),
+            tool_results=tool_results,
             status=status,
             cancel_reason=token.reason if status == "cancelled" else None,
             turn_metadata={"recovery_of_turn_id": pending_turn.turn_id, "events": [event for event, _data in events]},
@@ -160,7 +161,7 @@ class AssistantAgent:
         active.token.cancel("operator_cancelled")
         active.queue.put(
             (
-                "turn_cancelling",
+                "turn.cancelling",
                 {
                     "conversation_id": conversation_id,
                     "turn_id": active.turn_id,
@@ -182,36 +183,33 @@ class AssistantAgent:
         conversation_pk: str,
         user_turn_id: str,
         assistant_turn_id: str,
-        message: str,
+        message: str | None,
+        seed_tool_calls: list[ToolCall] | None,
         token: CancellationToken,
         event_queue: Queue[tuple[str, dict[str, Any]] | None],
     ) -> None:
         def _emit(event: str, payload: dict[str, Any]) -> None:
             event_queue.put((event, payload))
 
-        _emit("turn_started", {"conversation_id": conversation_id, "turn_id": assistant_turn_id})
+        _emit("turn.started", {"conversation_id": conversation_id, "turn_id": assistant_turn_id})
         try:
-            outcome = self._run_shared_kernel_turn(
+            outcome = self._run_shared_kernel_turn_loop(
                 conversation_id=conversation_id,
                 conversation_pk=conversation_pk,
                 message=message,
                 cancel_token=token,
                 event_sink=_emit,
+                seed_tool_calls=seed_tool_calls,
                 exclude_turn_id=user_turn_id,
             )
-            tool_results = [_serialize_tool_result(item) for item in outcome.metadata.get("tool_results", [])]
-            tool_calls = list(outcome.metadata.get("tool_calls", []) or [])
-            status = "completed"
-            if outcome.status == "wait_human":
-                status = "waiting_human"
-            if token.cancelled or outcome.escalate_reason == "cancelled":
-                status = "cancelled"
-                _emit("turn_cancelled", {"turn_id": assistant_turn_id, "reason": token.reason})
-            elif outcome.final_output:
-                _emit("llm_final", {"content": outcome.final_output})
+            tool_results = [_serialize_tool_result(item) for item in outcome.tool_results]
+            status = _assistant_status(outcome)
+            tool_calls = list(outcome.metadata.get("pending_tool_calls") or [])
+            if not tool_calls:
+                tool_calls = [call.to_provider_payload() for call in outcome.tool_calls]
             self.session_store.update_turn(
                 assistant_turn_id,
-                content={"text": outcome.final_output},
+                content={"text": outcome.final_output or ""},
                 tool_calls=tool_calls,
                 tool_results=tool_results,
                 status=status,
@@ -231,7 +229,20 @@ class AssistantAgent:
                 )
                 if compaction_event is not None:
                     _emit("compacted", compaction_event)
-            _emit("turn_completed", {"turn_id": assistant_turn_id, "status": status})
+            if status == "waiting_human":
+                _emit(
+                    "turn.waiting_human",
+                    {
+                        "turn_id": assistant_turn_id,
+                        "pending_tool_calls": tool_calls,
+                    },
+                )
+            elif status == "cancelled":
+                _emit("turn.cancelled", {"turn_id": assistant_turn_id, "reason": token.reason})
+            elif status == "completed":
+                _emit("turn.completed", {"turn_id": assistant_turn_id, "status": status})
+            else:
+                _emit("turn.failed", {"turn_id": assistant_turn_id, "status": status, "reason": outcome.escalate_reason})
         except Exception as exc:
             self.session_store.update_turn(
                 assistant_turn_id,
@@ -239,28 +250,27 @@ class AssistantAgent:
                 status="failed",
                 turn_metadata={"error": str(exc)},
             )
-            _emit("turn_failed", {"turn_id": assistant_turn_id, "error": str(exc)})
+            _emit("turn.failed", {"turn_id": assistant_turn_id, "error": str(exc)})
         finally:
             self.active_turns.pop(conversation_id, None)
             event_queue.put(None)
 
-    def _run_shared_kernel_turn(
+    def _run_shared_kernel_turn_loop(
         self,
         *,
         conversation_id: str,
         conversation_pk: str,
-        message: str,
+        message: str | None,
         cancel_token: CancellationToken,
         event_sink: Any,
         seed_tool_calls: list[ToolCall] | None = None,
         exclude_turn_id: str | None = None,
-    ) -> TickOutcome:
+    ) -> RoundOutcome:
         conversation = self.session_store.get_session(conversation_id)
         if conversation is None:
             raise KeyError(f"unknown conversation: {conversation_id}")
         with self.session_factory() as session:
             memory_service = MemoryService(session)
-            recent_events = memory_service.fetch_recent_events(conversation_id=conversation_id, limit=8)
             goal = GoalRef(
                 goal_id=conversation_id,
                 scope_kind="conversation",
@@ -271,33 +281,82 @@ class AssistantAgent:
                     "memory_scope_kind": "global",
                     "memory_scope_ref": conversation.user_id,
                     "agent_profile_id": "assistant",
+                    "source_kind": "assistant",
+                    "persist_memory": False,
                 },
             )
-            observation = Observation(
-                world_snapshot={
-                    "conversation_id": conversation_id,
-                    "assistant_id": conversation.assistant_id,
-                    "context_summary": memory_service.fetch_session_summary(conversation_pk),
-                },
-                scope_kind="conversation",
-                scope_ref=conversation_id,
-                recent_events=recent_events,
-                available_tools=sorted(self.kernel.tool_registry.tools.keys()),
-                available_skills=[],
-                available_mcps=[],
-                hash=conversation_id,
-            )
-            return self.kernel.run_turn(
-                goal=goal,
-                observation=observation,
-                history_messages=self._history_messages(conversation, exclude_turn_id=exclude_turn_id),
-                input_message=message,
-                memory_service=memory_service,
-                learning_writer=self.kernel.learning_writer,
-                cancel_token=cancel_token,
-                event_sink=event_sink,
-                seed_tool_calls=seed_tool_calls,
-            )
+            history_messages = self._history_messages(conversation, exclude_turn_id=exclude_turn_id)
+            current_input = message
+            current_seed_tool_calls = list(seed_tool_calls or [])
+            round_seq = 0
+            started_at = time.monotonic()
+            last_outcome = RoundOutcome(status="continue", gate_signal="continue")
+
+            while True:
+                if cancel_token.is_cancelled():
+                    last_outcome = RoundOutcome(status="cancelled", gate_signal="paused")
+                    break
+                if round_seq >= self.turn_limits.max_rounds_per_turn:
+                    last_outcome = RoundOutcome(
+                        status="continue",
+                        gate_signal="budget_exhausted",
+                        final_output=last_outcome.final_output,
+                    )
+                    break
+                if time.monotonic() - started_at >= self.turn_limits.turn_timeout_seconds:
+                    last_outcome = RoundOutcome(
+                        status="continue",
+                        gate_signal="budget_exhausted",
+                        final_output=last_outcome.final_output,
+                    )
+                    break
+
+                round_seq += 1
+                observation = Observation(
+                    world_snapshot={
+                        "conversation_id": conversation_id,
+                        "assistant_id": conversation.assistant_id,
+                        "context_summary": memory_service.fetch_session_summary(conversation_pk),
+                        "assistant_confirmation_enabled": True,
+                    },
+                    scope_kind="conversation",
+                    scope_ref=conversation_id,
+                    recent_events=memory_service.fetch_recent_events(conversation_id=conversation_id, limit=8),
+                    available_tools=sorted(self.kernel.tool_registry.tools.keys()),
+                    available_skills=[],
+                    available_mcps=[],
+                    hash=conversation_id,
+                    input=InputEnvelope(
+                        history_messages=list(history_messages),
+                        input_message=current_input,
+                        seed_tool_calls=list(current_seed_tool_calls),
+                    ),
+                )
+                last_outcome = self.kernel.run_round(
+                    goal=goal,
+                    observation=observation,
+                    limits=self.kernel.limits,
+                    memory_service=memory_service,
+                    learning_writer=self.kernel.learning_writer,
+                    cancel_token=cancel_token,
+                    event_sink=event_sink,
+                )
+                history_messages = list(last_outcome.metadata.get("history_messages") or [])
+                current_input = None
+                current_seed_tool_calls = []
+                event_sink(
+                    "round.completed",
+                    {
+                        "round_seq": round_seq,
+                        "status": last_outcome.status,
+                        "gate_signal": last_outcome.gate_signal,
+                    },
+                )
+                if last_outcome.final_output:
+                    event_sink("llm_final", {"content": last_outcome.final_output, "round_seq": round_seq})
+                if last_outcome.status == "cancelled" or last_outcome.gate_signal not in {None, "continue"}:
+                    break
+            return last_outcome
 
     def _history_messages(self, conversation: Any, *, exclude_turn_id: str | None) -> list[Message]:
         messages: list[Message] = []
@@ -309,6 +368,39 @@ class AssistantAgent:
                 continue
             messages.append(Message(role=cast(Any, role), content=str(item.get("content") or "")))
         return messages
+
+    def _register_assistant_guard(self) -> None:
+        if self._assistant_guard_registered:
+            return
+
+        def _assistant_confirmation(tool_name: str, arguments: dict[str, Any], observation: Observation) -> GuardVerdict:
+            if observation.scope_kind != "conversation":
+                return GuardVerdict(allowed=True)
+            if not bool(observation.world_snapshot.get("assistant_confirmation_enabled")):
+                return GuardVerdict(allowed=True)
+            tool = self.kernel.tool_registry.tools.get(tool_name)
+            if tool is None:
+                return GuardVerdict(allowed=True)
+            if bool(tool.metadata.get("requires_confirmation")) or tool.external_target or bool(arguments.get("requires_confirmation")):
+                return GuardVerdict(allowed=False, reason="pending_confirmation", severity="waiting_human")
+            return GuardVerdict(allowed=True)
+
+        self.kernel.plugin_host.register_guard_check("assistant_confirmation", _assistant_confirmation)
+        self._assistant_guard_registered = True
+
+
+def _assistant_status(outcome: RoundOutcome) -> str:
+    if outcome.status == "cancelled" or outcome.gate_signal == "paused":
+        return "cancelled"
+    if outcome.status == "wait_human" or outcome.gate_signal == "wait_human":
+        return "waiting_human"
+    if outcome.status == "complete" or outcome.gate_signal == "goal_done":
+        return "completed"
+    if outcome.status == "escalate" or outcome.gate_signal == "escalate":
+        return "failed"
+    if outcome.gate_signal == "budget_exhausted":
+        return "failed"
+    return "completed"
 
 
 def _serialize_tool_result(result: Any) -> dict[str, Any]:

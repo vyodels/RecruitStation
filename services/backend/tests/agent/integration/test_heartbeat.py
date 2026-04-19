@@ -27,7 +27,7 @@ def _make_session(tmp_path: Path) -> Session:
     return create_session_factory(engine)()
 
 
-def test_heartbeat_claims_task_and_runs_autonomous_tick(tmp_path: Path) -> None:
+def test_heartbeat_claims_task_and_runs_autonomous_turn(tmp_path: Path) -> None:
     session = _make_session(tmp_path)
     try:
         profile = RecruitAgentProfile(agent_key="primary", name="Primary", is_primary=True)
@@ -51,9 +51,10 @@ def test_heartbeat_claims_task_and_runs_autonomous_tick(tmp_path: Path) -> None:
 
         TaskQueueRepository(session).enqueue(
             task_id="task-1",
-            task_type="autonomous_tick",
+            task_type="autonomous_turn",
             payload={
                 "run_pk": run.id,
+                "trigger_type": "heartbeat",
                 "scope_kind": "candidate",
                 "scope_ref": candidate.candidate_person_id,
                 "world_snapshot": {"candidate": "ready"},

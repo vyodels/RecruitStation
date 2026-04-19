@@ -6,7 +6,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
-from scene_pilot.models.domain import AgentRun, AgentTickRecord, AgentTurnRecord, JobAssembly, RecruitAgentProfile
+from scene_pilot.models.domain import AgentRun, AgentTurnRecord, JobAssembly, RecruitAgentProfile
 from scene_pilot.repositories.domain import TaskQueueRepository
 from scene_pilot.services.container import AppContainer
 
@@ -73,7 +73,6 @@ def build_router(container: AppContainer) -> APIRouter:
                     "id": run.id,
                     "run_id": run.run_id,
                     "status": run.status,
-                    "ticks_count": run.ticks_count,
                     "turns_count": run.turns_count,
                 }
                 for run in session.scalars(stmt).all()
@@ -87,43 +86,23 @@ def build_router(container: AppContainer) -> APIRouter:
                 "id": run.id,
                 "run_id": run.run_id,
                 "status": run.status,
-                "ticks_count": run.ticks_count,
                 "turns_count": run.turns_count,
             }
 
-    @router.get("/runs/{run_id}/ticks")
-    def list_ticks(run_id: str) -> list[dict[str, Any]]:
+    @router.get("/runs/{run_id}/turns")
+    def list_turns(run_id: str) -> list[dict[str, Any]]:
         with container.session_factory() as session:
             run = _resolve_run(session, run_id)
-            stmt = select(AgentTickRecord).where(AgentTickRecord.run_pk == run.id).order_by(AgentTickRecord.seq.asc())
-            return [
-                {
-                    "id": tick.id,
-                    "tick_id": tick.tick_id,
-                    "seq": tick.seq,
-                    "status": tick.status,
-                    "outcome_kind": tick.outcome_kind,
-                }
-                for tick in session.scalars(stmt).all()
-            ]
-
-    @router.get("/runs/{run_id}/ticks/{tick_id}/turns")
-    def list_turns(run_id: str, tick_id: str) -> list[dict[str, Any]]:
-        with container.session_factory() as session:
-            run = _resolve_run(session, run_id)
-            tick = session.scalars(
-                select(AgentTickRecord).where(AgentTickRecord.run_pk == run.id, AgentTickRecord.tick_id == tick_id)
-            ).first()
-            if tick is None:
-                return []
-            stmt = select(AgentTurnRecord).where(AgentTurnRecord.tick_pk == tick.id).order_by(AgentTurnRecord.seq.asc())
+            stmt = select(AgentTurnRecord).where(AgentTurnRecord.run_pk == run.id).order_by(AgentTurnRecord.seq.asc())
             return [
                 {
                     "id": turn.id,
                     "turn_id": turn.turn_id,
                     "seq": turn.seq,
-                    "role": turn.role,
-                    "stop_reason": turn.stop_reason,
+                    "trigger_type": turn.trigger_type,
+                    "status": turn.status,
+                    "outcome_kind": turn.outcome_kind,
+                    "phase": turn.phase,
                 }
                 for turn in session.scalars(stmt).all()
             ]

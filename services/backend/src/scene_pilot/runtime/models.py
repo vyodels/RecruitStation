@@ -196,7 +196,7 @@ class GoalRef:
 class CheckpointRef:
     checkpoint_id: str
     run_id: str | None = None
-    tick_id: str | None = None
+    turn_id: str | None = None
     summary: str | None = None
     payload: dict[str, Any] = field(default_factory=dict)
 
@@ -204,10 +204,17 @@ class CheckpointRef:
 @dataclass(slots=True)
 class FairnessState:
     last_scope_ref: str | None = None
-    same_scope_ticks: int = 0
+    same_scope_turns: int = 0
     soft_limit: int = 3
     hard_limit: int = 6
     cooldown_until: datetime | None = None
+
+
+@dataclass(slots=True)
+class InputEnvelope:
+    history_messages: list[Message] = field(default_factory=list)
+    input_message: str | None = None
+    seed_tool_calls: list[ToolCall] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -220,6 +227,7 @@ class Observation:
     available_skills: list[str] = field(default_factory=list)
     available_mcps: list[str] = field(default_factory=list)
     hash: str | None = None
+    input: InputEnvelope | None = None
 
 
 @dataclass(slots=True)
@@ -286,13 +294,16 @@ class Effects:
 
 
 @dataclass(slots=True)
-class TickOutcome:
-    status: str
-    final_output: str = ""
+class RoundOutcome:
+    status: Literal["continue", "complete", "wait_human", "escalate", "error", "cancelled"]
+    gate_signal: Literal["continue", "wait_human", "budget_exhausted", "goal_done", "paused", "escalate"] | None = None
+    final_output: str | None = None
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    tool_results: list[ToolExecutionResult] = field(default_factory=list)
+    memory_updates: list[dict[str, Any]] = field(default_factory=list)
     effects: Effects = field(default_factory=Effects)
-    wait_reason: str | None = None
-    checkpoint: CheckpointRef | None = None
     escalate_reason: str | None = None
+    checkpoint: CheckpointRef | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -306,6 +317,13 @@ class CancellationToken:
         self.cancelled = True
         self.reason = reason
         self._event.set()
+
+    def is_cancelled(self) -> bool:
+        return self.cancelled
+
+    def raise_if_cancelled(self) -> None:
+        if self.cancelled:
+            raise RuntimeError(self.reason or "cancelled")
 
     def wait(self, timeout: float | None = None) -> bool:
         return self._event.wait(timeout)

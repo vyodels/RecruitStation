@@ -2,19 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from collections.abc import Callable
 from typing import Any
 
 from scene_pilot.kernel.guard import run_preflight
 from scene_pilot.plugins.host import PluginHost
-from scene_pilot.runtime.limits import RuntimeLimits
+from scene_pilot.runtime.limits import RoundLimits
 from scene_pilot.runtime.models import CancellationToken, Deliberation, LLMResponse, LLMUsage, Message, Observation, ToolCall, ToolExecutionResult
 from scene_pilot.runtime.providers import LLMProvider
 from scene_pilot.runtime.tools import ToolRegistry
-
-
-EventSink = Callable[[str, dict[str, object]], None]
-ConfirmationGate = Callable[[str, dict[str, object]], bool]
 
 
 def deliberate(
@@ -24,13 +19,11 @@ def deliberate(
     tool_registry: ToolRegistry,
     observation: Observation,
     plugin_host: PluginHost | None = None,
-    limits: RuntimeLimits | None = None,
+    limits: RoundLimits | None = None,
     cancel_token: CancellationToken | None = None,
-    event_sink: EventSink | None = None,
-    confirmation_gate: ConfirmationGate | None = None,
-    seed_tool_calls: list[ToolCall] | None = None,
+    event_sink: Any | None = None,
 ) -> Deliberation:
-    active_limits = limits or RuntimeLimits()
+    active_limits = limits or RoundLimits()
     history = list(messages)
     tool_results: list[ToolExecutionResult] = []
     tool_calls: list[ToolCall] = []
@@ -38,54 +31,55 @@ def deliberate(
     final_content = ""
     stop_reason = "stop"
     usage = LLMUsage()
-
-    for _turn in range(active_limits.max_turns):
-        if cancel_token is not None and cancel_token.cancelled:
-            stop_reason = "cancelled"
-            break
-
-        response = _response_for_turn(
-            provider,
-            history,
-            tool_registry,
-            cancel_token=cancel_token,
-            seed_tool_calls=seed_tool_calls if _turn == 0 else None,
+    seed_tool_calls = list(observation.input.seed_tool_calls) if observation.input is not None else []
+    if cancel_token is not None and cancel_token.is_cancelled():
+        return Deliberation(
+            messages=history,
+            stop_reason="cancelled",
+            usage=usage,
+            metadata={"tool_result_count": 0, "cancelled": True, "pending_tool_calls": []},
         )
-        usage = response.usage
-        stop_reason = response.finish_reason
-        tool_calls.extend(response.tool_calls)
 
-        history.append(
-            Message(
-                role="assistant",
-                content=response.content,
-                metadata={"tool_calls": [call.to_provider_payload() for call in response.tool_calls]},
-            )
+    response = _response_for_round(
+        provider,
+        history,
+        tool_registry,
+        cancel_token=cancel_token,
+        seed_tool_calls=seed_tool_calls,
+    )
+    usage = response.usage
+    stop_reason = response.finish_reason
+    tool_calls.extend(response.tool_calls)
+    final_content = response.content
+
+    history.append(
+        Message(
+            role="assistant",
+            content=response.content,
+            metadata={"tool_calls": [call.to_provider_payload() for call in response.tool_calls]},
         )
-        if response.content and event_sink is not None:
-            event_sink("llm_delta", {"delta": response.content})
+    )
+    if response.content and event_sink is not None:
+        event_sink("llm_delta", {"delta": response.content})
 
-        if not response.tool_calls:
-            final_content = response.content
-            break
-
+    if cancel_token is not None and cancel_token.is_cancelled():
+        stop_reason = "cancelled"
+    else:
         for call in response.tool_calls[: active_limits.max_tool_roundtrips]:
             if event_sink is not None:
                 event_sink("tool_call", {"id": call.id, "name": call.name, "arguments": dict(call.arguments or {})})
-            if cancel_token is not None and cancel_token.cancelled:
+            if cancel_token is not None and cancel_token.is_cancelled():
                 stop_reason = "cancelled"
                 break
-            seeded_confirmation = bool(seed_tool_calls) and _turn == 0
-            if confirmation_gate is not None and not seeded_confirmation and confirmation_gate(call.name, call.arguments):
-                pending_tool_calls.append(call)
-                stop_reason = "wait_human"
-                if event_sink is not None:
-                    event_sink("waiting_confirmation", {"tool_name": call.name, "arguments": dict(call.arguments or {})})
-                break
+            seeded_confirmation = any(seed.id == call.id and seed.name == call.name for seed in seed_tool_calls)
 
             verdicts = run_preflight(call.name, call.arguments, observation, plugin_host=plugin_host)
             rejected = next((verdict for verdict in verdicts if not verdict.allowed), None)
             if rejected is not None:
+                if rejected.severity == "waiting_human" and not seeded_confirmation:
+                    pending_tool_calls.append(call)
+                    stop_reason = "wait_human"
+                    break
                 history.append(
                     Message(role="tool", name=call.name, tool_call_id=call.id, content=rejected.reason or "blocked")
                 )
@@ -99,6 +93,7 @@ def deliberate(
                         },
                     )
                 continue
+
             result = asyncio.run(tool_registry.execute_async(call.name, call.arguments, cancel_token=cancel_token))
             tool_results.append(result)
             if event_sink is not None:
@@ -113,12 +108,9 @@ def deliberate(
             history.append(
                 Message(role="tool", name=call.name, tool_call_id=call.id, content=result.to_message_content())
             )
-            if cancel_token is not None and cancel_token.cancelled:
+            if cancel_token is not None and cancel_token.is_cancelled():
                 stop_reason = "cancelled"
                 break
-
-        if stop_reason in {"wait_human", "cancelled"}:
-            break
 
     return Deliberation(
         messages=history,
@@ -135,7 +127,7 @@ def deliberate(
     )
 
 
-def _response_for_turn(
+def _response_for_round(
     provider: LLMProvider,
     history: list[Message],
     tool_registry: ToolRegistry,

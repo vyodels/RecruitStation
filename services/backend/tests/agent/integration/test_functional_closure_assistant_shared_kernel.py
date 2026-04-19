@@ -34,7 +34,7 @@ def test_functional_closure_assistant_uses_shared_kernel_and_recovery(tmp_path: 
     with client:
         conversation_id = client.post("/api/assistant/conversations", json={"user_id": "user-1"}).json()["conversation_id"]
         initial = client.post(f"/api/assistant/conversations/{conversation_id}/turn", json={"message": "send"}).text
-        assert "event: waiting_confirmation" in initial
+        assert "event: turn.waiting_human" in initial
         confirmed = client.post(f"/api/assistant/conversations/{conversation_id}/confirm").json()
         assert confirmed["confirmed"] is True
         assert confirmed["status"] == "completed"

@@ -65,5 +65,5 @@ def test_assistant_cancel_token_is_not_reused_by_later_turns(tmp_path: Path) -> 
             json={"message": "new turn"},
         )
         assert "event: llm_final" in second.text
-        assert "event: turn_cancelled" not in second.text
+        assert "event: turn.cancelled" not in second.text
         assert conversation_id not in agent.active_turns

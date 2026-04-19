@@ -830,7 +830,6 @@ class AgentRun(Base, TimestampMixin):
     run_id: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True, index=True)
     agent_kind: Mapped[str] = mapped_column(String(32), nullable=False, default="autonomous", index=True)
     turns_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    ticks_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     prompt_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     completion_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     cache_hit_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -917,7 +916,6 @@ class AgentRuntimeEvent(Base, TimestampMixin):
     message: Mapped[str] = mapped_column(Text, nullable=False)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     occurred_at: Mapped[datetime] = mapped_column(UnixTimestamp, nullable=False, default=utcnow, index=True)
-    tick_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     turn_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     conversation_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     seq: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -1306,7 +1304,7 @@ class ApprovalItem(Base, TimestampMixin):
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     run_pk: Mapped[str | None] = mapped_column(ForeignKey("agent_runs.id", ondelete="SET NULL"), nullable=True, index=True)
-    tick_pk: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    turn_pk: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     conversation_pk: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     source_kind: Mapped[str] = mapped_column(String(32), nullable=False, default="autonomous", index=True)
     tool_name: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
@@ -1316,38 +1314,20 @@ class ApprovalItem(Base, TimestampMixin):
     idempotency_key: Mapped[str | None] = mapped_column(String(255), nullable=True, unique=True, index=True)
 
 
-class AgentTickRecord(Base, TimestampMixin):
-    __tablename__ = "agent_tick_records"
+class AgentTurnRecord(Base, TimestampMixin):
+    __tablename__ = "agent_turn_records"
     __table_args__ = (
-        UniqueConstraint("run_pk", "seq", name="uq_agent_tick_records_run_seq"),
+        UniqueConstraint("run_pk", "seq", name="uq_agent_turn_records_run_seq"),
     )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=generate_id)
-    tick_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True, default=generate_business_id)
+    turn_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True, default=generate_business_id)
     run_pk: Mapped[str] = mapped_column(ForeignKey("agent_runs.id", ondelete="CASCADE"), nullable=False, index=True)
     seq: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     trigger_type: Mapped[str] = mapped_column(String(64), nullable=False, default="manual", index=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="started", index=True)
     phase: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     outcome_kind: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
-    prompt_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    completion_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    cache_hit_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    tick_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
-
-
-class AgentTurnRecord(Base, TimestampMixin):
-    __tablename__ = "agent_turn_records"
-    __table_args__ = (
-        UniqueConstraint("tick_pk", "seq", name="uq_agent_turn_records_tick_seq"),
-    )
-
-    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=generate_id)
-    turn_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True, default=generate_business_id)
-    tick_pk: Mapped[str] = mapped_column(ForeignKey("agent_tick_records.id", ondelete="CASCADE"), nullable=False, index=True)
-    seq: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
-    role: Mapped[str] = mapped_column(String(32), nullable=False, default="assistant", index=True)
-    stop_reason: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     prompt_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     completion_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     cache_hit_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -1359,7 +1339,6 @@ class ToolInvocation(Base, TimestampMixin):
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=generate_id)
     invocation_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True, default=generate_business_id)
-    tick_pk: Mapped[str | None] = mapped_column(ForeignKey("agent_tick_records.id", ondelete="SET NULL"), nullable=True, index=True)
     turn_pk: Mapped[str | None] = mapped_column(ForeignKey("agent_turn_records.id", ondelete="SET NULL"), nullable=True, index=True)
     tool_name: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     category: Mapped[str] = mapped_column(String(64), nullable=False, default="core", index=True)

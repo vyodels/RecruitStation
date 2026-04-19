@@ -4,7 +4,8 @@ from dataclasses import dataclass
 
 from scene_pilot.kernel.kernel import AgentKernel
 from scene_pilot.plugins.host import PluginHost
-from scene_pilot.runtime.models import GoalRef, LLMResponse, Observation, ToolCall
+from scene_pilot.runtime.limits import RoundLimits
+from scene_pilot.runtime.models import GoalRef, InputEnvelope, LLMResponse, Observation, ToolCall
 from scene_pilot.runtime.providers import ScriptedProvider
 from scene_pilot.runtime.tools import ToolDefinition, ToolRegistry
 
@@ -15,7 +16,7 @@ class StubMemoryService:
         return [{"summary": "Candidate prefers async updates."}]
 
 
-def test_kernel_happy_path_executes_tool_loop_and_returns_complete_outcome() -> None:
+def test_kernel_run_round_supports_driver_managed_multi_round_flow() -> None:
     provider = ScriptedProvider(
         provider_name="scripted",
         responses=[
@@ -64,9 +65,27 @@ def test_kernel_happy_path_executes_tool_loop_and_returns_complete_outcome() -> 
         hash="obs-1",
     )
 
-    outcome = kernel.run_tick(goal, observation)
+    first = kernel.run_round(goal=goal, observation=observation, limits=RoundLimits())
+    second = kernel.run_round(
+        goal=goal,
+        observation=Observation(
+            world_snapshot={"stage": "new"},
+            scope_ref="candidate-1",
+            scope_kind="candidate",
+            recent_events=[],
+            available_tools=["core.echo"],
+            available_skills=[],
+            available_mcps=[],
+            hash="obs-1",
+            input=InputEnvelope(history_messages=list(first.metadata["history_messages"])),
+        ),
+        limits=RoundLimits(),
+    )
 
-    assert outcome.status == "complete"
-    assert outcome.final_output == "completed"
-    assert outcome.metadata["tool_results"][0].output == {"echo": "hello"}
-    assert outcome.metadata["assembled_messages"][0].role == "system"
+    assert first.status == "continue"
+    assert first.gate_signal == "continue"
+    assert first.tool_results[0].output == {"echo": "hello"}
+    assert second.status == "complete"
+    assert second.gate_signal == "goal_done"
+    assert second.final_output == "completed"
+    assert second.metadata["assembled_messages"][0].role == "system"

@@ -14,7 +14,6 @@ from .domain import (
     AgentRunCheckpoint,
     AgentRuntimeEvent,
     AgentSession,
-    AgentTickRecord,
     AgentTurnRecord,
     AgentWorkItem,
     CandidateAutonomousLock,

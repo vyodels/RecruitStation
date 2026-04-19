@@ -7,6 +7,8 @@
 > 配套实施细节见 `[agent-v2-implementation-spec.md](./agent-v2-implementation-spec.md)`。
 > 上下文/记忆基础见 `[agent-context-memory-design-reference.md](./agent-context-memory-design-reference.md)`。
 
+> **术语锚定**：本项目 `turn` 采用 Codex 语义，表示一次从触发（用户消息 / 调度唤醒 / run 续跑）到下一次需要人类介入为止的完整 LLM 驱动循环。`round` 表示 turn 内部一次 `model → tool → observe` 往返，对应 Claude Agent SDK 文档里的 `turn`。本项目不使用 `tick` 一词。
+
 ---
 
 ## 0. 一句话愿景
@@ -24,10 +26,10 @@
 | 1   | **同内核、异装配**          | Autonomous 与 Assistant **共用 AgentKernel**，差异在 Trigger / Memory 策略 / Context 组装 / Guard 宽严    |
 | 2   | **运行装配独立解析**         | 每个 run 都解析一份 `AutonomousAssembly` runtime contract；招聘场景当前把它实现成 `JobAssembly`，但 Kernel 不依赖这个物理形态 |
 | 3   | **五原语托住主线**         | Autonomous 主线连续性由 Goal / State / Checkpoint / Log / Memory 保证，而不是靠长上下文硬记住历史 |
-| 4   | **State 以事实查询为主**    | 主程序优先提供事实查询型 tools；主线 agent 每个 tick 只拿固定快照 contract 的概览，其余按需查询详情 |
+| 4   | **State 以事实查询为主**    | 主程序优先提供事实查询型 tools；主线 agent 每个 turn 只拿固定快照 contract 的概览，其余按需查询详情 |
 | 5   | **LLM 决定下一步，runtime 只做薄约束**  | 业务推进顺序主要由 LLM 基于 Goal + State 自主决定；程序只提供预算、人审、切换公平性、回访时间上下限等薄约束 |
 | 6   | **执行层显式下沉**   | 高噪音网页动作不在主线上堆 turns，由主线显式创建临时执行单元；执行单元完成动作后只回流结构化结果、必要副作用、可沉淀经验和分析日志引用 |
-| 7   | **Observation 不是记忆** | 每 tick 现拉真实世界快照（DB/外部），不在 agent 进程内累积、不打缓存                                                   |
+| 7   | **Observation 不是记忆** | 每 turn 现拉真实世界快照（DB/外部），不在 agent 进程内累积、不打缓存                                                   |
 | 8   | **自进化优先于手写规则**       | LLM 通过执行单元产物和 `record_learning` 沉淀 skill / memory；先 trial，连续成功才长期可用，失效后重新升级新的执行单元 |
 | 9   | **场景能力包下沉业务语义**     | Kernel 只提供插槽与通用原语；招聘等业务语义通过轻量 Scenario Capability Pack（plugin）注册，而不是写死在内核里 |
 
@@ -40,7 +42,7 @@
 ┌──────────────────────────────────────────────────────────────────────┐
 │                             入口层                                     │
 │   Heartbeat Daemon        REST/WS API        CLI / Desktop            │
-│   （触发 Autonomous tick）  （用户对话/管理）  （人工干预）                │
+│   （触发 Autonomous turn）  （用户对话/管理）  （人工干预）                │
 └───────────────┬─────────────────────┬────────────────────────────────┘
                 │                     │
                 ▼                     ▼
@@ -48,7 +50,7 @@
 │                            Agent 层                                    │
 │   ┌────────────────────┐     ┌────────────────────┐                   │
 │   │ Autonomous Agent   │     │ Assistant Agent    │                   │
-│   │ tick()             │     │ turn() (streaming) │                   │
+│   │ turn()             │     │ turn() (streaming) │                   │
 │   └─────────┬──────────┘     └─────────┬──────────┘                   │
 │             └───────────┬───────────────┘                             │
 │                         ▼                                             │
@@ -77,7 +79,7 @@
                 ▼                          ▼
 ┌──────────────────────────────────────────────────────────────────────┐
 │                          持久化层                                       │
-│  Session / Run / Tick / Turn 事件流 + jsonl                            │
+│  Session / Run / Turn / Round 事件流 + jsonl                           │
 │  Memory 表（Global / Job / Candidate）                                 │
 │  PromptLibrary / SkillLibrary / PluginRegistry / MCPRegistry           │
 │  CompactionLog / LearningLog / EvolutionArtifact                       │
@@ -99,9 +101,9 @@
 ```
 Goal + Assembly  ←  进程启动后加载；Goal 是自然语言目标文档 + 少量强约束插槽，Assembly 决定 prompt/tools/memory/policy
                    ↓
-Agent Kernel     ←  常驻单例；封装 tick()
+Agent Kernel     ←  常驻单例；封装 turn()
                    ↓
-Execution Cycle  ←  一个 Run 围绕长期 Goal 持续运行；每个 tick 重新读取 State 概览并自主选择推进哪个 scope / 场景路径
+Execution Cycle  ←  一个 Run 围绕长期 Goal 持续运行；每个 turn 重新读取 State 概览并自主选择推进哪个 scope / 场景路径
 ```
 
 **五原语（在这里先给定义）**：
@@ -126,12 +128,12 @@ AutonomousAssembly (runtime contract)
 └── kernel_tuning
 ```
 
-**Assembly 过程**：tick 开始时，Kernel 根据当前 run / scope 解析一份 AutonomousAssembly，
-与 base profile 合并，得到"本 tick 实际使用的"prompt / tools / memory / policy。
+**Assembly 过程**：turn 开始时，Kernel 根据当前 run / scope 解析一份 AutonomousAssembly，
+与 base profile 合并，得到"本 turn 实际使用的"prompt / tools / memory / policy。
 
 招聘场景里的 `JobAssembly` 只是该 runtime contract 的一个实现：它额外携带 JD 评分标准、JobMemory 绑定等招聘特有字段，这些都不属于 Kernel 原语。
 
-### 3.3 Tick Cycle（8 节点）
+### 3.3 Turn Cycle（8 节点）
 
 ```
      Trigger
@@ -148,7 +150,7 @@ AutonomousAssembly (runtime contract)
      Deliberate     ← LLM ←→ Tool 反复（这一层才叫 "agent loop"）
         │              含 Tool Call / Observe / Reflect / Conclude 子阶段
         │              tool_call 前先做 Guard preflight
-        │              受 max_turns / token_budget 约束
+        │              受 `max_tool_roundtrips` / `RoundLimits.token_budget` 约束
         ├────────────► Guard(preflight) ─► tool execute ─► tool_result ─┐
         │                                                                │
         └──────────────────────────── final_content / stop_reason ────────┘
@@ -164,15 +166,15 @@ AutonomousAssembly (runtime contract)
         │              global_lesson / skill_draft / prompt_lesson
         ▼
      Evaluate       ← continue / sleep / wait_human / complete / escalate
-                      （若 wait_human，则当前 tick 结束，确认后只能由新的 tick / recovery turn 恢复）
+                      （若 wait_human，则当前 turn 结束，确认后只能由新的 turn / recovery turn 恢复）
 ```
 
 ### 3.4 Self-continuation（持续性来源）
 
 Agent 的"持续运行"**不靠 cron 定死**，靠这两条机制：
 
-1. **Heartbeat daemon** 每 `interval` 秒跑一次：有外部任务就取任务做，没任务就跑"自检 tick"（固定快照 contract + Goal，让 LLM 判断是否有值得推进的业务动作）
-2. **LLM 在 tick 末尾**可以调 `schedule_self_wakeup(delay_seconds, reason)` 指定下次自己什么时候再醒 —— LLM 给建议，程序施加上下限和最终调度约束
+1. **Heartbeat daemon** 每 `interval` 秒跑一次：有外部任务就取任务做，没任务就跑"自检 turn"（固定快照 contract + Goal，让 LLM 判断是否有值得推进的业务动作）
+2. **LLM 在 turn 末尾**可以调 `schedule_self_wakeup(delay_seconds, reason)` 指定下次自己什么时候再醒 —— LLM 给建议，程序施加上下限和最终调度约束
 
 ### 3.5 主线层 vs 执行层
 
@@ -190,7 +192,7 @@ Agent 的"持续运行"**不靠 cron 定死**，靠这两条机制：
 ```
 
 原则：
-- 主线 agent 每个 tick 都重新从 `Goal + State + Memory + Recent Log` 现算，不维护显式 agenda
+- 主线 agent 每个 turn 都重新从 `Goal + State + Memory + Recent Log` 现算，不维护显式 agenda
 - 细粒度业务对象默认不进固定快照，只通过事实查询型 tools 或场景包 enrichers 按需暴露
 - 高噪音网页动作默认下沉到显式执行单元，而不是让主线连续背 browser turns
 - 执行单元不追求现场续命；失效时重新升级新的执行单元，而不是恢复旧现场
@@ -206,12 +208,12 @@ Agent 的"持续运行"**不靠 cron 定死**，靠这两条机制：
 ```text
 Kernel 通用原语
   全局 Autonomous 暂停（agent_global_state.autonomous_paused）
-    -> Heartbeat 起 tick 前读一次，paused 时 skip
+    -> Heartbeat 起 turn 前读一次，paused 时 skip
   Persona fragment 插槽
   Observation enricher 插槽
   Guard check 插槽
   Tool / Router 注册插槽
-  tick 内单点审批（approval_items）
+  turn 内单点审批（approval_items）
 
 recruit 场景包（通过 PluginHost 注册）
   per-候选人接管锁（candidate_autonomous_locks）
@@ -250,12 +252,12 @@ recruit 场景包（通过 PluginHost 注册）
   ─────────                  ─────────
   Trigger = Heartbeat        Trigger = 用户消息
   Context = DB 拉 Observation  /  Context = conversation history + recent tool results
-  Memory 回写 = 每 tick       Memory 回写 = 每 turn
+  Memory 回写 = 每 turn       Memory 回写 = 每 turn
   Output = 状态/队列/通知       Output = SSE 流式回用户
   Guard 结构 = preflight + 节点级   Guard 结构 = 仅 preflight，由用户实时把关
   场景能力 = 可加载对应 pack        场景能力 = 可加载对应 pack
-  中途取消 = 不可（tick 原子）  中途取消 = 可（CancellationToken，仿 Claude Code ESC）
-  max_turns = 8              max_turns = 16
+  中途取消 = 不可（turn 原子）  中途取消 = 可（CancellationToken，仿 Claude Code ESC）
+  max_rounds_per_turn = 8    max_rounds_per_turn = 8（可按 Assembly 覆盖）
   Compact = session 级         Compact = 对话级（仿 Claude Code）
 ```
 
@@ -281,7 +283,7 @@ DELETE or GET /assistant/conversations/{id}  ← 关闭/查询
 
 ### 4.3 协作
 
-- Assistant 可以 **派活给 Autonomous**：调 `enqueue_follow_up` 工具，Autonomous 下一 tick 看到并处理
+- Assistant 可以 **派活给 Autonomous**：调 `enqueue_follow_up` 工具，Autonomous 下一 turn 看到并处理
 - Autonomous 可以 **留言给 Assistant**：写 `approval_items` / `NotificationDraft`，Assistant 在下一次会话开头主动提示
 - `NotificationDraft` 在实现上复用 `operator_interactions`：`interaction_type='notification_draft'`，用于承接待展示通知，而不是再建一张独立消息表
 
@@ -293,7 +295,7 @@ DELETE or GET /assistant/conversations/{id}  ← 关闭/查询
 - 取消后：当前 turn 结束 → 推 `turn_cancelled` 事件 → jsonl 落档 → 不回滚已写副作用、不再派发后续 tool
 - 用户后续发新消息正常开 turn，被取消 turn 的 partial outputs 留在历史中，由 LLM 自行判断是否复用
 
-对照 Autonomous：tick 是原子单位，**不暴露中途取消接口**。要停 Autonomous 的方式只有 §3.6 三层（全局 pause / 场景包 takeover 机制 / Guard reject），不通过"杀 tick"实现。
+对照 Autonomous：turn 是原子单位，**不暴露中途取消接口**。要停 Autonomous 的方式只有 §3.6 三层（全局 pause / 场景包 takeover 机制 / Guard reject），不通过"杀 turn"实现。
 
 
 ---
@@ -315,7 +317,7 @@ DELETE or GET /assistant/conversations/{id}  ← 关闭/查询
 其中：
 - Goal 决定长期任务边界
 - State 决定当前真实世界状态
-- Checkpoint 决定新的 tick 如何接回半完成动作
+- Checkpoint 决定新的 turn 如何接回半完成动作
 - Log 决定事后分析与同类阻塞检索
 - Memory 决定长期复用知识
 ```
@@ -327,11 +329,11 @@ DELETE or GET /assistant/conversations/{id}  ← 关闭/查询
 
 中期 Medium-term
   SessionSummary / RunContext / RecentEventLog
-  -> 当前 run 内跨 tick 的轻量摘要与最近事件
+  -> 当前 run 内跨 turn 的轻量摘要与最近事件
 
 短期 Short-term
   messages[] / tool_outputs
-  -> 只在本 tick 或执行单元内存在的临时上下文
+  -> 只在本 turn 或执行单元内存在的临时上下文
 ```
 
 关键边界：
@@ -396,17 +398,16 @@ Assemble 阶段：
 | **MCP**    | 远程 MCP 服务   | MCPRegistry (URL+auth)    | 远程进程                         | 邮件 / 日历 / IM MCP server                |
 
 
-### 6.2 生命周期 hook
+### 6.2 PluginHost 扩展面
 
-PluginHost 提供 6 个 hook：
+当前实现里，PluginHost 直接暴露的是注册面，而不是旧设计里的那套生命周期 hook：
 
 ```
-pre_tick    → 在 Sense 之前，可注入额外数据源
-post_tick   → 在 Evaluate 之后，可做监控上报
-pre_tool    → 工具执行前，可二次校验
-post_tool   → 工具执行后，可改写输出
-on_memory_write → 记忆写入时，可 enrich 或 reject
-on_compact  → 压缩前，可决定保留策略
+register_tools                → 注册场景包提供的工具
+register_observation_enricher → 扩展 Observation
+register_guard_check          → 追加 Guard 裁决
+register_persona_fragment     → 注入 persona 片段
+register_router               → 暴露场景专属 API router
 ```
 
 ### 6.3 可用性控制
@@ -426,7 +427,7 @@ GuardPolicy：       最终再做一次白名单/黑名单校验
 - `MCPRegistry` 管 URL + auth + capabilities
 - 每个 MCP server 有 circuit breaker（失败率 > 50%/1min 自动熔断 5 分钟）
 - `mcp_health` cron 每分钟 ping
-- tick 开始时加载"健康的 MCP"列表，熔断的 MCP 自动从本 tick tools 里剔除
+- turn 开始时加载"健康的 MCP"列表，熔断的 MCP 自动从本 turn tools 里剔除
 
 ---
 
@@ -435,19 +436,18 @@ GuardPolicy：       最终再做一次白名单/黑名单校验
 ### 7.1 Safeguards 清单
 
 
-| 机制                     | 触发条件                         | 动作                                      |
-| ---------------------- | ---------------------------- | --------------------------------------- |
-| max_turns              | Deliberate 内 LLM↔Tool 超过 N 轮 | 强制结束 turn，返回 `status=timeout`           |
-| max_ticks              | 一个 Run 内 tick 超过 N 次         | Run 进入 `status=escalate`，写 approval_items |
-| token_budget           | 累计 tokens 超预算                | 立刻结束 turn                               |
-| context_threshold_soft | messages tokens > 80%        | 触发 turn-level compact                   |
-| context_threshold_hard | messages tokens > 95%        | 结束 turn + escalate                      |
-| tool_retry             | 工具失败                         | 指数退避，最多 N 次；累积失败次数计入 circuit breaker    |
-| tool_circuit_breaker   | 某工具失败率 > 50%/1min            | 熔断 5 分钟；期间 Assemble 剔除该工具               |
-| rate_limit             | 某工具每分钟超上限                    | sleep 到下一窗口 / 降级                        |
-| tick_deadline          | 单 tick 墙钟超时                  | 强制结束，写失败事件                              |
-| stale_run_recovery     | Run 处于 running > stale_after | scheduler 自动释放，重入队                      |
-| poison_queue           | 同一 task_id 失败 > max_attempts | 写 DeadLetter，通知人工                       |
+| 机制                         | 触发条件                                  | 动作 |
+| -------------------------- | ------------------------------------- | --- |
+| `max_rounds_per_turn`      | 单个 turn 内 round 超过 N 次                | Driver 停止追加 round，结束当前 turn |
+| `turn_timeout_seconds`     | 单个 turn 墙钟超时                          | Driver 停止当前 turn，返回预算耗尽信号 |
+| `TurnLimits.token_budget`  | 单个 turn 的 token 使用超过预算               | Driver 结束当前 turn |
+| `RoundLimits.token_budget` | 单个 round 的 token 使用超过预算              | Kernel 结束当前 round |
+| `max_tool_roundtrips`      | 单个 round 内 tool 往返超过 N 次             | Kernel 返回 `RoundOutcome`，交由 Driver 决定是否继续 |
+| `tool_timeout_seconds`     | 工具调用超时                                | 当前 round 记失败并交由 Driver 裁决 |
+| `tool_circuit_breaker`     | 某工具失败率 > 50% / 1min                  | 熔断 5 分钟；期间 Assemble 剔除该工具 |
+| `rate_limit`               | 某工具每分钟超上限                            | sleep 到下一窗口 / 降级 |
+| `stale_run_recovery`       | Run 处于 `running` 超过 `stale_after`    | scheduler 自动释放，重入队 |
+| `poison_queue`             | 同一 `task_id` 失败超过 `max_attempts`     | 写 DeadLetter，通知人工 |
 
 
 ### 7.2 状态机
@@ -479,7 +479,7 @@ ConversationSession: active → idle → closed
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  UpdateMemory 节点（Tick 内第 7 步）                          │
+│  UpdateMemory 节点（Turn 内第 7 步）                          │
 │  ─────────────────────────────────────────────────           │
 │  LLM 调用工具 record_learning(kind, content, promote=bool)    │
 │                                                              │
@@ -518,7 +518,7 @@ ConversationSession: active → idle → closed
               │
               ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  生效：下一 tick 起，新 Memory / Skill / Prompt 被 Assembly 使用 │
+│  生效：下一 turn 起，新 Memory / Skill / Prompt 被 Assembly 使用 │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -547,7 +547,7 @@ Skill 从 draft 到 active 有三道闸：
 ```
 M1（2-3 周）：Agent Kernel 骨架跑通
   目标：剥离 Kernel、三书签 Assemble、LLM 驱动 follow-up
-  验收：一个最简 tick 能跑到 Evaluate，cache_hit 率可观测
+  验收：一个最简 turn 能跑到 Evaluate，cache_hit 率可观测
 
 M2（2 周）：JobAssembly + 三层 Memory 完整
   目标：每 JD 独立 prompt / 评分标准 / JobMemory
@@ -583,12 +583,12 @@ M8（持续）：可观测性 + SRE
 
 | 维度     | 指标                                   | 目标值     |
 | ------ | ------------------------------------ | ------- |
-| 自主性    | 空队列下 Autonomous 的自启动 tick 比例         | ≥ 30%   |
+| 自主性    | 空队列下 Autonomous 的自启动 turn 比例         | ≥ 30%   |
 | 隔离性    | 跨 JD / 跨候选人记忆泄露案例                    | 0       |
 | 健壮性    | 单次工具失败不导致 Run 崩溃                     | 100%    |
 | 缓存率    | system 前缀 cache hit 率                | ≥ 70%   |
 | 进化速度   | 从 record_learning 到生效（非紧急项）中位数       | ≤ 24 小时 |
-| 可观测性   | Run 出错后 5 分钟内前端可定位到具体 Tick/Turn/Tool | 100%    |
+| 可观测性   | Run 出错后 5 分钟内前端可定位到具体 Turn/Round/Tool | 100%    |
 | 会话连续性  | Assistant `--continue` 能完整恢复         | 100%    |
 | 记忆压缩质量 | 压缩前后在固定问题集上的答案一致率                    | ≥ 90%   |
 
@@ -604,7 +604,7 @@ M8（持续）：可观测性 + SRE
 | `_next_tasks_for_result` 硬编码状态机                   | 由 LLM 工具 `enqueue_follow_up` 决定                     |
 | `ContextAssemblerService.build()` 扁平拼装            | 改为 `build_layered_request()` 输出三书签结构                |
 | `AgentLoop.run()` 内的 `execution_contract`         | 业务概念，从 Kernel 剥离，变成 Assemble 阶段的 JobAssembly input  |
-| `AgentRun` 表                                      | 保留并扩展字段（ticks、token_budget、cache、escalate_reason、run_context 等） |
+| `AgentRun` 表                                      | 保留并扩展字段（`turns_count`、token usage、cache 指标、run_context 等） |
 | `CandidateMemory / JobMemory / AgentGlobalMemory` | 保留，schema 扩展（索引描述字段必填）                              |
 | `EvolutionArtifact`                               | 保留，改造为 EvolutionQueue 的底层存储                         |
 | `SqlAlchemyQueue`                                 | 保留；外面包 Heartbeat daemon                             |
@@ -618,7 +618,7 @@ M8（持续）：可观测性 + SRE
 
 ## 11. 架构图：完整执行时序
 
-Autonomous Agent 典型的一次"评估候选人"tick：
+Autonomous Agent 典型的一次"评估候选人"turn：
 
 ```
 时间 →
@@ -633,10 +633,10 @@ Autonomous Agent 典型的一次"评估候选人"tick：
  870ms    Act: write CandidateProgress, enqueue follow-up "send_outreach"
  900ms    UpdateMemory: write CandidateMemory.facts, log LearningEvent
  920ms    Evaluate: status=continue (run 还有下一步); schedule_self_wakeup(60s)
- 930ms    TickOutcome 持久化，Heartbeat 返回
+ 930ms    RoundOutcome 持久化，Heartbeat 返回
 ```
 
-一次 tick 通常 < 2 秒，tokens ≈ 3-8K（system 大部分命中缓存）。
+一次 turn 通常 < 2 秒，tokens ≈ 3-8K（system 大部分命中缓存）。
 
 ---
 

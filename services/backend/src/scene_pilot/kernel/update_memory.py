@@ -12,6 +12,7 @@ def update_memory(
     deliberation: Deliberation,
     memory_service: Any | None = None,
     *,
+    round_status: str | None = None,
     learning_writer: Any | None = None,
     scope_kind: str | None = None,
     scope_ref: str | None = None,
@@ -21,6 +22,8 @@ def update_memory(
     source_kind: str = "autonomous",
 ) -> list[dict[str, Any]]:
     if memory_service is None and learning_writer is None:
+        return []
+    if round_status == "cancelled":
         return []
     writings: list[dict[str, Any]] = []
     for result in deliberation.tool_results:

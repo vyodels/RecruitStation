@@ -1,30 +1,58 @@
 from __future__ import annotations
 
-from scene_pilot.runtime.models import Deliberation, Effects, TickOutcome
+from scene_pilot.runtime.limits import RoundLimits
+from scene_pilot.runtime.models import Deliberation, Effects, RoundOutcome
 
 
-def evaluate(deliberation: Deliberation, effects: Effects) -> TickOutcome:
+def evaluate(deliberation: Deliberation, effects: Effects, *, limits: RoundLimits | None = None) -> RoundOutcome:
+    active_limits = limits or RoundLimits()
+    metadata = {"stop_reason": deliberation.stop_reason}
     if deliberation.metadata.get("cancelled"):
-        status = "escalate"
-        return TickOutcome(
-            status=status,
-            final_output=deliberation.final_content,
+        return RoundOutcome(
+            status="cancelled",
+            gate_signal="paused",
+            final_output=deliberation.final_content or None,
+            tool_calls=list(deliberation.tool_calls),
+            tool_results=list(deliberation.tool_results),
             effects=effects,
-            escalate_reason="cancelled",
-            metadata={"stop_reason": deliberation.stop_reason},
+            metadata=metadata,
         )
-    if deliberation.stop_reason == "wait_human" or deliberation.metadata.get("pending_tool_calls"):
-        return TickOutcome(
+    if deliberation.metadata.get("pending_tool_calls") or deliberation.stop_reason == "wait_human":
+        return RoundOutcome(
             status="wait_human",
-            final_output=deliberation.final_content,
+            gate_signal="wait_human",
+            final_output=deliberation.final_content or None,
+            tool_calls=list(deliberation.tool_calls),
+            tool_results=list(deliberation.tool_results),
             effects=effects,
-            wait_reason="pending_confirmation",
-            metadata={"stop_reason": deliberation.stop_reason},
+            metadata=metadata,
         )
-    status = "complete" if deliberation.final_content else "continue"
-    return TickOutcome(
-        status=status,
-        final_output=deliberation.final_content,
+    if deliberation.usage.total_tokens > active_limits.token_budget:
+        return RoundOutcome(
+            status="continue",
+            gate_signal="budget_exhausted",
+            final_output=deliberation.final_content or None,
+            tool_calls=list(deliberation.tool_calls),
+            tool_results=list(deliberation.tool_results),
+            effects=effects,
+            metadata=metadata,
+        )
+    if deliberation.tool_calls:
+        return RoundOutcome(
+            status="continue",
+            gate_signal="continue",
+            final_output=deliberation.final_content or None,
+            tool_calls=list(deliberation.tool_calls),
+            tool_results=list(deliberation.tool_results),
+            effects=effects,
+            metadata=metadata,
+        )
+    return RoundOutcome(
+        status="complete" if deliberation.final_content else "continue",
+        gate_signal="goal_done" if deliberation.final_content else "continue",
+        final_output=deliberation.final_content or None,
+        tool_calls=list(deliberation.tool_calls),
+        tool_results=list(deliberation.tool_results),
         effects=effects,
-        metadata={"stop_reason": deliberation.stop_reason},
+        metadata=metadata,
     )

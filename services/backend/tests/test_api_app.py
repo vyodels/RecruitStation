@@ -47,7 +47,7 @@ class ApiAppTests(unittest.TestCase):
 
         task = self.client.post(
             "/api/agent/tasks",
-            json={"task_type": "autonomous_tick", "priority": 100, "payload": {"scope_kind": "global", "scope_ref": "system"}},
+            json={"task_type": "autonomous_turn", "priority": 100, "payload": {"scope_kind": "global", "scope_ref": "system"}},
         )
         self.assertEqual(task.status_code, 200)
 

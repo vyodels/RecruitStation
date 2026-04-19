@@ -9,7 +9,7 @@ from scene_pilot.agents.autonomous import AutonomousAgent
 from scene_pilot.core.settings import AppSettings
 from scene_pilot.db.session import create_engine_from_settings, create_session_factory, initialize_database
 from scene_pilot.kernel.kernel import AgentKernel
-from scene_pilot.models.domain import AgentRun, AgentSession, AgentTickRecord, AgentTurnRecord, Candidate, RecruitAgentProfile
+from scene_pilot.models.domain import AgentRun, AgentSession, AgentTurnRecord, Candidate, RecruitAgentProfile
 from scene_pilot.plugins.host import PluginHost
 from scene_pilot.runtime.models import LLMResponse
 from scene_pilot.runtime.providers import ScriptedProvider
@@ -19,14 +19,14 @@ from scene_pilot.runtime.tools import ToolRegistry, register_core_tools
 def _make_session(tmp_path: Path) -> Session:
     settings = AppSettings(
         data_dir=str(tmp_path / "data"),
-        database_url=f"sqlite:///{tmp_path / 'autonomous-tick.db'}",
+        database_url=f"sqlite:///{tmp_path / 'autonomous-turn.db'}",
     )
     engine = create_engine_from_settings(settings)
     initialize_database(engine)
     return create_session_factory(engine)()
 
 
-def test_autonomous_tick_persists_run_tick_and_turn_records(tmp_path: Path) -> None:
+def test_autonomous_turn_persists_run_turn_records(tmp_path: Path) -> None:
     session = _make_session(tmp_path)
     try:
         profile = RecruitAgentProfile(agent_key="primary", name="Primary", is_primary=True)
@@ -54,7 +54,7 @@ def test_autonomous_tick_persists_run_tick_and_turn_records(tmp_path: Path) -> N
         kernel = AgentKernel(provider=provider, tool_registry=tools, plugin_host=PluginHost())
         agent = AutonomousAgent(session_factory=session.bind and create_session_factory(session.get_bind()), kernel=kernel)
 
-        outcome = agent.run_tick_from_envelope(
+        outcome = agent.run_turn_from_envelope(
             {
                 "run_pk": run.id,
                 "scope_kind": "candidate",
@@ -68,11 +68,7 @@ def test_autonomous_tick_persists_run_tick_and_turn_records(tmp_path: Path) -> N
         assert refreshed_run is not None
         assert outcome.status == "complete"
         assert refreshed_run.status == "completed"
-        assert refreshed_run.ticks_count == 1
         assert refreshed_run.turns_count == 1
-        assert session.scalar(select(func.count()).select_from(AgentTickRecord).where(AgentTickRecord.run_pk == run.id)) == 1
-        tick_pk = session.scalars(select(AgentTickRecord.id).where(AgentTickRecord.run_pk == run.id)).first()
-        assert tick_pk is not None
-        assert session.scalar(select(func.count()).select_from(AgentTurnRecord).where(AgentTurnRecord.tick_pk == tick_pk)) == 1
+        assert session.scalar(select(func.count()).select_from(AgentTurnRecord).where(AgentTurnRecord.run_pk == run.id)) == 1
     finally:
         session.close()

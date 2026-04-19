@@ -34,6 +34,67 @@ Not the current product focus:
 - `Skill`: structured capability unit with metadata, health, and governance
 - `Candidate Thread`: runtime communication and confirmation thread for one candidate
 
+## Agent Runtime Architecture
+
+The agent runtime is organised in three strict layers. Keeping these boundaries clean is the main discipline of the v2 runtime; do not move responsibilities across layers.
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│  Driver  (AutonomousAgent / AssistantAgent)                          │
+│  ─────────────────────────────────────────                           │
+│  Owns: turn record, SSE stream, cancel token, fairness budget,       │
+│        human-gate decision, persistence                              │
+│                                                                      │
+│  ┌── one turn lifecycle ─────────────────────────────────────────┐   │
+│  │   while not gate and round_no < max_rounds_per_turn:          │   │
+│  │      ┌── one round ────────────────────────────────────────┐  │   │
+│  │      │  AgentKernel.run_round(goal, observation, limits)   │  │   │
+│  │      │  Sense → Assemble → Deliberate → Guard               │  │   │
+│  │      │        → Act → UpdateMemory → Evaluate               │  │   │
+│  │      │  → RoundOutcome (with gate_signal hint)              │  │   │
+│  │      └──────────────────────────────────────────────────────┘  │   │
+│  │      Driver decides: continue / stop turn / emit gate        │   │
+│  └──────────────────────────────────────────────────────────────┘   │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+### Terminology anchor
+
+- `turn` uses the Codex semantic: one complete LLM-driven cycle from a trigger (user message, scheduler wake, run continuation) until the next point where a human must intervene.
+- `round` is one `model → tool → observe` iteration inside a turn. This is what the Claude Agent SDK documentation calls a "turn"; in this project we call it a `round` to avoid colliding with the outer concept.
+- `tick` is **not used** anywhere in this project.
+
+### Layer responsibilities
+
+| Layer | Knows | Does not know |
+|-------|-------|---------------|
+| `AgentKernel` (mechanism) | provider, tool registry, plugin host, memory service; how to run the 8-node pipeline once | database, HTTP, SSE, scheduler, user identity, conversation/run, turn count, whether it is serving Autonomous or Assistant |
+| `round` (one Kernel call) | one `RoundOutcome` for one `Observation`, including a `gate_signal` hint | whether to continue, whether to persist, how to talk to the human |
+| `turn` (Driver loop) | when to trigger, when to stop, how to persist, how to stream, how to cancel, how to decide the human boundary | Kernel internals, individual node semantics |
+
+### Ownership of grey-area concerns
+
+| Concern | Owner | Why |
+|---------|-------|-----|
+| Tool execution | `AgentKernel` (Act node) | round-internal mechanism |
+| Tool approval / permission | `AgentKernel` (Guard node) reports `gate_signal`; Driver decides whether to stop | Guard evaluates, Driver handles the human interaction |
+| Memory read / write | `AgentKernel` (Assemble / UpdateMemory nodes, via injected `MemoryService`) | round-internal I/O |
+| Turn record, SSE stream, run record | Driver | Kernel has no lifecycle concept |
+| Cancel observation | Driver, at round boundaries | Kernel rounds are atomic |
+| Round-level budget (tokens per round, tool timeout) | Kernel, via `RoundLimits` | round-internal constraint |
+| Turn-level budget (`max_rounds_per_turn`, turn timeout) | Driver | turn-shell concern |
+| Scheduler fairness, scope cooldown | Driver (Autonomous only) | cross-turn scheduling, unrelated to Kernel |
+| Human confirmation interaction | Driver | only the Driver knows how to notify a human and wait |
+| Recovery turn after confirm | Driver | a new turn is re-issued by the Driver |
+
+### One-line summary
+
+- `AgentKernel` is pure mechanism: one call runs the 8-node pipeline exactly once and returns a `RoundOutcome`.
+- `round` is the minimal atomic unit of the mechanism.
+- `turn` is the Driver-owned sequence of rounds that runs until the next human boundary; everything about lifecycle, persistence, cancellation, streaming, and human gating lives here.
+
+Kernel must not know that `turn` exists, and `turn` must not reach into the Kernel's internal nodes. This is the clean boundary.
+
 ## Current Repository Layout
 
 - `apps/desktop`: Electron + React desktop app
@@ -76,6 +137,10 @@ Tests:
 python3 -m pytest services/backend/tests -q
 npm run desktop:typecheck
 ```
+
+Runtime terminology and schema note:
+
+- 本次 turn / round 收敛直接改了本地 SQLite 的表名与字段名，不保留兼容层。升级后如果本地数据库来自旧版本，请删除旧的 workspace SQLite 文件后再启动后端，让新模型直接重建。
 
 ## Packaging
 

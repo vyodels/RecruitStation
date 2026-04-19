@@ -10,6 +10,8 @@
 > → Part 10（API）→ Part 11（迁移策略）→ Part 12（分阶段实施 & 验收）
 > → Part 13（测试要求）。
 
+> **术语锚定**：本项目 `turn` 采用 Codex 语义，表示一次从触发（用户消息 / 调度唤醒 / run 续跑）到下一次需要人类介入为止的完整 LLM 驱动循环。`round` 表示 turn 内部一次 `model → tool → observe` 往返，对应 Claude Agent SDK 文档里的 `turn`。本项目不使用 `tick` 一词。
+
 ---
 
 ## 目录
@@ -18,7 +20,7 @@
 2. [模块清单与文件映射](#2-模块清单与文件映射)
 3. [数据模型（DDL）](#3-数据模型ddl)
 4. [核心接口（Python 契约）](#4-核心接口python-契约)
-5. [Tick Cycle 8 节点契约](#5-tick-cycle-8-节点契约)
+5. [Round Cycle 8 节点契约](#5-turn-cycle-8-节点契约)
 6. [Memory 子系统](#6-memory-子系统)
 7. [Compact 子系统](#7-compact-子系统)
 8. [扩展生态（Tools / Skills / Plugins / MCP）](#8-扩展生态tools--skills--plugins--mcp)
@@ -34,7 +36,7 @@
 
 ### 1.1 目标
 
-- 打造两个共享 Kernel 的 agent：**AutonomousAgent**（`tick()` 驱动）、**AssistantAgent**（`turn()` 驱动）
+- 打造两个共享 Kernel 的 agent：**AutonomousAgent**（Driver 持有 `turn` 循环）、**AssistantAgent**（Driver 持有 `turn` 循环）
 - Autonomous 主线采用 **能力驱动 + 薄 runtime 约束**：业务推进顺序由 LLM 基于 Goal + State 自主决定，程序只提供预算、人审、公平切换、回访时间等边界
 - JD 级独立装配（prompt / memory / 评分 / 工具 / policy）
 - 三层记忆 + 三级压缩 + 索引+LLM 检索
@@ -81,7 +83,7 @@ services/backend/src/scene_pilot/
 │   ├── guard.py                       GuardPolicy 评估
 │   ├── act.py                         Act 执行器
 │   ├── update_memory.py               LearningWriter 入口
-│   └── evaluate.py                    Evaluate -> TickOutcome
+│   └── evaluate.py                    Evaluate -> RoundOutcome
 ├── memory/                            ← NEW, 记忆子系统
 │   ├── __init__.py
 │   ├── service.py                     MemoryService（L/M/S 统一门面）
@@ -95,10 +97,10 @@ services/backend/src/scene_pilot/
 │       ├── turn.py                    Turn-level compact
 │       ├── session.py                 Session-level compact
 │       └── memory.py                  Memory-level consolidation
-├── runtime_v2/                        ← NEW, 运行时基础设施（与 existing runtime/ 并存）
+├── runtime/                        ← NEW, 运行时基础设施（与 existing runtime/ 并存）
 │   ├── __init__.py
-│   ├── models.py                      AgentRun / TickRecord / TurnRecord 等
-│   ├── limits.py                      max_turns / max_ticks / token_budget 枚举
+│   ├── models.py                      AgentRun / AgentTurnRecord / RoundOutcome 等
+│   ├── limits.py                      RoundLimits / TurnLimits 定义
 │   ├── circuit_breaker.py             熔断器
 │   ├── retry.py                       工具重试策略
 │   └── events.py                      事件结构
@@ -118,12 +120,12 @@ services/backend/src/scene_pilot/
 │   ├── host.py                        PluginHost + 6 个 hook
 │   ├── manifest.py                    PluginManifest
 │   └── loader.py                      动态加载与隔离
-├── mcp_v2/                            ← NEW, MCP 接入（与 existing mcp/ 互补）
+├── mcp/                            ← NEW, MCP 接入（与 existing mcp/ 互补）
 │   ├── __init__.py
 │   ├── registry.py                    MCPRegistry
 │   ├── bridge.py                      把 MCP tools 注入 ToolBus
 │   └── health.py                      健康检查 cron
-├── tools_v2/                          ← NEW, 新内置工具（在 existing tools/ 基础上扩）
+├── tools/                          ← NEW, 新内置工具（在 existing tools/ 基础上扩）
 │   ├── __init__.py
 │   ├── enqueue_follow_up.py
 │   ├── schedule_self_wakeup.py
@@ -201,7 +203,7 @@ CREATE TABLE job_assemblies (
   tool_allowlist    JSON NOT NULL,                 -- {"tools": [...], "skills": [...]}
   guard_override    JSON NOT NULL,                 -- policy overrides
   context_policy    JSON NOT NULL,
-  kernel_tuning     JSON NOT NULL,                 -- max_turns/ticks/token_budget
+  kernel_tuning     JSON NOT NULL,                 -- turn_limits / round_limits / token_budget
   created_at        BIGINT NOT NULL,
   updated_at        BIGINT NOT NULL,
   UNIQUE (job_description_id, version)
@@ -254,7 +256,7 @@ CREATE TABLE assistant_assemblies (
 CREATE INDEX assistant_assemblies_active ON assistant_assemblies(assistant_id, status, version);
 
 -- 全局 Autonomous 控制开关（单行表，Kernel 通用）
--- 设计原则：纯机械开关；Heartbeat 起 tick 前读一次；任何 autonomous 风格 agent 都通用
+-- 设计原则：纯机械开关；Heartbeat 起 turn 前读一次；任何 autonomous 风格 agent 都通用
 -- 业务语义（如何决定是否要 pause / 哪些工具受其影响）由场景能力包通过 Guard check 决定
 CREATE TABLE agent_global_state (
   id                    BIGINT PRIMARY KEY AUTOINCREMENT,
@@ -269,7 +271,7 @@ CREATE TABLE agent_global_state (
 
 > 场景特化的 DDL（如招聘场景的候选人接管锁）请见 §3.7。
 
-### 3.2 Run / Tick / Turn
+### 3.2 Run / Turn / Round
 
 > 主键 / 业务键合同（强约束）：
 >
@@ -285,7 +287,6 @@ CREATE TABLE agent_global_state (
 ALTER TABLE agent_runs ADD COLUMN run_id TEXT UNIQUE; -- 业务键
 ALTER TABLE agent_runs ADD COLUMN agent_kind TEXT DEFAULT 'autonomous';
 ALTER TABLE agent_runs ADD COLUMN turns_count INT NOT NULL DEFAULT 0;
-ALTER TABLE agent_runs ADD COLUMN ticks_count INT NOT NULL DEFAULT 0;
 ALTER TABLE agent_runs ADD COLUMN prompt_tokens BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE agent_runs ADD COLUMN completion_tokens BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE agent_runs ADD COLUMN cache_hit_tokens BIGINT NOT NULL DEFAULT 0;
@@ -295,10 +296,10 @@ ALTER TABLE agent_runs ADD COLUMN idempotency_key TEXT;
 ALTER TABLE agent_runs ADD COLUMN wakeup_state JSON NOT NULL DEFAULT '{}';
 CREATE INDEX ix_agent_runs_status_started ON agent_runs(status, started_at);
 
--- Tick / Turn / ToolInvocation 是现有模型里没有的精细执行记录，允许新增表
-CREATE TABLE agent_tick_records (
+-- Turn / ToolInvocation 是现有模型里没有的精细执行记录，允许新增表
+CREATE TABLE agent_turn_records (
   id                BIGINT PRIMARY KEY AUTOINCREMENT,
-  tick_id           TEXT UNIQUE NOT NULL,
+  turn_id           TEXT UNIQUE NOT NULL,
   run_pk            BIGINT NOT NULL,
   seq               INT NOT NULL,
   phase             TEXT NOT NULL,
@@ -310,24 +311,12 @@ CREATE TABLE agent_tick_records (
   ended_at          BIGINT NOT NULL,
   FOREIGN KEY (run_pk) REFERENCES agent_runs(id)
 );
-CREATE INDEX ix_agent_tick_records_run_seq ON agent_tick_records(run_pk, seq);
+CREATE INDEX ix_agent_turn_records_run_seq ON agent_turn_records(run_pk, seq);
 
-CREATE TABLE agent_turn_records (
-  id                BIGINT PRIMARY KEY AUTOINCREMENT,
-  turn_id           TEXT UNIQUE NOT NULL,
-  tick_pk           BIGINT NOT NULL,
-  seq               INT NOT NULL,
-  model             TEXT NOT NULL,
-  prompt_tokens     INT,
-  completion_tokens INT,
-  cache_hit         BOOLEAN,
-  stop_reason       TEXT,
-  tool_calls_count  INT NOT NULL DEFAULT 0,
-  started_at        BIGINT NOT NULL,
-  ended_at          BIGINT,
-  FOREIGN KEY (tick_pk) REFERENCES agent_tick_records(id)
-);
-CREATE INDEX ix_agent_turn_records_tick_seq ON agent_turn_records(tick_pk, seq);
+-- round 级细节当前通过 agent_runtime_events / debug replay 暴露，不单独建 round_records 表
+-- 约定：
+--   event_type = 'round.completed'
+--   payload = {round_seq, status, gate_signal, tool_calls, tool_results, ...}
 
 CREATE TABLE tool_invocations (
   id                BIGINT PRIMARY KEY AUTOINCREMENT,
@@ -347,7 +336,7 @@ CREATE INDEX ix_tool_invocations_turn ON tool_invocations(turn_pk);
 
 -- 复用现有 approval_items，直接扩为可恢复的审批实体
 ALTER TABLE approval_items ADD COLUMN run_pk BIGINT;
-ALTER TABLE approval_items ADD COLUMN tick_pk BIGINT;
+ALTER TABLE approval_items ADD COLUMN turn_pk BIGINT;
 ALTER TABLE approval_items ADD COLUMN conversation_pk BIGINT;
 ALTER TABLE approval_items ADD COLUMN source_kind TEXT DEFAULT 'autonomous';
 ALTER TABLE approval_items ADD COLUMN tool_name TEXT;
@@ -369,7 +358,7 @@ CREATE INDEX ix_approval_items_status_created ON approval_items(status, created_
 -- 最小结构：
 --   {
 --     "last_scope_ref": str | null,
---     "same_scope_ticks": int,
+--     "same_scope_turns": int,
 --     "soft_limit": int,
 --     "hard_limit": int,
 --     "cooldown_until": {"scope_ref": unix_ts}
@@ -381,7 +370,7 @@ CREATE INDEX ix_approval_items_status_created ON approval_items(status, created_
 -- 约定：
 --   operator_interactions.interaction_type = 'notification_draft'
 --   operator_interactions.status in ('pending','surfaced','dismissed','accepted')
---   operator_interactions.interaction_metadata = {source_run_id, source_tick_id, category, delivery_hint, ...}
+--   operator_interactions.interaction_metadata = {source_run_id, source_turn_id, category, delivery_hint, ...}
 
 -- wakeup 不新建独立表；直接复用 agent_work_items + task_queue
 -- 约定：
@@ -464,14 +453,14 @@ CREATE TABLE compaction_events (
 CREATE INDEX ix_compaction_events_target ON compaction_events(target_ref, created_at);
 
 -- 复用 agent_learnings，直接扩为 LearningLog
-ALTER TABLE agent_learnings ADD COLUMN tick_id TEXT;
+ALTER TABLE agent_learnings ADD COLUMN turn_id TEXT;
 ALTER TABLE agent_learnings ADD COLUMN kind TEXT DEFAULT 'global_lesson';
 ALTER TABLE agent_learnings ADD COLUMN content_json JSON;
 ALTER TABLE agent_learnings ADD COLUMN promote_requested BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE agent_learnings ADD COLUMN promotion_status TEXT NOT NULL DEFAULT 'pending';
 ALTER TABLE agent_learnings ADD COLUMN target_memory_ref TEXT;
 ALTER TABLE agent_learnings ADD COLUMN target_skill_id TEXT;
-CREATE INDEX ix_agent_learnings_tick ON agent_learnings(tick_id);
+CREATE INDEX ix_agent_learnings_tick ON agent_learnings(turn_id);
 
 -- 复用 evolution_artifacts，直接扩为 EvolutionQueue
 ALTER TABLE evolution_artifacts ADD COLUMN artifact_kind TEXT;
@@ -568,7 +557,7 @@ CREATE TABLE conversation_turns (
 CREATE INDEX ix_conversation_turns_conversation_seq ON conversation_turns(conversation_pk, seq);
 
 -- 复用 agent_runtime_events，扩到 autonomous + assistant 统一事件真相源
-ALTER TABLE agent_runtime_events ADD COLUMN tick_id TEXT;
+ALTER TABLE agent_runtime_events ADD COLUMN turn_id TEXT;
 ALTER TABLE agent_runtime_events ADD COLUMN turn_id TEXT;
 ALTER TABLE agent_runtime_events ADD COLUMN conversation_id TEXT;
 ALTER TABLE agent_runtime_events ADD COLUMN seq INT NOT NULL DEFAULT 0;
@@ -617,7 +606,7 @@ CREATE INDEX ix_candidate_autonomous_locks_active
 - `Memory`：长期/中期经验沉淀
 
 铁律：
-- 主线每个 tick 都重新从 `Goal + State + Memory + Recent Log` 现算下一步，不维护显式 agenda
+- 主线每个 turn 都重新从 `Goal + State + Memory + Recent Log` 现算下一步，不维护显式 agenda
 - 细粒度业务对象默认不进入固定快照，只通过 facts tool 或场景包提供的 Observation enricher 按需暴露
 - 高噪音网页动作由主线**显式创建执行单元**完成，而不是在主线上连续背 browser turns
 - 执行单元不恢复旧现场；失效时重新升级一个新的执行单元
@@ -638,47 +627,45 @@ class AgentKernel:
     compact_service: CompactService
     skill_registry: SkillRegistry
     plugin_host: PluginHost
-    limits: RuntimeLimits
+    limits: RoundLimits
     event_sink: EventSink
 
-    def tick(self, run: AgentRun, trigger: Trigger) -> TickOutcome: ...
-
-    async def turn(
+    def run_round(
         self,
-        conv: ConversationSession,
-        user_msg: str,
         *,
-        assembly: AssistantAssembly,
-        cancel_token: CancellationToken,        # 必传；用户随时可在 turn 中途取消
-    ) -> AsyncIterator[StreamEvent]: ...
+        goal: GoalRef,
+        observation: Observation,
+        limits: RoundLimits | None = None,
+        cancel_token: CancellationToken | None = None,
+    ) -> RoundOutcome: ...
 ```
 
 ### 4.2 八个节点的标准签名
 
 ```python
 # kernel/sense.py
-def sense(ctx: TickContext) -> Observation: ...
+def sense(ctx: RoundContext) -> Observation: ...
 
 # kernel/assemble.py
-def assemble(ctx: TickContext, obs: Observation) -> LLMRequest: ...
+def assemble(ctx: RoundContext, obs: Observation) -> LLMRequest: ...
 
 # kernel/deliberate.py
-def deliberate(ctx: TickContext, request: LLMRequest) -> Deliberation: ...
+def deliberate(ctx: RoundContext, request: LLMRequest) -> Deliberation: ...
 
 # kernel/guard.py
-def guard(ctx: TickContext, deliberation: Deliberation) -> GuardVerdict: ...
+def guard(ctx: RoundContext, deliberation: Deliberation) -> GuardVerdict: ...
 
 # kernel/act.py
-def act(ctx: TickContext, deliberation: Deliberation) -> Effects: ...
+def act(ctx: RoundContext, deliberation: Deliberation) -> Effects: ...
 
 # kernel/update_memory.py
-def update_memory(ctx: TickContext, deliberation: Deliberation, effects: Effects) -> list[LearningLogId]: ...
+def update_memory(ctx: RoundContext, deliberation: Deliberation, effects: Effects) -> list[LearningLogId]: ...
 
 # kernel/evaluate.py
-def evaluate(ctx: TickContext, deliberation: Deliberation, effects: Effects) -> TickOutcome: ...
+def evaluate(ctx: RoundContext, deliberation: Deliberation, effects: Effects) -> RoundOutcome: ...
 ```
 
-`TickContext` 是 Kernel 注入的运行时对象，持有 `run / assembly / limits / session_factory / observation_hash / plugin_host / goal_ref / fairness_state / runtime_budget`。
+`RoundContext` 是 Kernel 注入的运行时对象，持有 `run / assembly / limits / session_factory / observation_hash / plugin_host / goal_ref / fairness_state / runtime_budget`。
 
 ### 4.3 主要 DTO
 
@@ -698,7 +685,7 @@ class CheckpointRef:
 @dataclass
 class FairnessState:
     last_scope_ref: str | None
-    same_scope_ticks: int
+    same_scope_turns: int
     soft_limit: int
     hard_limit: int
     cooldown_until: dict[str, int]
@@ -706,7 +693,7 @@ class FairnessState:
 @dataclass
 class Observation:
     world_snapshot: dict[str, Any]        # 固定快照 contract 的概览：Goal 激活范围、系统级关键事实、最近少量事件、能力健康状态
-    scope_ref: str | None                  # 本 tick 当前聚焦的主 scope，由场景定义其含义
+    scope_ref: str | None                  # 本 turn 当前聚焦的主 scope，由场景定义其含义
     scope_kind: str | None                 # 例如 'job' / 'candidate' / 'doc' / 'ticket'；core 不解释其业务含义
     recent_events: list[RuntimeEvent]      # 来自 agent_runtime_events 的最近事件视图
     available_tools: list[str]
@@ -753,7 +740,7 @@ class WakeupRequest:
 class CancellationToken:
     """Assistant turn 级取消信号；类似 Claude Code 的 ESC 行为。
     生命周期 = 单个 turn；turn 结束后丢弃。
-    Autonomous tick 不持有此 token，tick 是原子单位（见 §5.9）。
+    Autonomous turn 不持有此 token，turn 是原子单位（见 §5.9）。
     """
     def cancel(self, reason: str = "user") -> None: ...
     def is_cancelled(self) -> bool: ...
@@ -778,7 +765,7 @@ class Effects:
     emitted_events: list[RuntimeEvent]
     created_approvals: list[ApprovalItem]
 
-class TickOutcome(TypedDict):
+class RoundOutcome(TypedDict):
     kind: Literal["continue", "sleep", "wait_human", "complete", "escalate"]
     next_delay_seconds: int | None
     message: str | None
@@ -796,14 +783,24 @@ class AutonomousAgent:
     task_queue: SqlAlchemyQueue
     assembly_service: AssemblyService
 
-    def run_tick_from_envelope(self, envelope: TaskEnvelope) -> TickOutcome:
+    def run_turn_from_envelope(self, envelope: TaskEnvelope) -> RoundOutcome:
         run = self.run_store.ensure_for_envelope(envelope)
         assembly = self.assembly_service.resolve(run)
-        ctx = TickContext(run=run, assembly=assembly, ...)
-        return self.kernel.tick(run, Trigger.from_envelope(envelope))
+        round_history: list[Message] = []
+        for _round_seq in range(self.turn_limits.max_rounds_per_turn):
+            observation = self._build_observation(run, envelope, round_history)
+            outcome = self.kernel.run_round(
+                goal=self._goal_for(run, assembly),
+                observation=observation,
+                limits=self.kernel.limits,
+            )
+            round_history = list(outcome.metadata.get("history_messages") or [])
+            if outcome.gate_signal not in {None, "continue"}:
+                return outcome
+        return RoundOutcome(status="continue", gate_signal="budget_exhausted")
 
-    def run_self_audit_tick(self) -> TickOutcome:
-        """空队列时调用；生成一个特殊的 'self_audit' envelope 触发自检。"""
+    def run_self_audit_turn(self) -> RoundOutcome:
+        """空队列时调用；生成一个特殊的 'self_audit' envelope 触发自检 turn。"""
         ...
 ```
 
@@ -814,32 +811,21 @@ class AutonomousAgent:
 @dataclass
 class AssistantAgent:
     kernel: AgentKernel
-    conversation_store: ConversationStore
-    assembly_service: AssemblyService
-    cancel_registry: TurnCancelRegistry         # 按 (conversation_id, turn_id) 索引活跃 token
+    session_store: AssistantSessionStore
+    turn_limits: TurnLimits
+    active_turns: dict[str, ActiveTurn]
 
-    async def handle_turn(
+    def run_turn_stream(
         self,
         conversation_id: str,
-        user_msg: str,
-    ) -> AsyncIterator[StreamEvent]:
-        conv = self.conversation_store.get(conversation_id)
-        assembly = self.assembly_service.resolve_assistant(
-            assistant_id=conv.assistant_id,
-            assembly_id=conv.assistant_assembly_id,
-            pinned_version=conv.assistant_assembly_version,
-        )
-        cancel_token = self.cancel_registry.create(conversation_id, turn_id=...)
-        try:
-            async for event in self.kernel.turn(conv, user_msg, assembly=assembly, cancel_token=cancel_token):
-                yield event
-        finally:
-            self.cancel_registry.discard(conversation_id, cancel_token)
-            self.conversation_store.persist(conv)
+        message: str,
+    ) -> Iterator[tuple[str, dict[str, Any]]]:
+        """启动一个 assistant turn，并在内部复用 shared-kernel turn loop。"""
+        ...
 
     def cancel_active_turn(self, conversation_id: str, *, reason: str = "user") -> bool:
         """由 POST /conversations/{id}/cancel 触发；返回是否成功命中活跃 turn"""
-        return self.cancel_registry.cancel(conversation_id, reason=reason)
+        ...
 ```
 
 **AssistantAssembly 绑定合同（强约束）**：
@@ -877,8 +863,8 @@ class Heartbeat:
 
     async def run_forever(self) -> None:
         while True:
-            # 全局 Autonomous 开关：起 tick 前读一次；paused 时本轮不取任务、不跑 self_audit、不消费队列
-            # 已在跑的 tick 不被打断；落到 Checkpoint 由 Autonomous 自己决定
+            # 全局 Autonomous 开关：起 turn 前读一次；paused 时本轮不取任务、不跑 self_audit、不消费队列
+            # 已在跑的 turn 不被打断；落到 Checkpoint 由 Autonomous 自己决定
             if self.global_state.is_autonomous_paused():
                 await asyncio.sleep(self.interval)
                 continue
@@ -886,7 +872,7 @@ class Heartbeat:
             if envelope is None:
                 envelope = make_self_audit_envelope()
             try:
-                outcome = self.agent.run_tick_from_envelope(envelope)
+                outcome = self.agent.run_turn_from_envelope(envelope)
             except Exception as exc:
                 self._handle_unexpected(envelope, exc)
                 continue
@@ -914,22 +900,22 @@ plugin_host.collect_persona_fragments(assembly) -> list[tuple[label, text]]
 
 ---
 
-## 5. Tick Cycle 8 节点契约
+## 5. Round Cycle 8 节点契约
 
 每个节点的**输入 / 输出 / 副作用 / 失败行为 / 观测**都要符合本节契约。
 
 ### 5.1 Trigger
 
 - **输入**：`TaskEnvelope` 或 "self_audit" 信号
-- **输出**：`TickContext` 初始化（run、assembly、limits、event 开端）
-- **副作用**：创建 `agent_tick_records`（phase=`trigger`, seq=run.ticks_count+1）
+- **输出**：`RoundContext` 初始化（run、assembly、limits、event 开端）
+- **副作用**：创建 `agent_turn_records`（phase=`trigger`, seq=run.turns_count+1）
 - **失败**：envelope 格式不合法 → 进 DeadLetter
 
 ### 5.2 Sense
 
 > **Layer: Kernel contract**
 
-- **输入**：`TickContext`
+- **输入**：`RoundContext`
 - **输出**：`Observation`
 - **规则**：
   - 调用 `MemoryService.fetch_recent_events(run.session_id, limit=N)`
@@ -941,20 +927,20 @@ plugin_host.collect_persona_fragments(assembly) -> list[tuple[label, text]]
 - **场景扩展强约束**：
   - Sense 自身**不感知任何业务概念**（不知道"候选人"、"JD"、"工单"是什么）；任何特化的 State 字段（如招聘包的 `human_locked` `recent_handover`）由对应能力包通过 `register_observation_enricher` 提供
   - **暴露 ≠ 过滤**：enricher 只在 Observation 上标注事实，是否跳过/续接由 LLM 在 prompt 约定中决定（见各场景包的 persona fragment）；最终硬墙在 §5.5 Guard preflight 通过场景包注册的 guard check 实现
-- **失败**：DB 不可用 → 抛 `SensingError`，外层 tick 进 `escalate`；单个 enricher 抛异常 → 记录 event 后用上一步的 `obs` 继续，避免拖崩整个 Sense
+- **失败**：DB 不可用 → 抛 `SensingError`，外层 turn 进 `escalate`；单个 enricher 抛异常 → 记录 event 后用上一步的 `obs` 继续，避免拖崩整个 Sense
 - **观测**：写 event `sense_completed{hash, snapshot_tokens, enrichers_applied: list[namespace]}`
 
 ### 5.3 Assemble
 
 > **Layer: Kernel contract**
 
-- **输入**：`TickContext`, `Observation`
+- **输入**：`RoundContext`, `Observation`
 - **输出**：`LLMRequest`（至少 2 个书签；场景包可追加更多 fragment，最多 4 个）
 - **规则**：
   - 书签 1：`Persona + BehaviorRules + ToolsUsagePolicy + plugin_host.collect_persona_fragments(assembly)`
   - 书签 2：`assembly.prompt_overlay + GlobalMemoryIndex + scenario-defined context fragments`
   - 书签 3（可选）：`scope-local memory / recent event fragments`，由 assembly.context_policy 与场景包共同决定是否注入
-  - user 消息：`Observation.serialize()` + 本 tick 累积的 tool_use/tool_result
+  - user 消息：`Observation.serialize()` + 本 turn 累积的 tool_use/tool_result
   - tools：ToolBus 给出的"可用工具描述"，**已排除**熔断的 MCP 工具
 - **缓存约定**：`cache_control=ephemeral` 打在每个书签末尾；超过 4 个书签合并
 - **失败**：prompt 超出 `max_system_tokens` → 降级（丢弃书签 3 的最低分条目再试，≤2 次）
@@ -962,25 +948,22 @@ plugin_host.collect_persona_fragments(assembly) -> list[tuple[label, text]]
 
 ### 5.4 Deliberate
 
-- **输入**：`TickContext`, `LLMRequest`
+- **输入**：`RoundContext`, `LLMRequest`
 - **输出**：`Deliberation`
 - **内部循环**（agent loop）：
   ```
-  for turn_idx in range(limits.max_turns_per_tick):
-      response = provider.generate(request)
-      log_turn_record(response)
-      if response.tool_calls:
-          guarded_calls = guard.preflight_tool_calls(ctx, response.tool_calls)
-          for call in guarded_calls.blocked:
-              persist ApprovalItem / rejected event
-          for call in guarded_calls.approved:
-              result = tool_bus.execute(call)  # 含 retry / circuit breaker
-              append tool_result to request.messages
-          if guarded_calls.should_pause:
-              return Deliberation(stop_reason="wait_human", tool_calls=guarded_calls.pending, ...)
+  response = provider.generate(request)
+  log_round_response(response)
+  for tool_idx, call in enumerate(response.tool_calls[: limits.max_tool_roundtrips]):
+      guarded_call = guard.preflight_tool_calls(ctx, [call])
+      if guarded_call.should_pause:
+          return Deliberation(stop_reason="wait_human", tool_calls=guarded_call.pending, ...)
+      if guarded_call.blocked:
+          persist ApprovalItem / rejected event
           continue
-      return Deliberation(...)
-  return Deliberation(stop_reason="max_turns_exceeded", ...)
+      result = tool_bus.execute(call)  # 含 retry / circuit breaker
+      append tool_result to request.messages
+  return Deliberation(...)
   ```
 - **执行语义（强约束）**：
   - `Deliberate` 是 **唯一允许执行 LLM 内联 tool_call** 的节点；工具结果必须回灌到 `request.messages` 才能进入下一轮推理。
@@ -990,15 +973,15 @@ plugin_host.collect_persona_fragments(assembly) -> list[tuple[label, text]]
   - `Guard` 在本节点内对每一轮 tool_call 做 preflight，拦截/确认后才允许真正执行工具。
 - **context 膨胀处理**：
   - 每个 turn 开头计算 `request.messages_tokens`
-  - 若 > `limits.context_soft_pct * max_context` → 调 `CompactService.turn_compact(request)`，原地改 messages
-  - 若 > `limits.context_hard_pct * max_context` → 结束 Deliberate，返回 `stop_reason="context_overflow"`
-- **失败**：`MaxTurnsExceeded` / `TokenBudgetExceeded` / `context_overflow` 都以 `Deliberation(stop_reason=...)` 返回，不抛异常
+  - 若超过软阈值 → 可调 `CompactService.turn_compact(request)`，原地改 messages
+  - 若超过硬窗口阈值 → 结束 Deliberate，返回 `stop_reason="context_overflow"`
+- **失败**：预算耗尽 / `context_overflow` 都以 `Deliberation(stop_reason=...)` 返回，不抛异常
 
 ### 5.5 Guard
 
 > **Layer: Kernel contract**
 
-- **输入**：`TickContext`, `Deliberation`
+- **输入**：`RoundContext`, `Deliberation`
 - **输出**：`GuardVerdict`
 - **两层职责（强约束）**：
   1. `preflight_tool_calls(ctx, tool_calls)`：在 Deliberate 内逐轮执行前检查工具调用
@@ -1011,22 +994,22 @@ plugin_host.collect_persona_fragments(assembly) -> list[tuple[label, text]]
      - 未来不同场景包可各自定义自己的 guard policy，而不修改 core
   4. 敏感动作（外联/上传/覆盖）：查 `assembly.guard_override.sensitive_actions` → 标记 `require_confirmation`
   5. content safety（PII / 违禁词）
-- **拒绝**：`approved=False, reason=...` → 外层 tick outcome 走 `escalate`
-- **确认**：`require_confirmation` 非空 → 创建 `ApprovalItem`（落在 `approval_items` 表），当前 tick 立即结束并在 `Evaluate` 产出 `wait_human`
+- **拒绝**：`approved=False, reason=...` → 外层 turn outcome 走 `escalate`
+- **确认**：`require_confirmation` 非空 → 创建 `ApprovalItem`（落在 `approval_items` 表），当前 turn 立即结束并在 `Evaluate` 产出 `wait_human`
 - **幂等合同**：
-  - `ApprovalItem.idempotency_key = sha256(run_id + tick_id + tool_name + canonical_json(tool_args))`
+  - `ApprovalItem.idempotency_key = sha256(run_id + turn_id + tool_name + canonical_json(tool_args))`
   - 同一个 `idempotency_key` 重复 confirm 只能命中同一条审批记录，不得产生第二次执行
   - 若系统崩溃在“工具已执行但 ApprovalItem 未回写 executed”之间，恢复逻辑必须先检查业务侧副作用是否已存在；存在则只补写 executed，不得重放工具
 - **恢复语义**：
   - `/confirm` 只修改 `ApprovalItem.status`
-  - 每次 human confirm **都必须触发一个新的 tick / recovery turn**；不允许在原 tick 内原地继续
-  - Autonomous：Heartbeat 在下一次新的 tick 中消费已 `approved` 的 `ApprovalItem`，执行对应动作，并将该 `ApprovalItem` 标记为 `executed`
+  - 每次 human confirm **都必须触发一个新的 turn / recovery turn**；不允许在原 turn 内原地继续
+  - Autonomous：Heartbeat 在下一次新的 turn 中消费已 `approved` 的 `ApprovalItem`，执行对应动作，并将该 `ApprovalItem` 标记为 `executed`
   - Assistant：`/confirm` 触发同一 conversation 的一次新的 recovery turn；恢复 turn 读取已批准的 `ApprovalItem` 后继续执行
 - **观测**：`guard_checked{approved, rejected_tools, require_confirm_count}`
 
 ### 5.6 Act
 
-- **输入**：`TickContext`, `Deliberation`, （经 Guard 放行）
+- **输入**：`RoundContext`, `Deliberation`, （经 Guard 放行）
 - **输出**：`Effects`
 - **规则**：
   - 只处理 **Deliberate 结束后的持久化副作用**，不再执行新的 tool_call
@@ -1037,17 +1020,17 @@ plugin_host.collect_persona_fragments(assembly) -> list[tuple[label, text]]
   - `created_approvals` 写入 `approval_items`
   - `emitted_events` 写入 `agent_runtime_events`
 - **失败**：
-  - 单个执行单元或工具在本 tick 内无有效业务推进时，允许由 LLM 建议暂停并由程序裁决是否切换到别的 scope / 场景路径
-  - 单个工具失败累计 ≥ `limits.max_consecutive_tool_errors` → Effects 携带 `replan_request=True`
+  - 单个执行单元或工具在本 turn 内无有效业务推进时，允许由 LLM 建议暂停并由程序裁决是否切换到别的 scope / 场景路径
+  - 单个工具连续失败达到 runtime policy 阈值 → `Effects` 携带 `replan_request=True`
   - 整体无法写 DB → 抛 `ActError`，外层回滚并 `escalate`
 - **观测**：`act_completed{db_write_count, enqueued_count, wakeup_count, approval_count}`
 
 ### 5.7 UpdateMemory
 
-- **输入**：`TickContext`, `Deliberation`, `Effects`
+- **输入**：`RoundContext`, `Deliberation`, `Effects`
 - **输出**：`list[LearningLogId]`
 - **规则**：
-  - 若 `Effects` 标记 `fatal=true`，则跳过 `UpdateMemory`，避免 fatal tick 继续写学习产物
+  - 若 `Effects` 标记 `fatal=true`，则跳过 `UpdateMemory`，避免 fatal turn 继续写学习产物
   - 否则扫描 `Effects.tool_results` 中所有 `record_learning` 调用的结果
   - 每条经 `LearningWriter.write(log)`：
     - 写 `agent_learnings`
@@ -1058,35 +1041,35 @@ plugin_host.collect_persona_fragments(assembly) -> list[tuple[label, text]]
 
 ### 5.8 Evaluate
 
-- **输入**：`TickContext`, `Deliberation`, `Effects`
-- **输出**：`TickOutcome`
+- **输入**：`RoundContext`, `Deliberation`, `Effects`
+- **输出**：`RoundOutcome`
 - **规则树**：
   ```
   if Guard.rejected or Act.fatal → escalate
-  if Guard.require_confirmation → wait_human  # 当前 tick 结束；后续只能由新的 tick / recovery turn 恢复
+  if Guard.require_confirmation → wait_human  # 当前 turn 结束；后续只能由新的 turn / recovery turn 恢复
   if Deliberation.stop_reason == "context_overflow" → sleep(60, reason="context_overflow")
-  if tick budget exhausted and no valid progress -> llm suggests next step; runtime decides sleep / switch / spawn new execution unit
+  if turn budget exhausted and no valid progress -> llm suggests next step; runtime decides sleep / switch / spawn new execution unit
   if Effects.scheduled_wakeups → sleep(min(delay))
   if Deliberation.final_content 暗示完成 → complete
-  if run.ticks_count >= limits.max_ticks_per_run → escalate(reason="max_ticks")
   else → continue
   ```
+- 说明：`run.turns_count` 由 Driver 在 turn 边界维护；run 级 turn 上限若要实施，应放在 Driver，而不是 `kernel.evaluate()`。
 - **业务推进判定（强约束）**：
-  - 一个 tick 是否成功，不由固定状态机决定，而由两层共同判定：
+  - 一个 turn 是否成功，不由固定状态机决定，而由两层共同判定：
     1. tool / execution unit 返回 `progress_signals`
     2. LLM 基于这些事实做最终业务语义判断
-  - Kernel 不规定"一个 tick 应围绕什么业务对象推进"；主 scope 的选取、是否允许同一 scope 连续推进、何时切 scope，均由场景包 policy + assembly.context_policy 决定
+  - Kernel 不规定"一个 turn 应围绕什么业务对象推进"；主 scope 的选取、是否允许同一 scope 连续推进、何时切 scope，均由场景包 policy + assembly.context_policy 决定
   - runtime 只保留薄约束：预算、审批、人审恢复、可选公平性冷却；公平性作用在哪类 scope 上由场景定义
-- **副作用**：更新 `agent_runs.status / ticks_count / tokens`；写 `agent_tick_records.outcome_`*
+- **副作用**：更新 `agent_runs.status / turns_count / tokens`；写 `agent_turn_records.outcome_`*
 
 ### 5.9 Turn 模式契约（Assistant）
 
-- `kernel.turn()` 复用 `Sense -> Assemble -> Deliberate -> Guard -> Act -> UpdateMemory -> Evaluate` 的主骨架，但差异如下：
+- `AssistantAgent.run_turn_stream()` / `_run_shared_kernel_turn_loop()` 复用 `Sense -> Assemble -> Deliberate -> Guard -> Act -> UpdateMemory -> Evaluate` 的主骨架，但 round 仍然是通过 `kernel.run_round()` 驱动；差异如下：
   1. `Trigger` 来自用户消息，而不是队列/Heartbeat
   2. `Sense` 读取 conversation history / recent tool results / conversation summary，而不是 autonomous run 的 world snapshot
   3. `Deliberate` 以流式事件输出为主
   4. `Guard` 默认只有 preflight；用户在线场景下不再单独执行一层节点级 Guard
-  5. 需要确认的动作不直接写“待下一次 tick 的审批挂起逻辑”，而是先向前端发 `confirmation_required` 事件；确认后开启新的 recovery turn
+  5. 需要确认的动作不直接写“待下一次 turn 的审批挂起逻辑”，而是先向前端发 `confirmation_required` 事件；确认后开启新的 recovery turn
   6. `Act` 仍然只做持久化副作用，不重复执行新的 tool_call
   7. `Evaluate` 只决定：继续流式回复 / wait_user / recovery turn / complete，不负责 Heartbeat 调度
 - Turn 模式的强约束：
@@ -1112,10 +1095,10 @@ plugin_host.collect_persona_fragments(assembly) -> list[tuple[label, text]]
   - `conversation_turns` 当前 turn 行的 `tool_calls` / `tool_results` 字段保留已执行部分；新增 `metadata.cancelled = true`
 - 用户后续发新消息 → 正常开启新 turn，conversation history 包含被取消 turn 的 partial outputs（LLM 自行判断是否复用 / 重做）
 
-**Autonomous tick 不可取消（对照说明）**：
+**Autonomous turn 不可取消（对照说明）**：
 
-- Autonomous tick 是原子单位；要停只能用：①全局 `agent_global_state.autonomous_paused`（停掉新 tick）②场景包定义的 takeover / handover 机制（若存在）③Guard 在 tick 内 reject（拒掉违规 tool）
-- 不暴露 "kill 当前 tick" 接口，避免主线半完成动作泄漏；对应需求请用全局暂停或对应场景包提供的干预机制
+- Autonomous turn 是原子单位；要停只能用：①全局 `agent_global_state.autonomous_paused`（停掉新 turn）②场景包定义的 takeover / handover 机制（若存在）③Guard 在 turn 内 reject（拒掉违规 tool）
+- 不暴露 "kill 当前 turn" 接口，避免主线半完成动作泄漏；对应需求请用全局暂停或对应场景包提供的干预机制
 
 ---
 
@@ -1185,7 +1168,7 @@ class MemoryIndexEntry:
 
 ### 6.4 读取合约
 
-- 启动 tick 时**只注入索引**（lightweight）
+- 启动 turn 时**只注入索引**（lightweight）
 - LLM 在 Deliberate 阶段调 `read_memory(business_id)` 拿详情
 - `read_memory` 工具实现：`return self.memory.read(id)`
 
@@ -1201,7 +1184,7 @@ record_learning({
   "index_description": "候选人已有北京某 A 厂 offer，截止日期 5/1",
   "content": { ... },
   "confidence": 0.8,
-  "evidence_refs": ["tick:<current>"],
+  "evidence_refs": ["turn:<current>"],
   "promote": false
 })
 ```
@@ -1222,7 +1205,7 @@ LearningWriter：
 ```python
 def turn_compact(request: LLMRequest) -> LLMRequest:
     messages = request.messages
-    if token_count(messages) < limits.context_soft_pct * max_context:
+    if token_count(messages) < soft_compact_threshold:
         return request
     # 保留策略
     keep_head = messages[:1]        # 第一条 user（原始任务）
@@ -1270,7 +1253,7 @@ class ToolBus:
 
 - 所有 tool 实现签名为 `async def execute(args, cancel_token: CancellationToken | None = None)`
 - 长时间运行的 tool（>200ms 或包含网络/子进程/MCP 调用）必须在合适检查点 `await cancel_token.wait_cancelled()` 或调 `cancel_token.raise_if_cancelled()`，让 Assistant turn cancel 能尽快生效
-- Autonomous tick 调用时 `cancel_token=None`，tool 跑到完成（tick 是原子单位，不可中途取消）
+- Autonomous turn 调用时 `cancel_token=None`，tool 跑到完成（turn 是原子单位，不可中途取消）
 
 | 类别 | 定义 | external_target | 典型例子 | 约束 |
 |---|---|---|---|---|
@@ -1348,19 +1331,18 @@ class PluginHost:
     # 通用 plugin 生命周期（已存在）
     def load(self, manifest_path: str) -> PluginHandle: ...
     def call_hook(self, hook: str, ctx: HookContext) -> HookResult: ...
-    # hooks: pre_tick, post_tick, pre_tool, post_tool, on_memory_write, on_compact
 
     # 场景能力包注册位（新增；为 §8.6 服务）
     def register_tools(self, namespace: str, toolkit: list[ToolSpec]) -> None: ...
     def register_observation_enricher(
         self,
         namespace: str,
-        fn: Callable[[Observation, TickContext], Observation],
+        fn: Callable[[Observation, RoundContext], Observation],
     ) -> None: ...
     def register_guard_check(
         self,
         namespace: str,
-        fn: Callable[[ToolCall, TickContext], GuardCheckOutcome],
+        fn: Callable[[ToolCall, RoundContext], GuardCheckOutcome],
     ) -> None: ...
     def register_persona_fragment(
         self,
@@ -1371,8 +1353,8 @@ class PluginHost:
     def register_router(self, namespace: str, router: APIRouter) -> None: ...
 
     # 节点回调（被 Sense / Guard / Assemble 调用，按注册顺序执行）
-    def run_observation_enrichers(self, obs: Observation, ctx: TickContext) -> Observation: ...
-    def run_guard_checks(self, call: ToolCall, ctx: TickContext) -> list[GuardCheckOutcome]: ...
+    def run_observation_enrichers(self, obs: Observation, ctx: RoundContext) -> Observation: ...
+    def run_guard_checks(self, call: ToolCall, ctx: RoundContext) -> list[GuardCheckOutcome]: ...
     def collect_persona_fragments(self, assembly: Assembly) -> list[tuple[str, str]]: ...
 ```
 
@@ -1452,11 +1434,11 @@ queued -> running -> succeeded
 
 规则：
 - 创建入口：主线在 Deliberate 中通过 meta tool `create_execution_unit` 显式创建执行单元
-- `wait_unit` 允许当前 tick 在预算内等待一个执行单元完成；超时则由 Evaluate 决定 sleep / switch / checkpoint
+- `wait_unit` 允许当前 turn 在预算内等待一个执行单元完成；超时则由 Evaluate 决定 sleep / switch / checkpoint
 - `unit_result` 是主线拿回 `ExecutionUnitResult` 的唯一入口
-- 执行单元可同步完成，也可跨 tick 异步完成；从主线视角统一通过 `ExecutionUnitHandle/Result` 交互
+- 执行单元可同步完成，也可跨 turn 异步完成；从主线视角统一通过 `ExecutionUnitHandle/Result` 交互
 - 若执行单元返回 `blocked_environment` / `failed` / `timed_out`，主线必须为该 `scope_ref` 写一条短期抑制记录（可落在 Checkpoint 或短期 Memory / runtime_metadata 中），在 cooldown 窗口内避免重复派发同类执行单元
-- cooldown 到期前，主线下一 tick 仍可读取该 scope 的 State，但不得对同一 `scope_ref + action_type` 立即重派；只能切换到其他 scope / 场景路径，或等待新的外部事件触发重试
+- cooldown 到期前，主线下一 turn 仍可读取该 scope 的 State，但不得对同一 `scope_ref + action_type` 立即重派；只能切换到其他 scope / 场景路径，或等待新的外部事件触发重试
 
 ### 8.6 场景能力包（Scenario Capability Pack）
 
@@ -1523,7 +1505,7 @@ list_locked_candidates(
 ```text
 【人工接管行为约定】
 - 你看到的每个候选人都会附带 `human_locked` 与 `recent_handover` 两个字段。
-- 当 `human_locked=true` 时：该候选人正在被人接管，本 tick 不要对其执行任何动作（包括草稿、跟进、外联）；可以在思考中提及，但不要触发任何工具调用以其为目标。
+- 当 `human_locked=true` 时：该候选人正在被人接管，本 turn 不要对其执行任何动作（包括草稿、跟进、外联）；可以在思考中提及，但不要触发任何工具调用以其为目标。
 - 当 `recent_handover` 存在时：表示这是上一段人工接管刚释放的候选人。先读 `note` 与 `next_hint`，结合当前 State 判断：
     - 是否需要跳过本轮（人已经处理到一个稳定点）；
     - 是否直接续接 `next_hint` 给的下一步；
@@ -1555,24 +1537,24 @@ GET    /api/recruit/candidates/locks                          # ?active_only=tru
 
 ## 9. 运行时安全（Guard / Limits / Circuit Breaker）
 
-### 9.1 RuntimeLimits（每 Assembly 可覆盖）
+### 9.1 `RoundLimits` / `TurnLimits`（每 Assembly 或 Driver 可覆盖）
 
 ```python
 @dataclass
-class RuntimeLimits:
-    max_turns_per_tick: int = 8
-    max_ticks_per_run: int = 50
-    token_budget_per_tick: int = 100_000
-    token_budget_per_run: int = 1_000_000
-    context_soft_pct: float = 0.80
-    context_hard_pct: float = 0.95
-    max_consecutive_tool_errors: int = 2
-    tool_retry_max: int = 3
-    tool_retry_backoff_base_ms: int = 500
-    tick_wallclock_timeout_s: int = 120
-    run_wallclock_timeout_s: int = 3600
-    min_self_wakeup_delay_seconds: int = 30
-    max_self_wakeups_per_run: int = 50
+class RoundLimits:
+    token_budget: int = 12_000
+    max_tool_roundtrips: int = 8
+    tool_timeout_seconds: int = 30
+    min_wakeup_delay_seconds: int = 60
+    max_wakeup_delay_seconds: int = 86_400
+
+
+@dataclass
+class TurnLimits:
+    max_rounds_per_turn: int = 8
+    turn_timeout_seconds: int = 120
+    token_budget: int = 24_000
+    cooldown_seconds: int = 0
 ```
 
 ### 9.2 CircuitBreaker
@@ -1611,8 +1593,9 @@ class CircuitBreaker:
 ```
 GET    /api/agent/runs?status=...
 GET    /api/agent/runs/{run_id}
-GET    /api/agent/runs/{run_id}/ticks
-GET    /api/agent/runs/{run_id}/ticks/{tick_id}/turns
+GET    /api/agent/runs/{run_id}/turns
+
+# round 级细节通过 debug replay / runtime events 暴露，不单独提供 /rounds endpoint
 
 POST   /api/agent/assemblies/{jd_id}            # 创建/更新 JobAssembly
 GET    /api/agent/assemblies/{jd_id}/versions
@@ -1621,8 +1604,8 @@ POST   /api/agent/heartbeat/pause
 POST   /api/agent/heartbeat/resume
 GET    /api/agent/heartbeat/status
 
-# Autonomous 全局开关：控制整个 Autonomous 是否参与新 tick
-# 与 heartbeat/pause 不同：heartbeat/pause 是停掉守护进程；autonomous/pause 是让守护进程跑但 skip tick
+# Autonomous 全局开关：控制整个 Autonomous 是否参与新 turn
+# 与 heartbeat/pause 不同：heartbeat/pause 是停掉守护进程；autonomous/pause 是让守护进程跑但 skip turn
 POST   /api/agent/autonomous/pause                # body: {reason?, paused_by}
 POST   /api/agent/autonomous/resume               # body: {released_by}
 GET    /api/agent/autonomous/state                # {autonomous_paused, paused_at, paused_by, paused_reason}
@@ -1664,7 +1647,7 @@ POST   /api/evolution/skills/{id}/promote
 ### 10.4 Debug / Observability
 
 ```
-GET    /api/debug/runs/{run_id}/replay          # 完整 tick/turn/tool 回放
+GET    /api/debug/runs/{run_id}/replay          # 完整 turn/round/tool 回放
 GET    /api/debug/cache/stats                   # cache hit 率
 GET    /api/debug/mcp/health
 GET    /api/debug/circuit-breakers
@@ -1691,7 +1674,7 @@ GET    /api/debug/alerts                        # runtime 告警视图
 | `services/context_assembler.py`                                          | 新增 `build_layered_request()`；老的 `build()` 标记 deprecated，迁移期仍供旧 runner 用                                                                                                                |
 | `runtime/agent_loop.py`                                                  | 改名为 `kernel/deliberate.py`（保持 `AgentLoop` 类名以兼容）；删掉 `execution_contract` 特判，把这部分配置改从 assembly 传入                                                                                       |
 | `runtime/prompts.py`                                                     | 拆三个函数：`build_persona_block()`、`build_profile_block()`、`build_memory_index_block()`；由 `kernel/assemble.py` 组合                                                                           |
-| `runtime/tools.py`                                                       | 保留；`tools_v2/`* 新增工具注册到同一 registry                                                                                                                                                     |
+| `runtime/tools.py`                                                       | 保留；`tools/`* 新增工具注册到同一 registry                                                                                                                                                     |
 | `scheduler/scheduler.py`                                                 | 保留；被 `agents/heartbeat.py` 调用                                                                                                                                                          |
 | `scheduler/queue.py`                                                     | 保留；扩 `failure_count / dead` 字段（alembic migration）                                                                                                                                      |
 | `models/domain.py` 的 `AgentRun` / `ApprovalItem` / `AgentRuntimeEvent` 等 | 保留并直接扩字段；不再引入并行同类表                                                                                                                                                                     |
@@ -1701,7 +1684,7 @@ GET    /api/debug/alerts                        # runtime 告警视图
 
 ### 11.2 数据结构调整
 
-- 用 alembic revision 直接扩现有表字段，并新增真正缺失的新表（如 `job_assemblies`、`prompt_overlay_revisions`、`agent_tick_records`、`agent_turn_records`、`conversation_sessions`、`conversation_turns`、`plugins`、`compaction_events`）
+- 用 alembic revision 直接扩现有表字段，并新增真正缺失的新表（如 `job_assemblies`、`prompt_overlay_revisions`、`agent_turn_records`、`agent_turn_records`、`conversation_sessions`、`conversation_turns`、`plugins`、`compaction_events`）
 - `agent_runs` / `approval_items` / `agent_runtime_events` / `skills` / `mcp_servers` / `agent_learnings` / `evolution_artifacts` 统一走 `ALTER TABLE` 扩字段
 - memory 相关不引入统一新表，直接扩 `candidate_person_memories` / `job_description_memories` / `agent_global_memories`，逐步把每条 memory 拆成 item-row 语义
 - 不讨论双写、回填、并行读写；实现时直接以最终结构为准
@@ -1730,7 +1713,7 @@ GET    /api/debug/alerts                        # runtime 告警视图
 
 - `alembic upgrade head` 成功扩完既有表并建出缺失新表
 - 新目录 `mypy --strict` 通过（允许空 stub）
-- 单元测试占位 `pytest services/backend/tests/agent_v2/` 收集到骨架测试
+- 单元测试占位 `pytest services/backend/tests/agent/` 收集到骨架测试
 
 ### Phase 1：Kernel 骨架（7 天）
 
@@ -1742,15 +1725,15 @@ GET    /api/debug/alerts                        # runtime 告警视图
 - `kernel/assemble.py` 完整实现（三书签）
 - `kernel/deliberate.py` 包装现有 `AgentLoop`
 - `agents/autonomous.py` 最简实现
-- `runtime_v2/limits.py` + `events.py` + `models.py`
+- `runtime/limits.py` + `events.py` + `models.py`
 
 **验收**：
 
 - 给定一个 fixture run，能跑完 `trigger→sense→assemble→deliberate→guard→act→update_memory→evaluate`，每个节点有事件落库
 - 三书签结构化体现在 LLMRequest 上；`cache_control` 打在正确位置
 - cache_hit 率通过 provider mock 验证 ≥ 70%（连续 5 次同 prefix）
-- 单 tick 不写 memory item 行（UpdateMemory 留空），但写 `agent_tick_records` / `agent_turn_records`
-- `pytest services/backend/tests/agent_v2/test_kernel_happy_path.py` 通过
+- 单 turn 不写 memory item 行（UpdateMemory 留空），但写 `agent_turn_records` / `agent_turn_records`
+- `pytest services/backend/tests/agent/test_kernel_happy_path.py` 通过
 
 ### Phase 2：JobAssembly（5 天）
 
@@ -1766,7 +1749,7 @@ GET    /api/debug/alerts                        # runtime 告警视图
 - 同一候选人走 JD-A 和 JD-B 时，Deliberate 的 prompt 不同、tool_allowlist 不同
 - 评分标准（scoring_rubric）在 prompt 里可见
 - `GET /api/agent/assemblies/:jd_id/versions` 返回历史版本
-- `pytest services/backend/tests/agent_v2/test_assembly_overlay.py` 通过（含冲突字段的 merge 规则）
+- `pytest services/backend/tests/agent/test_assembly_overlay.py` 通过（含冲突字段的 merge 规则）
 
 ### Phase 3：Memory 子系统（7 天）
 
@@ -1776,7 +1759,7 @@ GET    /api/debug/alerts                        # runtime 告警视图
 
 - `memory/`* 全套
 - 现有 memory 表扩字段并支持 item-row 读写语义
-- `tools_v2/read_memory.py` + `tools_v2/record_learning.py`
+- `tools/read_memory.py` + `tools/record_learning.py`
 - `kernel/update_memory.py` 接入 LearningWriter
 
 **验收**：
@@ -1786,7 +1769,7 @@ GET    /api/debug/alerts                        # runtime 告警视图
 - `record_learning` 冲突处理正确（新版本 supersedes 旧版本）
 - 跨 JD / 跨 candidate 无记忆泄露（专门测）
 - 现有 memory 表扩字段后，item-row 读写不丢原有信息
-- `pytest services/backend/tests/agent_v2/test_memory_isolation.py` + `test_memory_conflict.py` 通过
+- `pytest services/backend/tests/agent/test_memory_isolation.py` + `test_memory_conflict.py` 通过
 
 ### Phase 4：Compact 子系统（5 天）
 
@@ -1802,13 +1785,13 @@ GET    /api/debug/alerts                        # runtime 告警视图
 - Session 收尾能产出 `candidate_sessions.context_summary` 或 `conversation_sessions.context_summary` 更新
 - Memory consolidation 能把 "同 JD + 同 index_name" 的 5 条合成 1 条并归档旧版
 - 压缩前后同问答测试集一致率 ≥ 90%（给定固定 Q&A 集合跑 before/after）
-- `pytest services/backend/tests/agent_v2/test_compact_*.py` 通过
+- `pytest services/backend/tests/agent/test_compact_*.py` 通过
 
 ### Phase 5：Runtime 安全（4 天）
 
 **改动**：
 
-- `runtime_v2/circuit_breaker.py` / `retry.py`
+- `runtime/circuit_breaker.py` / `retry.py`
 - `kernel/guard.py` 完整
 - `kernel/act.py` 接入 retry + circuit breaker
 - 工具级 rate_limit
@@ -1816,26 +1799,26 @@ GET    /api/debug/alerts                        # runtime 告警视图
 **验收**：
 
 - 一个工具人为注入 60% 失败率，能被 circuit breaker 在 1 分钟内熔断并从 available_tools 剔除
-- Deliberate 超过 max_turns 返回 `Deliberation(stop_reason=max_turns_exceeded)` 且 run 状态正确
+- Deliberate 超过 `max_tool_roundtrips` 时停止继续 tool 往返，且 round 状态正确
 - Guard 对黑名单工具调用返回 `approved=False`
 - 敏感动作（outreach_send）走 `wait_human` 且生成 `ApprovalItem`
-- `pytest services/backend/tests/agent_v2/test_guard_*.py` + `test_circuit_breaker.py` 通过
+- `pytest services/backend/tests/agent/test_guard_*.py` + `test_circuit_breaker.py` 通过
 
 ### Phase 6：Heartbeat & Self-wakeup（3 天）
 
 **改动**：
 
 - `agents/heartbeat.py` + `bin/heartbeat_daemon.py`
-- `tools_v2/schedule_self_wakeup.py`
-- `tools_v2/enqueue_follow_up.py`
+- `tools/schedule_self_wakeup.py`
+- `tools/enqueue_follow_up.py`
 
 **验收**：
 
-- 空队列下 Heartbeat 能生成 `self_audit` tick 并跑完
+- 空队列下 Heartbeat 能生成 `self_audit` turn 并跑完
 - LLM 调 `schedule_self_wakeup(120, ...)` 后 Heartbeat 在 120s 左右醒来处理
-- `enqueue_follow_up` 能让下一 tick 看到任务
+- `enqueue_follow_up` 能让下一 turn 看到任务
 - 杀进程重启后，未完成 run 能被 stale recovery 重启
-- `pytest services/backend/tests/agent_v2/test_heartbeat.py` 通过
+- `pytest services/backend/tests/agent/test_heartbeat.py` 通过
 
 ### Phase 7：Assistant Agent（7 天）
 
@@ -1852,7 +1835,7 @@ GET    /api/debug/alerts                        # runtime 告警视图
 - 长对话能触发压缩，压缩后对话继续正常
 - 工具需要 confirmation 时，前端能收到 `tool_call{require_confirmation:true}`；调用 `/confirm` 后不会在原 turn 内继续，而是触发一次新的 recovery turn
 - Assistant 调 `enqueue_follow_up` 能让 Autonomous 看到
-- `pytest services/backend/tests/agent_v2/test_assistant_*.py` 通过
+- `pytest services/backend/tests/agent/test_assistant_*.py` 通过
 
 ### Phase 8：自进化闭环（5 天）
 
@@ -1869,7 +1852,7 @@ GET    /api/debug/alerts                        # runtime 告警视图
 - 不满足阈值的进 `evolution_artifacts`，人审后生效
 - 一个 trial Skill 能在 sandbox 跑 N 次，达到成功率阈值后自动进 active
 - `prompt_overlay_revisions` 的 trial/baseline 指标对比工作
-- `pytest services/backend/tests/agent_v2/test_evolution_*.py` 通过
+- `pytest services/backend/tests/agent/test_evolution_*.py` 通过
 
 ### Phase 9：Plugins / MCP / Skills 生态（5 天）
 
@@ -1877,7 +1860,7 @@ GET    /api/debug/alerts                        # runtime 告警视图
 
 **改动**：
 
-- `plugins/`* + `mcp_v2/`* + `skills/*` 完整
+- `plugins/`* + `mcp/`* + `skills/*` 完整
 - `bin/mcp_health.py`
 - PluginManifest loader
 
@@ -1887,7 +1870,7 @@ GET    /api/debug/alerts                        # runtime 告警视图
 - MCP 故意注入 60% 失败率时被熔断，期间不进 tools 列表
 - 装一个示例 Plugin（含 pre_tool hook），hook 被调用且能改写工具 args
 - Skill trial → active 全流程
-- `pytest services/backend/tests/agent_v2/test_mcp_*.py` + `test_plugin_*.py` + `test_skill_*.py` 通过
+- `pytest services/backend/tests/agent/test_mcp_*.py` + `test_plugin_*.py` + `test_skill_*.py` 通过
 
 ### Phase 10：可观测性 & 收尾（4 天）
 
@@ -1904,7 +1887,7 @@ GET    /api/debug/alerts                        # runtime 告警视图
 - cache_hit、circuit_breaker、mcp_health 各有 API 返回真实指标
 - `services/agent.py` 文件行数 < 500（已被拆空）
 - `pytest services/backend/tests/ -q` 全绿
-- `mypy --strict services/backend/src/scene_pilot/{agents,kernel,memory,evolution,skills,plugins,mcp_v2,assistant}` 通过
+- `mypy --strict services/backend/src/scene_pilot/{agents,kernel,memory,evolution,skills,plugins,mcp,assistant}` 通过
 
 ---
 
@@ -1913,7 +1896,7 @@ GET    /api/debug/alerts                        # runtime 告警视图
 ### 13.1 测试层级
 
 ```
-tests/agent_v2/
+tests/agent/
 ├── unit/                       每个节点 / 每个接口的纯单测（mock LLM / DB）
 │   ├── test_kernel_*.py
 │   ├── test_memory_*.py
@@ -1923,7 +1906,7 @@ tests/agent_v2/
 │   ├── test_assembly_overlay.py
 │   └── ...
 ├── integration/                跨模块，用真 SQLite + mock LLM
-│   ├── test_tick_end_to_end.py
+│   ├── test_turn_end_to_end.py
 │   ├── test_heartbeat.py
 │   ├── test_assistant_conversation.py
 │   └── test_evolution_pipeline.py
@@ -1937,12 +1920,12 @@ tests/agent_v2/
 
 ### 13.2 关键测试用例（必须存在）
 
-- `test_tick_end_to_end_autonomous`：一个完整 tick 从 trigger 到 evaluate
-- `test_tick_cache_hit_rate`：连续 5 tick 同 JD 同候选人，system 前缀 cache 命中率 ≥ 70%
+- `test_turn_end_to_end_autonomous`：一个完整 turn 从 trigger 到 evaluate
+- `test_turn_cache_hit_rate`：连续 5 turn 同 JD 同候选人，system 前缀 cache 命中率 ≥ 70%
 - `test_jd_isolation`：同一候选人在两个 JD 下的 prompt 不相交
 - `test_memory_no_leak`：跨候选人 / 跨 JD 取 index 不会出现对方数据
 - `test_turn_compact_preserves_decision`：压缩前后同一 observation 的决策一致
-- `test_guard_confirmation_flow`：敏感动作被拦 → wait_human（当前 tick 结束）→ `ApprovalItem` confirmed → 新的 tick / recovery turn 恢复
+- `test_guard_confirmation_flow`：敏感动作被拦 → wait_human（当前 turn 结束）→ `ApprovalItem` confirmed → 新的 turn / recovery turn 恢复
 - `test_circuit_breaker_mcp`：MCP 故意失败 → 熔断 → 恢复
 - `test_heartbeat_self_audit`：空队列也跑
 - `test_self_wakeup`：LLM 要求 60s 后自唤醒，Heartbeat 按时执行
@@ -1953,7 +1936,7 @@ tests/agent_v2/
 
 ### 13.3 性能基线
 
-- 单 tick p50 ≤ 2s、p95 ≤ 5s（不含 LLM 调用时间）
+- 单 turn p50 ≤ 2s、p95 ≤ 5s（不含 LLM 调用时间）
 - system prompt 前缀 cache 命中率 ≥ 70%
 - Heartbeat daemon 内存占用稳态 ≤ 200MB
 - MemoryService.index_for_scope(top=50) 查询 ≤ 50ms
@@ -1990,7 +1973,7 @@ tests/agent_v2/
 ## 15. 术语引用
 
 - **Agent Assembly / Kernel / Execution Cycle**：见 `autonomous-agent-improvement-plan.md` Part 1
-- **Tick / Turn / Run / Session**：见 `agent-context-memory-design-reference.md` Part 8
+- **Turn / Round / Run / Session**：见 `agent-context-memory-design-reference.md` Part 8
 - **Observation / 三书签 / cache_control**：同上 Part 6 + Part 8
 - **MEMORY.md 风格索引**：同上 Part 4
 

@@ -52,7 +52,7 @@ def _make_session(tmp_path: Path) -> Session:
     return create_session_factory(engine)()
 
 
-def test_autonomous_memory_backed_continuity_across_ticks(tmp_path: Path) -> None:
+def test_autonomous_memory_backed_continuity_across_turns(tmp_path: Path) -> None:
     session = _make_session(tmp_path)
     try:
         profile = RecruitAgentProfile(agent_key="primary", name="Primary", is_primary=True)
@@ -80,7 +80,7 @@ def test_autonomous_memory_backed_continuity_across_ticks(tmp_path: Path) -> Non
         kernel = AgentKernel(provider=provider, tool_registry=tools, plugin_host=PluginHost())
         agent = AutonomousAgent(session_factory=create_session_factory(session.get_bind()), kernel=kernel)
 
-        first = agent.run_tick_from_envelope(
+        first = agent.run_turn_from_envelope(
             {
                 "run_pk": run.id,
                 "scope_kind": "candidate",
@@ -88,7 +88,7 @@ def test_autonomous_memory_backed_continuity_across_ticks(tmp_path: Path) -> Non
                 "world_snapshot": {"candidate_stage": "replied"},
             }
         )
-        second = agent.run_tick_from_envelope(
+        second = agent.run_turn_from_envelope(
             {
                 "run_pk": run.id,
                 "scope_kind": "candidate",

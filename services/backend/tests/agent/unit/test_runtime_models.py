@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from dataclasses import asdict
 
-from scene_pilot.runtime.limits import RuntimeLimits
-from scene_pilot.runtime.models import CancellationToken, FairnessState, Observation
+from scene_pilot.runtime.limits import RoundLimits, TurnLimits
+from scene_pilot.runtime.models import CancellationToken, FairnessState, InputEnvelope, Observation
 
 
 def test_observation_stays_generic() -> None:
@@ -16,6 +16,7 @@ def test_observation_stays_generic() -> None:
         available_skills=["site_navigation"],
         available_mcps=["browser"],
         hash="obs-1",
+        input=InputEnvelope(input_message="hello"),
     )
 
     assert asdict(observation) == {
@@ -27,17 +28,18 @@ def test_observation_stays_generic() -> None:
         "available_skills": ["site_navigation"],
         "available_mcps": ["browser"],
         "hash": "obs-1",
+        "input": {"history_messages": [], "input_message": "hello", "seed_tool_calls": []},
     }
 
 
 def test_fairness_state_uses_scope_not_business_specific_fields() -> None:
-    fairness = FairnessState(last_scope_ref="scope-1", same_scope_ticks=2, soft_limit=3, hard_limit=5)
+    fairness = FairnessState(last_scope_ref="scope-1", same_scope_turns=2, soft_limit=3, hard_limit=5)
 
     payload = asdict(fairness)
     assert payload["last_scope_ref"] == "scope-1"
-    assert payload["same_scope_ticks"] == 2
+    assert payload["same_scope_turns"] == 2
     assert "last_jd_id" not in payload
-    assert "same_jd_ticks" not in payload
+    assert "same_jd_turns" not in payload
 
 
 def test_cancellation_token_records_reason() -> None:
@@ -50,10 +52,12 @@ def test_cancellation_token_records_reason() -> None:
     assert token.reason == "operator_requested"
 
 
-def test_runtime_limits_provide_default_guardrails() -> None:
-    limits = RuntimeLimits()
+def test_runtime_limits_split_between_round_and_turn() -> None:
+    round_limits = RoundLimits()
+    turn_limits = TurnLimits()
 
-    assert limits.max_turns > 0
-    assert limits.token_budget > 0
-    assert limits.max_tool_roundtrips > 0
-    assert limits.max_wakeup_delay_seconds >= limits.min_wakeup_delay_seconds
+    assert round_limits.token_budget > 0
+    assert round_limits.max_tool_roundtrips > 0
+    assert round_limits.max_wakeup_delay_seconds >= round_limits.min_wakeup_delay_seconds
+    assert turn_limits.max_rounds_per_turn > 0
+    assert turn_limits.turn_timeout_seconds > 0

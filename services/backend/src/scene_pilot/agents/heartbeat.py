@@ -28,7 +28,7 @@ class Heartbeat:
                 return {"status": "idle"}
 
             try:
-                self.autonomous_agent.run_tick_from_envelope(dict(task.payload or {}))
+                self.autonomous_agent.run_turn_from_envelope(dict(task.payload or {}))
             except Exception as exc:
                 queue.mark_failed(task.id, error=str(exc))
                 raise

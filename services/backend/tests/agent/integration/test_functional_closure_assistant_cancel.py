@@ -57,5 +57,5 @@ def test_functional_closure_assistant_cancel_interrupts_live_turn(tmp_path: Path
             time.sleep(0.02)
         assert client.post(f"/api/assistant/conversations/{conversation_id}/cancel").json()["cancelled"] is True
         worker.join(timeout=5)
-        assert "event: turn_cancelling" in body["text"]
-        assert "event: turn_cancelled" in body["text"]
+        assert "event: turn.cancelling" in body["text"]
+        assert "event: turn.cancelled" in body["text"]

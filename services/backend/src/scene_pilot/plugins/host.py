@@ -53,6 +53,7 @@ class PluginHost:
             "available_skills": list(observation.available_skills),
             "available_mcps": list(observation.available_mcps),
             "hash": observation.hash,
+            "input": observation.input,
         }
         world_snapshot = cast(dict[str, Any], payload["world_snapshot"])
         for namespace, enricher in self._observation_enrichers:

@@ -29,7 +29,6 @@ def test_agent_run_contains_runtime_columns() -> None:
         "run_id",
         "agent_kind",
         "turns_count",
-        "ticks_count",
         "prompt_tokens",
         "completion_tokens",
         "cache_hit_tokens",
@@ -45,7 +44,7 @@ def test_approval_item_contains_recovery_columns() -> None:
     columns = _column_names(ApprovalItem)
     assert {
         "run_pk",
-        "tick_pk",
+        "turn_pk",
         "conversation_pk",
         "source_kind",
         "tool_name",
@@ -56,9 +55,9 @@ def test_approval_item_contains_recovery_columns() -> None:
     } <= columns
 
 
-def test_agent_runtime_event_contains_tick_turn_and_conversation_ids() -> None:
+def test_agent_runtime_event_contains_turn_and_conversation_ids() -> None:
     columns = _column_names(AgentRuntimeEvent)
-    assert {"tick_id", "turn_id", "conversation_id", "seq"} <= columns
+    assert {"turn_id", "conversation_id", "seq"} <= columns
 
 
 def test_memory_tables_have_item_row_columns() -> None:

@@ -1,4 +1,4 @@
-# Agent 架构设计（Agent Kernel + Agent Assembly + Tick Cycle）
+# Agent 架构设计（Agent Kernel + Agent Assembly + Turn / Round Model）
 
 > 这份文档记录本轮讨论里最重要的一次架构纠偏：
 > Autonomous Agent 和 Assistant Agent 的差异，不应该建模为“两套不同的 agent 架构”，
@@ -266,39 +266,38 @@ AgentDefinition / AgentProfile
 
 ---
 
-## 8. Tick Cycle
+## 8. Turn / Round Model
 
-Autonomous Agent 和 Assistant Agent 在**单次执行骨架**上应该一致。
+Autonomous Agent 和 Assistant Agent 在**单次执行骨架**上应该一致，但要明确拆成两层：
 
-这里应该只有一个 `Tick Cycle` 概念，不应该再拆成“Autonomous Agent Tick Cycle”和“Assistant Agent Tick Cycle”两套类型。
+- 外层是 Driver 持有的 `turn`
+- 内层是 `AgentKernel.run_round()` 驱动的 `round`
 
-区别不在 `Tick Cycle` 骨架本身，而在：
-- 输入不同
-- 装配不同
-- 出口状态不同
+这里不应该再保留旧的单层执行骨架表述。区别不在骨架本身，而在：
+- 触发输入不同
+- 装配结果不同
+- turn 出口状态不同
 
-### Unified Tick Cycle 表
+### Unified Turn / Round 表
 
-| Tick Cycle 节点 | 作用 | 对应的 LLM 交互节点 | 内部细节映射 |
-|---|---|---|---|
-| **Trigger / Wakeup** | 触发一次 tick | 还没进入 LLM | 定时器、事件、用户消息、sleep 到期 |
-| **Bootstrap** | 加载本次 tick 的 Agent Assembly | 还没进入 LLM | 读取 `Prompt Profile / Context Profile / Tool Profile / Memory Profile / Policy Profile / Wakeup/Session Profile` |
-| **Sense** | 收集当前输入与现实状态 | 为 LLM 准备原始输入 | 用户输入、Observation、事件、历史反馈、运行状态 |
-| **Update Context** | 选择这次真正相关的上下文 | 为 LLM 准备可见上下文 | `背景信息 + 当前输入 + Observation 摘要 + 历史记录 + memory index + 按需 detail + 计划状态 + tool/skill 可用性 + policy 约束` |
-| **Assemble Request** | 把上下文组装成一次完整请求 | **system / user / tools** | `system = 稳定 prompt/规则/记忆索引`；`user = 动态状态/当前任务/事件/历史摘要`；`tools = tool schema` |
-| **Call LLM** | 发起一次模型调用 | **LLM API request** | OpenAI/Anthropic 请求发出，带 `system + messages + tools` |
-| **Assistant Turn** | 接收模型输出 | **assistant** | 模型输出文本、结构化决策、tool call |
-| **Guard / Policy Check** | 对 assistant 的动作进行守卫 | assistant → tool 之间 | 逐轮 preflight 检查权限、审批、预算、频率、幂等、安全边界 |
-| **Act** | 持久化副作用 | **post-tool persistence** | 写 DB、入队 follow-up、调度 wakeup、落事件/审批记录 |
-| **Observe** | 读取动作结果 | **tool result** | tool 成功/失败/副作用/产物/错误，转成新的外部事实 |
-| **Re-enter Loop** | 如未结束则再次进 LLM | **tool result → 下一轮 assistant** | 把 `tool_result` 追加回上下文，再次 `Call LLM` |
-| **Evaluate** | 判断本轮是否推进目标 | assistant/tool loop 之后 | 是否有效、是否偏航、是否需要 replan / wait |
-| **Update Memory** | 写入长期/中期产物 | 不一定直接进当前轮 LLM | 事件日志、执行摘要、memory 更新、plan state、skill draft、compaction 产物 |
-| **Continue / Sleep / Respond / Escalate** | 决定 tick 的出口 | 当前 tick 结束 | Loop：continue / sleep / wait_event / pause_human；Assistant：respond / ask_follow_up / wait_user / approval（human confirm 后必须开启新的 recovery turn） |
+| 层级 | 节点 | 作用 | Owner | 内部细节映射 |
+|---|---|---|---|---|
+| **Turn** | **Trigger / Wakeup** | 触发一次 turn | Driver | 定时器、事件、用户消息、sleep 到期 |
+| **Turn** | **Resolve Assembly** | 加载本次 turn 的 Agent Assembly | Driver | 读取 `Prompt Profile / Context Profile / Tool Profile / Memory Profile / Policy Profile / Wakeup/Session Profile` |
+| **Round** | **Sense** | 收集当前输入与现实状态 | `AgentKernel.run_round()` | 用户输入、Observation、事件、历史反馈、运行状态 |
+| **Round** | **Assemble Request** | 把上下文组装成一次完整请求 | `AgentKernel.run_round()` | `system = 稳定 prompt/规则/记忆索引`；`user = 动态状态/当前任务/事件/历史摘要`；`tools = tool schema` |
+| **Round** | **Deliberate** | 发起一次模型往返并接收输出 | `AgentKernel.run_round()` | OpenAI / Anthropic 请求发出，模型返回文本、结构化决策、tool call |
+| **Round** | **Guard / Policy Check** | 对 assistant 的动作进行守卫 | `AgentKernel.run_round()` | 逐轮 preflight 检查权限、审批、预算、频率、幂等、安全边界 |
+| **Round** | **Act** | 持久化副作用 | `AgentKernel.run_round()` | 写 DB、入队 follow-up、调度 wakeup、落事件/审批记录 |
+| **Round** | **Update Memory** | 写入长期/中期产物 | `AgentKernel.run_round()` | 事件日志、执行摘要、memory 更新、plan state、skill draft、compaction 产物 |
+| **Round** | **Evaluate** | 产出 `RoundOutcome` | `AgentKernel.run_round()` | 判断本轮是否推进目标，给出 `continue / wait_human / complete / escalate` 等信号 |
+| **Turn** | **Continue / Sleep / Respond / Escalate** | 决定 turn 的出口 | Driver | Autonomous：continue / sleep / wait_event / pause_human；Assistant：respond / ask_follow_up / wait_user / approval（human confirm 后必须开启新的 recovery turn） |
+
+一个 turn 内可以包含多轮 round；Kernel 只负责把一轮 `round` 跑完，是否继续下一轮由 Driver 决定。
 
 ---
 
-## 9. Tick Cycle 中 Context 的内部组成
+## 9. Turn / Round 中 Context 的内部组成
 
 `Update Context` 这一步建议固定拆成：
 
@@ -375,9 +374,9 @@ Context =
 
 ---
 
-## 10. Tick Cycle 中与 LLM 直接交互的内层链路
+## 10. Turn / Round 中与 LLM 直接交互的内层链路
 
-`Tick Cycle` 中，真正和 LLM 发生直接往返的是下面这条链路：
+在外层 `turn` 里，真正和 LLM 发生直接往返的是每一轮 `round` 的下面这条链路：
 
 ```text
 Assemble Request
@@ -400,7 +399,7 @@ Assemble Request
 #### Call LLM
 发出一次 LLM API 请求。
 
-#### Assistant Turn
+#### Deliberate
 接收模型输出：
 - 文本
 - 结构化决策
@@ -431,11 +430,12 @@ Assemble Request
 - status transition
 - artifact output
 
-#### Re-enter Loop
-如果还没得到最终结论，就带着新增的 `tool_result` 再调一次 LLM。
+#### Re-enter Round
+如果还没得到最终结论，Driver 会带着新增的 `tool_result` 和更新后的历史再次发起下一轮 `run_round()`。
+
 所以：
 
-> 一个 `Tick Cycle` 内部包含多轮 `assistant → tool → assistant` 是正常的。
+> 一个 `turn` 内部包含多轮 `assistant → tool → assistant` 的往返是正常的；那是多轮 `round`，不是另一层新的顶级执行单元。
 
 ---
 
@@ -445,7 +445,7 @@ Assemble Request
 
 而应该改成：
 
-## Agent Kernel + Two Assemblies + One Tick Cycle
+## Agent Kernel + Two Assemblies + One Turn / Round Model
 
 也就是：
 
@@ -453,15 +453,15 @@ Assemble Request
 - 两套装配：
   - `autonomous_agent_assembly`
   - `assistant_agent_assembly`
-- 一个统一的 `Tick Cycle`
+- 一个统一的外层 `turn` + 内层 `round` 模型
 
 更准确的说法不是：
-- `Autonomous Agent Tick Cycle`
-- `Assistant Agent Tick Cycle`
+- `Autonomous Agent turn loop`
+- `Assistant Agent turn loop`
 
 而是：
-- `Autonomous Agent Assembly on Tick Cycle`
-- `Assistant Agent Assembly on Tick Cycle`
+- `Autonomous Agent Assembly on the shared turn/round model`
+- `Assistant Agent Assembly on the shared turn/round model`
 
 这才符合当前讨论里最重要的纠偏方向。
 
@@ -474,7 +474,7 @@ Assemble Request
 因此：
 
 - Autonomous Agent 和 Assistant Agent 的不同，主要是装配不同
-- 它们在单次执行骨架上共享同一个 `Tick Cycle`
+- 它们在单次执行骨架上共享同一个 turn / round 模型
 - 差异来自装配输入，而不是 Kernel 架构不同
 - 也不是“agent 自己决定自己是否通用”
 
