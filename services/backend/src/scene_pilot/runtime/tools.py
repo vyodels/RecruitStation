@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 import inspect
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from .models import CancellationToken, ToolExecutionResult
 
@@ -27,6 +28,18 @@ class ToolDefinition:
     external_target: bool = False
     resource_target_kind: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    def clone(self) -> "ToolDefinition":
+        return ToolDefinition(
+            name=self.name,
+            description=self.description,
+            parameters=deepcopy(self.parameters),
+            handler=self.handler,
+            category=self.category,
+            external_target=self.external_target,
+            resource_target_kind=self.resource_target_kind,
+            metadata=deepcopy(self.metadata),
+        )
 
     def to_provider_spec(self) -> dict[str, Any]:
         return {
@@ -54,6 +67,13 @@ class ToolRegistry:
     def merge(self, other: "ToolRegistry") -> None:
         for tool in other.tools.values():
             self.register(tool)
+
+    def filtered(self, predicate: Callable[[ToolDefinition], bool]) -> "ToolRegistry":
+        registry = ToolRegistry()
+        for tool in self.tools.values():
+            if predicate(tool):
+                registry.register(tool.clone())
+        return registry
 
     def describe(
         self,
@@ -256,6 +276,69 @@ def register_core_tools(registry: ToolRegistry, *, invoke_skill_handler: ToolHan
             external_target=False,
             resource_target_kind="skill",
         )
+    )
+
+
+def tool_capabilities(tool: ToolDefinition) -> set[str]:
+    return {
+        str(item).strip().lower()
+        for item in list(tool.metadata.get("capabilities") or [])
+        if str(item).strip()
+    }
+
+
+def is_approval_tool(tool: ToolDefinition) -> bool:
+    capabilities = tool_capabilities(tool)
+    return "approval" in capabilities or bool(tool.metadata.get("requires_confirmation"))
+
+
+def is_scene_context_tool(tool: ToolDefinition) -> bool:
+    capabilities = tool_capabilities(tool)
+    if "scene" in capabilities:
+        return True
+    if not (
+        tool.external_target
+        or bool(tool.metadata.get("external_tool"))
+        or bool(tool.metadata.get("real_environment"))
+    ):
+        return False
+    return bool(capabilities & {"browser", "document", "search"})
+
+
+def build_delegate_scene_context_tool(
+    handler: ToolHandler,
+    *,
+    name: str = "delegate_scene_context",
+) -> ToolDefinition:
+    return ToolDefinition(
+        name=name,
+        description="Delegate a capability-oriented runtime scene task to an isolated scene context and return a structured scene result.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "instruction": {"type": "string"},
+                "success_criteria": {"type": "object"},
+                "output_contract": {"type": "object"},
+                "preferred_capabilities": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "environment_requirements": {"type": "object"},
+                "approval_policy": {"type": "object"},
+                "input": {"type": "object"},
+                "context": {"type": "object"},
+                "requested_by": {"type": "string"},
+                "max_rounds": {"type": "integer", "minimum": 1, "maximum": 32},
+            },
+            "required": ["instruction"],
+            "additionalProperties": True,
+        },
+        handler=handler,
+        category="scene",
+        external_target=False,
+        resource_target_kind="execution_episode",
+        metadata={"capabilities": ["scene", "scene_delegate"]},
     )
 
 

@@ -31,7 +31,13 @@ from scene_pilot.runtime.providers import (
     UnavailableProvider,
 )
 from scene_pilot.skills.executor import build_invoke_skill_handler
-from scene_pilot.runtime.tools import ToolRegistry, register_core_tools
+from scene_pilot.runtime.tools import (
+    ToolRegistry,
+    build_delegate_scene_context_tool,
+    is_approval_tool,
+    is_scene_context_tool,
+    register_core_tools,
+)
 from scene_pilot.scheduler.queue import SqlAlchemyQueue
 from scene_pilot.scheduler.scheduler import SerialScheduler
 from scene_pilot.services.recruit_agent import (
@@ -44,6 +50,7 @@ from scene_pilot.services.dashboard import DashboardService
 from scene_pilot.services.events import EventStreamService
 from scene_pilot.services.feature_flags import FeatureFlagService
 from scene_pilot.services.mcp_registry import McpRegistryService
+from scene_pilot.services.scene_context import SceneContextService
 from scene_pilot.repositories.domain import RecruitAgentProfileRepository, SettingsRepository
 from scene_pilot.services.sync import SyncService
 from scene_pilot.services.system_commands import SystemCommandService
@@ -56,8 +63,10 @@ class AppContainer:
     provider: LLMProvider
     providers: ProviderRegistry
     tool_registry: ToolRegistry
+    scene_context_tool_registry: ToolRegistry
     plugin_host: PluginHost
     kernel: AgentKernel
+    scene_context_service: SceneContextService
     autonomous_agent: AutonomousAgent
     heartbeat: Heartbeat
     session_store: AssistantSessionStore
@@ -91,13 +100,20 @@ class AppContainer:
         mcp_registry = McpRegistryService(session_factory)
 
         providers, provider = _build_provider_bundle(resolved_settings)
-        tool_registry = _build_runtime_tool_registry(
+        tool_registry, scene_context_tool_registry = _build_runtime_tool_registries(
             session_factory=session_factory,
             plugin_host=plugin_host,
             mcp_registry=mcp_registry,
         )
 
         learning_writer = LearningWriter(session_factory)
+        scene_context_service = SceneContextService(
+            session_factory=session_factory,
+            provider=provider,
+            tool_registry=scene_context_tool_registry,
+            plugin_host=plugin_host,
+        )
+        _register_delegate_scene_context_tool(tool_registry, scene_context_service=scene_context_service)
         kernel = AgentKernel(
             provider=provider,
             tool_registry=tool_registry,
@@ -136,8 +152,10 @@ class AppContainer:
             provider=provider,
             providers=providers,
             tool_registry=tool_registry,
+            scene_context_tool_registry=scene_context_tool_registry,
             plugin_host=plugin_host,
             kernel=kernel,
+            scene_context_service=scene_context_service,
             autonomous_agent=autonomous_agent,
             heartbeat=heartbeat,
             session_store=session_store,
@@ -159,12 +177,19 @@ class AppContainer:
     def reload_settings(self, settings: AppSettings) -> None:
         self.settings = settings
         self.providers, self.provider = _build_provider_bundle(settings)
-        self.kernel.provider = self.provider
-        self.tool_registry = _build_runtime_tool_registry(
+        self.tool_registry, self.scene_context_tool_registry = _build_runtime_tool_registries(
             session_factory=self.session_factory,
             plugin_host=self.plugin_host,
             mcp_registry=self.mcp_registry,
         )
+        self.scene_context_service = SceneContextService(
+            session_factory=self.session_factory,
+            provider=self.provider,
+            tool_registry=self.scene_context_tool_registry,
+            plugin_host=self.plugin_host,
+        )
+        _register_delegate_scene_context_tool(self.tool_registry, scene_context_service=self.scene_context_service)
+        self.kernel.provider = self.provider
         self.kernel.tool_registry = self.tool_registry
         self.dashboard.settings = settings
 
@@ -223,17 +248,44 @@ def _build_sync_service(settings: AppSettings, session_factory: sessionmaker[Ses
     )
 
 
-def _build_runtime_tool_registry(
+def _build_runtime_tool_registries(
     *,
     session_factory: sessionmaker[Session],
     plugin_host: PluginHost,
     mcp_registry: McpRegistryService,
-) -> ToolRegistry:
-    tool_registry = ToolRegistry()
-    register_core_tools(tool_registry, invoke_skill_handler=build_invoke_skill_handler(session_factory))
-    tool_registry.merge(plugin_host.tool_registry)
-    mcp_registry.register_enabled_runtime_tools(tool_registry)
-    return tool_registry
+) -> tuple[ToolRegistry, ToolRegistry]:
+    parent_registry = ToolRegistry()
+    scene_registry = ToolRegistry()
+
+    register_core_tools(parent_registry, invoke_skill_handler=build_invoke_skill_handler(session_factory))
+
+    for tool in plugin_host.tool_registry.tools.values():
+        if is_approval_tool(tool):
+            parent_registry.register(tool.clone())
+            scene_registry.register(tool.clone())
+            continue
+        if is_scene_context_tool(tool):
+            scene_registry.register(tool.clone())
+            continue
+        parent_registry.register(tool.clone())
+
+    mcp_registry_tools = ToolRegistry()
+    mcp_registry.register_enabled_runtime_tools(mcp_registry_tools)
+    for tool in mcp_registry_tools.tools.values():
+        if is_scene_context_tool(tool):
+            scene_registry.register(tool.clone())
+            continue
+        parent_registry.register(tool.clone())
+
+    return parent_registry, scene_registry
+
+
+def _register_delegate_scene_context_tool(
+    tool_registry: ToolRegistry,
+    *,
+    scene_context_service: SceneContextService,
+) -> None:
+    tool_registry.register(build_delegate_scene_context_tool(scene_context_service.delegate))
 
 
 def _seed_builtin_agent_profiles(session_factory: sessionmaker[Session]) -> None:

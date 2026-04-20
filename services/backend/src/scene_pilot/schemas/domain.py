@@ -1283,6 +1283,12 @@ class ExecutionEpisodeRead(ExecutionEpisodeBase):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
+    execution_contract: dict[str, Any] = Field(default_factory=dict)
+    execution_kind: str = "generic_environment_execution"
+    summary_scope: str = "business_summary_only"
+    evidence_scope: str = "episode_scoped"
+    memory_policy: str = "disabled"
+    learning_policy: str = "disabled"
     started_at: int | None = None
     finished_at: int | None = None
     created_at: int
@@ -1294,11 +1300,11 @@ class TrialRunExecuteRequest(BaseModel):
     notes: str | None = None
     source: str = "browser"
     environment_key: str | None = None
-    url: str | None = None
-    title: str | None = None
-    page_type: str | None = None
+    resource_locator: str | None = None
+    display_label: str | None = None
+    environment_kind: str | None = None
     observed_entities: list[dict[str, Any]] = Field(default_factory=list)
-    affordances: list[dict[str, Any]] = Field(default_factory=list)
+    action_hints: list[dict[str, Any]] = Field(default_factory=list)
     capability_hints: list[str] = Field(default_factory=list)
     runtime_metadata: dict[str, Any] = Field(default_factory=dict)
     simulate_divergence: bool | None = None
@@ -1415,12 +1421,12 @@ class EnvironmentSnapshotBase(BaseModel):
     source: str = "browser"
     environment_key: str | None = None
     status: str = "observed"
-    url: str | None = None
-    title: str | None = None
-    page_type: str | None = None
+    resource_locator: str | None = None
+    display_label: str | None = None
+    environment_kind: str | None = None
     capability_hints: list[str] = Field(default_factory=list)
     observed_entities: list[dict[str, Any]] = Field(default_factory=list)
-    affordances: list[dict[str, Any]] = Field(default_factory=list)
+    action_hints: list[dict[str, Any]] = Field(default_factory=list)
     runtime_metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -1435,12 +1441,12 @@ class EnvironmentSnapshotUpdate(BaseModel):
     source: str | None = None
     environment_key: str | None = None
     status: str | None = None
-    url: str | None = None
-    title: str | None = None
-    page_type: str | None = None
+    resource_locator: str | None = None
+    display_label: str | None = None
+    environment_kind: str | None = None
     capability_hints: list[str] | None = None
     observed_entities: list[dict[str, Any]] | None = None
-    affordances: list[dict[str, Any]] | None = None
+    action_hints: list[dict[str, Any]] | None = None
     runtime_metadata: dict[str, Any] | None = None
 
 
@@ -1458,12 +1464,12 @@ class EnvironmentSnapshotContextRead(BaseModel):
     source: str = "browser"
     environment_key: str | None = None
     status: str = "observed"
-    url: str | None = None
-    title: str | None = None
-    page_type: str | None = None
+    resource_locator: str | None = None
+    display_label: str | None = None
+    environment_kind: str = "generic_environment"
     capability_hints: list[str] = Field(default_factory=list)
     observed_entities: list[dict[str, Any]] = Field(default_factory=list)
-    affordances: list[dict[str, Any]] = Field(default_factory=list)
+    action_hints: list[dict[str, Any]] = Field(default_factory=list)
     runtime_metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -1726,7 +1732,7 @@ class RuntimeReplayDiagnosticsRead(BaseModel):
     approval_count: int
     pending_approval_count: int
     completion_rate: float | None = None
-    latest_snapshot_page_type: str | None = None
+    latest_snapshot_environment_kind: str | None = None
     latest_error: str | None = None
 
 

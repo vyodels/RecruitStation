@@ -52,6 +52,7 @@ def test_container_build_and_reload_register_enabled_dynamic_mcp_tools(tmp_path,
     rebuilt: AppContainer | None = None
     try:
         assert "dynamic_echo" not in container.tool_registry.tools
+        assert "dynamic_echo" not in container.scene_context_tool_registry.tools
 
         created = container.mcp_registry.create_server(
             {
@@ -68,12 +69,14 @@ def test_container_build_and_reload_register_enabled_dynamic_mcp_tools(tmp_path,
         )
         assert [tool["name"] for tool in created["tools"]] == ["dynamic_echo"]
         assert "dynamic_echo" not in container.kernel.tool_registry.tools
+        assert "dynamic_echo" not in container.scene_context_tool_registry.tools
 
         container.reload_settings(container.settings)
 
         assert container.kernel.tool_registry is container.tool_registry
         assert "dynamic_echo" in container.tool_registry.tools
         assert "dynamic_echo" in container.kernel.tool_registry.tools
+        assert "dynamic_echo" not in container.scene_context_tool_registry.tools
 
         executed = container.kernel.tool_registry.execute("dynamic_echo", {"text": "reload path"})
         assert executed.is_error is False
@@ -87,6 +90,7 @@ def test_container_build_and_reload_register_enabled_dynamic_mcp_tools(tmp_path,
         assert rebuilt.kernel.tool_registry is rebuilt.tool_registry
         assert "dynamic_echo" in rebuilt.tool_registry.tools
         assert "dynamic_echo" in rebuilt.kernel.tool_registry.tools
+        assert "dynamic_echo" not in rebuilt.scene_context_tool_registry.tools
 
         rebuilt_result = rebuilt.tool_registry.execute("dynamic_echo", {"text": "build path"})
         assert rebuilt_result.is_error is False

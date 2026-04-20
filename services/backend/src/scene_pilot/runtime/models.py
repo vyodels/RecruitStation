@@ -373,15 +373,19 @@ def _compact_tool_output_for_model(tool_name: str, output: Any) -> Any:
             }
     if tool_name == "browser_snapshot" and isinstance(output, dict):
         observed_entities = [item for item in list(output.get("observed_entities") or []) if isinstance(item, dict)]
-        affordances = [item for item in list(output.get("affordances") or []) if isinstance(item, dict)]
+        action_hints = [
+            item
+            for item in list(output.get("action_hints") or output.get("affordances") or [])
+            if isinstance(item, dict)
+        ]
         return {
             "source": output.get("source"),
             "environment_key": output.get("environment_key"),
-            "url": output.get("url"),
-            "title": output.get("title"),
-            "page_type": output.get("page_type"),
+            "resource_locator": output.get("resource_locator") or output.get("url"),
+            "display_label": output.get("display_label") or output.get("title"),
+            "environment_kind": output.get("environment_kind") or output.get("page_type"),
             "observed_entity_count": len(observed_entities),
-            "affordance_count": len(affordances),
+            "action_hint_count": len(action_hints),
             "runtime_metadata": _compact_generic_value(output.get("runtime_metadata"), depth=0),
         }
     if tool_name == "browser_execute_script" and isinstance(output, dict):
@@ -410,7 +414,7 @@ def _compact_generic_value(value: Any, *, depth: int) -> Any:
         for key in list(value.keys())[:12]:
             text_key = str(key)
             item = value[key]
-            if text_key in {"candidate_cards", "observed_entities", "affordances", "lines", "links", "buttons"}:
+            if text_key in {"candidate_cards", "observed_entities", "affordances", "action_hints", "lines", "links", "buttons"}:
                 if isinstance(item, list):
                     compact[f"{text_key}_count"] = len(item)
                 continue

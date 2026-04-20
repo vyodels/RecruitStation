@@ -10,6 +10,28 @@ from scene_pilot.db.base import Base, TimestampMixin, UnixTimestamp, generate_bu
 from scene_pilot.memory.global_memory_projection import GLOBAL_MEMORY_SCHEMA_VERSION
 
 
+def _metadata_dict(value: dict[str, Any] | None) -> dict[str, Any]:
+    return dict(value or {})
+
+
+def _metadata_section(metadata: dict[str, Any] | None, key: str) -> dict[str, Any]:
+    payload = _metadata_dict(metadata)
+    section = payload.get(key)
+    return dict(section or {}) if isinstance(section, dict) else {}
+
+
+def _first_non_empty_text(*values: Any) -> str | None:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return None
+
+
+def _list_of_dicts(value: Any) -> list[dict[str, Any]]:
+    return [dict(item) for item in list(value or []) if isinstance(item, dict)]
+
+
 class Candidate(Base, TimestampMixin):
     __tablename__ = "candidate_persons"
 
@@ -1162,6 +1184,39 @@ class ExecutionEpisode(Base, TimestampMixin):
     runtime_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    @property
+    def execution_contract(self) -> dict[str, Any]:
+        contract = _metadata_section(self.runtime_metadata, "execution_contract")
+        if contract:
+            return contract
+        return {
+            "execution_kind": "generic_environment_execution",
+            "summary_scope": "business_summary_only",
+            "evidence_scope": "episode_scoped",
+            "memory_policy": "disabled",
+            "learning_policy": "disabled",
+        }
+
+    @property
+    def execution_kind(self) -> str:
+        return str(self.execution_contract.get("execution_kind") or "generic_environment_execution")
+
+    @property
+    def summary_scope(self) -> str:
+        return str(self.execution_contract.get("summary_scope") or "business_summary_only")
+
+    @property
+    def evidence_scope(self) -> str:
+        return str(self.execution_contract.get("evidence_scope") or "episode_scoped")
+
+    @property
+    def memory_policy(self) -> str:
+        return str(self.execution_contract.get("memory_policy") or "disabled")
+
+    @property
+    def learning_policy(self) -> str:
+        return str(self.execution_contract.get("learning_policy") or "disabled")
+
 
 class PlaybookVersion(Base, TimestampMixin):
     __tablename__ = "playbook_versions"
@@ -1226,13 +1281,25 @@ class EnvironmentSnapshot(Base, TimestampMixin):
     source: Mapped[str] = mapped_column(String(64), nullable=False, default="browser", index=True)
     environment_key: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="observed", index=True)
-    url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
-    title: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    page_type: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    resource_locator: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    display_label: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    environment_kind: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     capability_hints: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     observed_entities: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
-    affordances: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
+    action_hints: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
     runtime_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+
+    @property
+    def environment_descriptor(self) -> dict[str, Any]:
+        descriptor = _metadata_section(self.runtime_metadata, "environment_descriptor")
+        if descriptor:
+            return descriptor
+        return {
+            "environment_kind": _first_non_empty_text(self.environment_kind, self.source) or "generic_environment",
+            "display_label": _first_non_empty_text(self.display_label),
+            "resource_locator": _first_non_empty_text(self.resource_locator),
+            "action_hints": _list_of_dicts(self.action_hints),
+        }
 
 
 class TaskQueueItem(Base, TimestampMixin):

@@ -120,10 +120,18 @@ def test_container_build_registers_enabled_browser_mcp_tools(tmp_path: Path, mon
         session.commit()
 
     reloaded = AppContainer.build(settings)
-    assert "browser_get_active_tab" in reloaded.tool_registry.tools
-    assert "browser_open_tab" in reloaded.tool_registry.tools
-    assert "browser_wait_for_url" in reloaded.tool_registry.tools
-    tool = reloaded.tool_registry.tools["browser_get_active_tab"]
+    assert "delegate_scene_context" in reloaded.tool_registry.tools
+    assert "browser_get_active_tab" not in reloaded.tool_registry.tools
+    assert "browser_open_tab" not in reloaded.tool_registry.tools
+    assert "browser_wait_for_url" not in reloaded.tool_registry.tools
+    assert "browser_get_active_tab" in reloaded.scene_context_tool_registry.tools
+    assert "browser_open_tab" in reloaded.scene_context_tool_registry.tools
+    assert "browser_wait_for_url" in reloaded.scene_context_tool_registry.tools
+    assert "read_memory" not in reloaded.scene_context_tool_registry.tools
+    assert "record_learning" not in reloaded.scene_context_tool_registry.tools
+    assert "invoke_skill" not in reloaded.scene_context_tool_registry.tools
+    assert "delegate_scene_context" not in reloaded.scene_context_tool_registry.tools
+    tool = reloaded.scene_context_tool_registry.tools["browser_get_active_tab"]
     assert tool.metadata["external_tool"] is True
     assert tool.metadata["mcp_server_key"] == "browser"
 

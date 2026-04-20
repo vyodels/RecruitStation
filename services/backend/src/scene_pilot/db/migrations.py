@@ -106,7 +106,7 @@ def _create_general_runtime_indexes(connection: Connection) -> None:
             "CREATE INDEX IF NOT EXISTS ix_execution_episodes_plan_created_at ON execution_episodes (execution_plan_id, created_at)",
         ),
         "environment_snapshots": (
-            "CREATE INDEX IF NOT EXISTS ix_environment_snapshots_episode_page_type ON environment_snapshots (execution_episode_id, page_type)",
+            "CREATE INDEX IF NOT EXISTS ix_environment_snapshots_episode_environment_kind ON environment_snapshots (execution_episode_id, environment_kind)",
         ),
         "playbook_patches": (
             "CREATE INDEX IF NOT EXISTS ix_playbook_patches_status_kind ON playbook_patches (status, patch_kind)",
@@ -2179,6 +2179,38 @@ def _extend_job_description_detail_schema(connection: Connection) -> None:
         connection.execute(text(statement))
 
 
+def _align_environment_snapshot_schema(connection: Connection) -> None:
+    tables = {
+        row[0]
+        for row in connection.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()
+    }
+    if "environment_snapshots" not in tables:
+        return
+
+    columns = {
+        row[1]
+        for row in connection.execute(text("PRAGMA table_info(environment_snapshots)")).fetchall()
+    }
+    statements = []
+    if "resource_locator" not in columns:
+        statements.append("ALTER TABLE environment_snapshots ADD COLUMN resource_locator TEXT")
+    if "display_label" not in columns:
+        statements.append("ALTER TABLE environment_snapshots ADD COLUMN display_label TEXT")
+    if "environment_kind" not in columns:
+        statements.append("ALTER TABLE environment_snapshots ADD COLUMN environment_kind TEXT")
+    if "action_hints" not in columns:
+        statements.append("ALTER TABLE environment_snapshots ADD COLUMN action_hints TEXT NOT NULL DEFAULT '[]'")
+    for statement in statements:
+        connection.execute(text(statement))
+
+    connection.execute(text("DROP INDEX IF EXISTS ix_environment_snapshots_episode_page_type"))
+    connection.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_environment_snapshots_episode_environment_kind ON environment_snapshots (execution_episode_id, environment_kind)"
+        )
+    )
+
+
 MIGRATIONS: tuple[SchemaMigration, ...] = (
     SchemaMigration(
         version=1,
@@ -2299,6 +2331,11 @@ MIGRATIONS: tuple[SchemaMigration, ...] = (
         version=24,
         name="align_memory_item_schema",
         apply=_align_memory_item_schema,
+    ),
+    SchemaMigration(
+        version=25,
+        name="align_environment_snapshot_schema",
+        apply=_align_environment_snapshot_schema,
     ),
 )
 
