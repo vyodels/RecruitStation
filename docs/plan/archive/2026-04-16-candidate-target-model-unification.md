@@ -3,9 +3,9 @@
 > Status: archived
 > Supersedes: -
 > Superseded by: docs/plan/completed/2026-04-17-canonical-entity-naming-and-schema-plan.md
-> Distilled into: docs/superpowers/specs/2026-04-16-candidate-target-data-model-spec.md
+> Distilled into: docs/specs/2026-04-20-candidate-target-data-model-spec.md
 > Last reviewed against code: 2026-04-20
-> Legacy path retained: docs/superpowers/plans/2026-04-16-candidate-target-model-unification.md
+> Historical source path: docs/superpowers/plans/2026-04-16-candidate-target-model-unification.md
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

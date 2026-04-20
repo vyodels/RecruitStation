@@ -5,7 +5,7 @@
 > Superseded by: docs/plan/completed/2026-04-19-agent-v2-terminology-convergence-plan.md (for terminology/layering conflicts)
 > Distilled into: partial: docs/specs/2026-04-20-dual-agent-product-architecture.md; docs/specs/2026-04-20-autonomous-agent-runtime-constraints.md
 > Last reviewed against code: 2026-04-20
-> Legacy path retained: docs/superpowers/plans/2026-04-19-agent-v2-direct-cutover-plan.md
+> Historical source path: docs/superpowers/plans/2026-04-19-agent-v2-direct-cutover-plan.md
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

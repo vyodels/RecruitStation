@@ -1,5 +1,12 @@
 # 招聘工作台 · 系统架构与设计全文档
 
+> Status: archived
+> Supersedes: -
+> Superseded by: docs/specs/2026-04-20-agent-system-and-recruiting-capability-architecture.md; docs/plan/active/2026-04-19-autonomous-e2e-and-chat-overlay-plan.md
+> Distilled into: partial: docs/specs/2026-04-20-agent-system-and-recruiting-capability-architecture.md
+> Last reviewed against code: 2026-04-20
+> Historical source path: docs/superpowers/specs/2026-04-16-recruitment-kanban-design.md
+
 **版本**：v2.0  
 **日期**：2026-04-16  
 **状态**：待实施  

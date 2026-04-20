@@ -93,7 +93,7 @@
 - `docs/plan/completed/`：已完成但仍保留的计划
 - `docs/plan/archive/`：被覆盖或仅作历史参考的计划
 
-迁移期内，旧路径（如 `docs/superpowers/plans/`、`docs/superpowers/specs/`）可以暂时保留，供现有使用方继续消费；但它们不再是新的正式入口，也不应再被当作新增文档的落点。
+旧路径（如原 `docs/superpowers/plans/`、`docs/superpowers/specs/`）只应被视为历史来源，不再作为正式入口，也不应再被当作新增文档的落点。
 
 ## 共享工作规则
 ### 1. 桌面端规则

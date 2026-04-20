@@ -5,7 +5,7 @@
 > Superseded by: -
 > Distilled into: -
 > Last reviewed against code: 2026-04-20
-> Legacy path retained: docs/superpowers/plans/2026-04-19-autonomous-ui-e2e-test-plan.md
+> Historical source path: docs/superpowers/plans/2026-04-19-autonomous-ui-e2e-test-plan.md
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

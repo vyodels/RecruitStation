@@ -23,8 +23,8 @@ When documents conflict, use this order:
 
 ## Migration note
 
-Legacy plan paths under `docs/superpowers/plans/` are intentionally kept for now because existing users and tooling still rely on them.
-During this migration, new entrypoints should prefer `docs/plan/`, but old files must not be deleted until dependents have switched.
+Legacy plan content has been migrated into `docs/plan/`.
+New entrypoints should prefer `docs/plan/`; old `docs/superpowers/plans/` paths are historical only and should no longer be used as entrypoints.
 
 ## Current index
 
@@ -39,6 +39,7 @@ During this migration, new entrypoints should prefer `docs/plan/`, but old files
 
 ### archive
 - [`archive/2026-04-16-candidate-target-model-unification.md`](./archive/2026-04-16-candidate-target-model-unification.md)
+- [`archive/2026-04-20-recruiting-workspace-information-architecture-draft.md`](./archive/2026-04-20-recruiting-workspace-information-architecture-draft.md)
 - [`archive/agent-v2-design-summary.md`](./archive/agent-v2-design-summary.md)
 - [`archive/agent-v2-implementation-spec.md`](./archive/agent-v2-implementation-spec.md)
 - [`archive/agent架构设计.md`](./archive/agent架构设计.md)
@@ -47,3 +48,4 @@ During this migration, new entrypoints should prefer `docs/plan/`, but old files
 - [`archive/recruiting-workflow-ux-redesign-plan.md`](./archive/recruiting-workflow-ux-redesign-plan.md)
 - [`archive/recruiting-workflow-ux-redesign-plan_cn.md`](./archive/recruiting-workflow-ux-redesign-plan_cn.md)
 - [`archive/2026-04-20-agents-claude-shared-standard-draft.md`](./archive/2026-04-20-agents-claude-shared-standard-draft.md)
+- [`archive/2026-04-16-recruitment-kanban-design.md`](./archive/2026-04-16-recruitment-kanban-design.md)
