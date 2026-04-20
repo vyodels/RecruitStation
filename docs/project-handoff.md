@@ -4,10 +4,12 @@
 
 这份文档只保留**稳定项目入口**，不再承载临时会话细节。
 
-- 项目级长期边界：看 [AGENTS.md](../AGENTS.md)
-- 当前产品与架构总入口：看 [README.md](../README.md) 和 [Plan.md](../Plan.md)
-- Agent V2 设计真相：看 [agent-v2-implementation-spec.md](./agent-v2-implementation-spec.md) 和 [agent-v2-design-summary.md](./agent-v2-design-summary.md)
+- 项目级长期边界：看 [AGENTS.md](../AGENTS.md) 与 `docs/specs/`
+- 当前产品与架构总入口：看 [README.md](../README.md) 与 `docs/plan/active/`
+- 已完成/已被覆盖的历史方案：看 `docs/plan/completed/` 与 `docs/plan/archive/`
+- 非规范参考资料：看 `docs/reference/`
 - 当前有效的临时会话交接：看 [session-handoff-2026-04-19-ui-recovery.md](./session-handoff-2026-04-19-ui-recovery.md)
+- 旧 plan/spec/reference 路径暂时保留，待迁移使用方切换后再下掉旧文件
 
 ## 当前项目事实
 

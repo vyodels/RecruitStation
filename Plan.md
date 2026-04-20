@@ -4,7 +4,7 @@
 
 把当前项目从“早期执行控制台”收束为“招聘场景优先的 `Recruit Agent`”。
 
-系统仍可保留未来扩展多个内置 agent 的能力，但当前版本只把招聘 agent 做深做透，不再以通用 workflow/runtime 产品叙事主导信息架构、数据模型和页面设计。
+系统现在已经收敛为双内置 agent 形态：`Assistant` 负责桌面内联协作，`Autonomous` 负责后台目标执行；用户面入口收敛为 `home / candidates / settings` 加 `Agents` overlay，不再以通用 workflow/runtime 页面主导信息架构。
 
 ## 当前产品方向
 

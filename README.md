@@ -2,19 +2,20 @@
 
 Recruit Agent is a local-first recruiting automation workspace.
 
-The current direction is no longer the earlier execution console model. The product now centers on a built-in recruiting agent with editable execution blueprints, isolated memory, skill governance, candidate progress tracking, and operator-controlled communication review.
+The current direction is no longer the earlier execution console model. The product now centers on two built-in agents, `Assistant` and `Autonomous`, managed through a desktop ChatOverlay alongside the recruiting workspace, with editable execution blueprints, isolated memory, skill governance, candidate progress tracking, and operator-controlled communication review.
 
 ## Product Focus
 
 Current scope:
 
-- one primary built-in `Recruit Agent`
+- two built-in agents: `Assistant` and `Autonomous`
 - candidate pipeline and progress tracking
 - candidate-isolated memory and JD-isolated memory
 - editable agent profile, prompt, role, boundaries, and compression policies
 - editable recruiting playbook with patch-based evolution
 - structured skills with user management and review
 - chat-like candidate communication review
+- desktop `home / candidates / settings` plus an `Agents` overlay entry as the primary user-facing shell
 - local-first persistence with optional later-stage intranet upload
 
 Not the current product focus:
@@ -98,7 +99,7 @@ Kernel must not know that `turn` exists, and `turn` must not reach into the Kern
 
 ## Current Repository Layout
 
-- `apps/desktop`: Electron + React desktop app
+- `apps/desktop`: Electron + React desktop app with `home / candidates / settings` as top-level sections and an `Agents` ChatOverlay for dual-agent lifecycle work
 - `services/backend`: FastAPI backend, SQLite persistence, agent execution, approvals, sync scaffolding
 - `packages/shared`: shared frontend contracts and mock/demo data
 - `docs`: handoff and release notes
@@ -111,7 +112,7 @@ The codebase still contains legacy execution structures from the earlier archite
 - execution records remain technical artifacts, not the main user-facing object
 - candidate progress, memory, communication, and evolution governance become the primary UI surfaces
 
-See [Plan.md](./Plan.md) for the active implementation plan.
+Long-term design truth lives in [`docs/specs/`](./docs/specs/). Active implementation plans now live in `docs/plan/active/`; completed and superseded plans are being collected under `docs/plan/completed/` and `docs/plan/archive/`. Non-normative background material is being collected under `docs/reference/`. Legacy plan/reference paths are kept temporarily during the migration because existing users still rely on them.
 
 ## Development
 
