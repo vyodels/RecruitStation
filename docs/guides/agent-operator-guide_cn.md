@@ -190,7 +190,7 @@ Agent 用它来做两件事：
 
 ## 4. `VirtualHID` 工具清单（MCP）
 
-VirtualHID 对外是一个 MCP stdio server，实现上分两层（Node.js shim + Swift daemon via Unix socket），**Agent 不需要关心**。
+VirtualHID 对外是一个 MCP stdio server。实现上 MCP shim 会连接 VirtualHID 本地 HID/HUD runtime，但这是 VirtualHID 内部 IPC，**Agent 不需要关心，也不能绕过 MCP 直接调用**。
 
 ### 4.1 工具表（10 个）
 
@@ -283,7 +283,7 @@ browser_list_tabs / browser_get_active_tab / browser_snapshot 的 URL
 - Agent 负责提供：
   - 目标应用 / 窗口 / `tabId` / `host`
   - 当前页面里的固定目标点、候选区域或可见性提示
-  - `viewportInScreen`、`scrollOffset`、`pageScale` 等 geometry
+  - `scrollOffset`、`pageScale`、`viewportSize`、元素 bbox / clickPoint 等页面坐标证据
   - 要执行的动作意图和顺序，例如“若元素已在当前视口则点击，否则先滚到可见再点”
 - VirtualHID 负责：
   - 根据 `target` 生成目标激活计划，并在真实执行路径中确认前台目标
@@ -292,6 +292,8 @@ browser_list_tabs / browser_get_active_tab / browser_snapshot 的 URL
   - 返回动作结果、`plan` 与 `verification` 执行证据
 
 所以 Agent 不应再把 `browser_snapshot` 里的坐标直接换算成最终 `CGPoint`；应把页面语义、目标区域和动作意图传给 VirtualHID。
+
+`viewportInScreen`、`screenX/screenY` 这类屏幕坐标最多只能作为兼容诊断字段；browser / recruit-agent 不承担屏幕坐标权威，VirtualHID 必须通过 macOS AX/CG/目标窗口证据解析真实 viewport/window 并完成 screen 坐标换算。
 
 `verification` 只说明 HID 执行层证据，例如注入事件、最终指针、焦点确认。页面语义是否成功，仍必须由 `browser_snapshot` / recruit-agent 业务结果确认。
 
