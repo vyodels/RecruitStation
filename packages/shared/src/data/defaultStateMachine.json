@@ -537,6 +537,15 @@
       "allowedActors": ["agent", "system"]
     },
     {
+      "id": "a1_to_c2_existing_resume",
+      "fromState": "discovered",
+      "toState": "resume_received",
+      "trigger": "agent",
+      "condition": "招聘平台或候选人详情页已直接暴露可下载/可入库的简历，Agent 完成本地 artifact 入库。",
+      "label": "记录已获平台简历",
+      "allowedActors": ["agent", "system", "recruiter"]
+    },
+    {
       "id": "a2_to_a3",
       "fromState": "ai_online_screening",
       "toState": "ai_online_passed",
@@ -555,12 +564,30 @@
       "allowedActors": ["agent", "system"]
     },
     {
+      "id": "a2_to_c2_existing_resume",
+      "fromState": "ai_online_screening",
+      "toState": "resume_received",
+      "trigger": "agent",
+      "condition": "在线评估过程中发现并入库了已存在的简历 artifact。",
+      "label": "记录已获平台简历",
+      "allowedActors": ["agent", "system", "recruiter"]
+    },
+    {
       "id": "a3_to_b1",
       "fromState": "ai_online_passed",
       "toState": "outreach_pending",
       "trigger": "auto",
       "condition": "通过后自动进入待发起沟通。",
       "allowedActors": ["system"]
+    },
+    {
+      "id": "a3_to_c2_existing_resume",
+      "fromState": "ai_online_passed",
+      "toState": "resume_received",
+      "trigger": "agent",
+      "condition": "在线评估通过后，平台侧已存在的简历 artifact 已被下载并入库。",
+      "label": "记录已获平台简历",
+      "allowedActors": ["agent", "system", "recruiter"]
     },
     {
       "id": "b1_to_b2",
@@ -572,6 +599,15 @@
       "allowedActors": ["agent", "recruiter"]
     },
     {
+      "id": "b1_to_c2_existing_resume",
+      "fromState": "outreach_pending",
+      "toState": "resume_received",
+      "trigger": "agent",
+      "condition": "尚未发起沟通前，平台侧已存在的简历 artifact 已被下载并入库。",
+      "label": "记录已获平台简历",
+      "allowedActors": ["agent", "system", "recruiter"]
+    },
+    {
       "id": "b2_to_b3",
       "fromState": "outreach_sent",
       "toState": "in_conversation",
@@ -579,6 +615,15 @@
       "condition": "候选人回复。",
       "label": "建立对话",
       "allowedActors": ["agent", "system"]
+    },
+    {
+      "id": "b2_to_c2_existing_resume",
+      "fromState": "outreach_sent",
+      "toState": "resume_received",
+      "trigger": "agent",
+      "condition": "候选人回复或平台消息中已包含可入库的简历 artifact。",
+      "label": "记录已获平台简历",
+      "allowedActors": ["agent", "system", "recruiter"]
     },
     {
       "id": "b2_to_b2a",
@@ -624,6 +669,15 @@
       "condition": "AI 在沟通中请求简历。",
       "label": "请求简历",
       "allowedActors": ["agent", "recruiter"]
+    },
+    {
+      "id": "b3_to_c2_existing_resume",
+      "fromState": "in_conversation",
+      "toState": "resume_received",
+      "trigger": "agent",
+      "condition": "沟通过程中发现已存在的简历 artifact 并完成入库，无需再次请求候选人。",
+      "label": "记录已获平台简历",
+      "allowedActors": ["agent", "system", "recruiter"]
     },
     {
       "id": "c1_to_c2",

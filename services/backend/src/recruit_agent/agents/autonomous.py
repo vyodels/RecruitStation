@@ -27,6 +27,7 @@ from recruit_agent.models.domain import (
 )
 from recruit_agent.runtime.limits import TurnLimits
 from recruit_agent.runtime.models import GoalRef, InputEnvelope, Message, Observation, RoundOutcome, ToolCall
+from recruit_agent.runtime.target_contracts import derive_browser_target
 
 AUTONOMOUS_OPEN_RUN_STATUSES: tuple[str, ...] = (
     "queued",
@@ -111,6 +112,25 @@ class AutonomousAgent:
             goal_constraints["source_kind"] = "autonomous"
             if resolved_application_id:
                 goal_constraints["application_id"] = resolved_application_id
+            browser_target = derive_browser_target(
+                existing=goal_constraints.get("browser_target") or goal_constraints["context_hints"].get("browser_target"),
+                structured_sources=(
+                    goal_constraints,
+                    goal_constraints["context_hints"],
+                    run.context_manifest,
+                    run.runtime_metadata,
+                    envelope.get("world_snapshot"),
+                    envelope.get("metadata"),
+                ),
+                text_sources=(
+                    (run.context_manifest or {}).get("goal"),
+                    getattr(goal_spec, "goal_text", None),
+                    getattr(goal_spec, "title", None),
+                ),
+            )
+            if browser_target:
+                goal_constraints["browser_target"] = browser_target
+                goal_constraints["context_hints"]["browser_target"] = browser_target
 
             scope_kind = str(envelope.get("scope_kind") or ("application" if resolved_application_id else run.lane or "global"))
             if scope_kind == "application":

@@ -13,6 +13,7 @@ from recruit_agent.plugins.recruit.toolkit import (
     list_candidates,
     record_outbound_message,
     score_candidate,
+    transition_application,
     upsert_candidate,
     upsert_job_description,
 )
@@ -149,6 +150,114 @@ def test_candidate_lifecycle_tools_cover_writeback_scoring_thread_and_progress(t
     assert progress["with_contact"] == 1
     assert progress["with_resume"] == 1
     assert progress["with_ai_score"] == 1
+
+
+def test_existing_platform_resume_can_transition_from_discovered(tmp_path) -> None:
+    container = _build_container(tmp_path)
+    job = upsert_job_description(
+        container.session_factory,
+        title="国际销售工程师",
+        platform="boss_mock",
+        external_id="job-ai-sales-002",
+        description="海外销售与售前协同",
+    )["job_description"]
+    candidate_result = upsert_candidate(
+        container.session_factory,
+        name="李青",
+        platform="boss_mock",
+        platform_candidate_id="geek-li-qing-001",
+        job_description_id=job["job_description_id"],
+        current_status="discovered",
+    )
+    application = candidate_result["application"]
+
+    attached = attach_resume_artifact(
+        container.session_factory,
+        application_id=application["application_id"],
+        file_name="li-qing-resume.pdf",
+        file_path="/tmp/li-qing-resume.pdf",
+        extracted_text="平台侧已存在的简历 artifact。",
+    )
+
+    assert "resume_received" in [
+        str(item.get("toStatus"))
+        for item in attached["thread"]["availableTransitions"]
+    ]
+    assert attached["thread"]["stateSnapshot"]["next_recommended_stages"] == ["resume_received"]
+
+    transitioned = transition_application(
+        container.session_factory,
+        application_id=application["application_id"],
+        to_status="resume_received",
+        stage_key="discovered",
+        note="平台侧已有简历，已完成 artifact 入库。",
+        trigger="artifact_attached",
+    )
+
+    assert transitioned["thread"]["application"]["currentStatus"] == "resume_received"
+    assert transitioned["thread"]["stateSnapshot"]["current_stage_key"] == "resume_received"
+
+
+def test_upsert_candidate_keeps_page_status_text_out_of_canonical_state(tmp_path) -> None:
+    container = _build_container(tmp_path)
+    job = upsert_job_description(
+        container.session_factory,
+        title="国际销售工程师",
+        platform="boss_mock",
+        external_id="job-ai-sales-003",
+        description="海外销售与售前协同",
+    )["job_description"]
+
+    candidate_result = upsert_candidate(
+        container.session_factory,
+        name="李青",
+        platform="boss_mock",
+        platform_candidate_id="geek-li-qing-002",
+        job_description_id=job["job_description_id"],
+        current_status="active",
+        current_stage_key="初筛中",
+    )
+
+    application = candidate_result["application"]
+    assert application["current_status"] == "discovered"
+    assert application["current_stage_key"] == "discovered"
+    assert "resume_received" in application["state_snapshot"]["next_recommended_stages"]
+    assert application["application_metadata"]["source_state"] == {
+        "requested_current_status": "active",
+        "normalized_current_status": "discovered",
+        "requested_current_stage_key": "初筛中",
+        "normalized_current_stage_key": "discovered",
+    }
+
+
+def test_upsert_candidate_uses_known_stage_when_page_status_is_display_text(tmp_path) -> None:
+    container = _build_container(tmp_path)
+    job = upsert_job_description(
+        container.session_factory,
+        title="国际销售工程师",
+        platform="boss_mock",
+        external_id="job-ai-sales-004",
+        description="海外销售与售前协同",
+    )["job_description"]
+
+    candidate_result = upsert_candidate(
+        container.session_factory,
+        name="王海",
+        platform="boss_mock",
+        platform_candidate_id="geek-wang-hai-001",
+        job_description_id=job["job_description_id"],
+        current_status="active",
+        current_stage_key="resume_received",
+    )
+
+    application = candidate_result["application"]
+    assert application["current_status"] == "resume_received"
+    assert application["current_stage_key"] == "resume_received"
+    assert "offline_scoring" in application["state_snapshot"]["next_recommended_stages"]
+    assert application["application_metadata"]["source_state"] == {
+        "requested_current_status": "active",
+        "normalized_current_status": "resume_received",
+    }
 
 
 def test_candidate_lifecycle_tools_support_archive_and_delete(tmp_path) -> None:

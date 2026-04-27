@@ -87,6 +87,7 @@ import type {
 const AUTONOMOUS_PRIMARY_CONVERSATION_ID = "autonomous-primary";
 
 export interface DesktopApiClient {
+  checkHealth(): Promise<boolean>;
   getDashboardSummary(): Promise<DashboardSummary>;
   getRuntimeWorkspaceData(): Promise<RuntimeWorkspaceData>;
   getTaskCompilerContract(): Promise<RuntimeCompilerContract>;
@@ -278,6 +279,19 @@ function isOfflineError(error: unknown): boolean {
 
 function isMissingEndpointError(error: unknown): boolean {
   return error instanceof Error && /:\s*(404|405)\b/.test(error.message);
+}
+
+async function requestHealth(baseUrl: string): Promise<boolean> {
+  try {
+    const response = await fetch(`${baseUrl}/health`, {
+      headers: {
+        accept: "application/json",
+      },
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
 }
 
 async function requestJson<T>(baseUrl: string, path: string, init?: RequestInit): Promise<T> {
@@ -1928,6 +1942,7 @@ function normalizeApplicationThread(raw: unknown): ApplicationThreadRecord {
     reviewDecisions: asArray(record.reviewDecisions ?? record.review_decisions).map(normalizeApplicationReviewDecision),
     syncRecords: asArray(record.syncRecords ?? record.sync_records).map(normalizeTalentPoolSyncRecord),
     availableStatuses: asArray<string>(record.availableStatuses ?? record.available_statuses),
+    availableTransitions: asArray(record.availableTransitions ?? record.available_transitions).map((item) => asRecord(item)),
     runtimeApprovals: asArray(record.runtimeApprovals ?? record.runtime_approvals).map(normalizeApprovalItem),
     runtimeInteractions: asArray(record.runtimeInteractions ?? record.runtime_interactions).map(normalizeOperatorInteraction),
   };
@@ -2670,6 +2685,7 @@ async function requestRuntimeReplay(baseUrl: string, episodeId: string): Promise
 
 function createFetchClient(baseUrl: string): DesktopApiClient {
   return {
+    checkHealth: async () => requestHealth(baseUrl),
     getDashboardSummary: async () => normalizeDashboard(await requestJson<unknown>(baseUrl, "/api/dashboard")),
     getRuntimeWorkspaceData: async () => {
       const [compilerContract, domainPacks, taskSpecs, plans, episodes, snapshots, capabilityDrivers, environmentAssessments, templates, patches, replans] =

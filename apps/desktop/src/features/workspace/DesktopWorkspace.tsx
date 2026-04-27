@@ -438,7 +438,8 @@ export function DesktopWorkspace(): JSX.Element {
       setTransport("http");
       setErrorMessage(undefined);
     } catch (error) {
-      setTransport("offline");
+      const backendReachable = await apiClient.checkHealth();
+      setTransport(backendReachable ? "http" : "offline");
       setErrorMessage(error instanceof Error ? error.message : copy("Failed to refresh workspace.", "刷新工作区失败。"));
     } finally {
       setRefreshing(false);
@@ -539,11 +540,11 @@ export function DesktopWorkspace(): JSX.Element {
         key: "status",
         label: copy("Application follow-up", "投递记录跟进"),
         count: candidateKanbanModels.filter((item) => {
-          const node = item.currentNode;
+          const node = item.displayNode;
           if (!node || node.uiConfig?.showInKanban === false || node.isTransient) {
             return false;
           }
-          if (["no_response", "cooldown", "archived", "candidate_withdrew"].includes(item.currentStatus)) {
+          if (["no_response", "cooldown", "archived", "candidate_withdrew"].includes(item.displayStatus)) {
             return false;
           }
           return node.phase !== "Z" && (((!node.isTerminal && !node.isSoftTerminal) || node.isSuccess));

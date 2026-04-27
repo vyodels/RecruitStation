@@ -28,6 +28,7 @@ from recruit_agent.schemas import (
 from recruit_agent.services.application_window import make_application_window
 from recruit_agent.services.candidate_identity import canonicalize_contact_info, contact_channels_from_info, merge_contact_info
 from recruit_agent.services.recruit_agent import default_candidate_state_snapshot
+from recruit_agent.services.state_machine import available_state_statuses
 
 _UNSET = object()
 
@@ -309,11 +310,14 @@ def upsert_candidate(
     normalized_candidate_person_id = _normalize_optional_text(candidate_person_id)
     normalized_platform_candidate_id = _normalize_optional_text(platform_candidate_id)
     normalized_job_description_id = _normalize_optional_text(job_description_id)
-    normalized_current_status = _normalize_optional_text(current_status) or "discovered"
-    normalized_current_stage = _normalize_optional_text(current_stage_key)
     normalized_source_platform = _normalize_optional_text(source_platform) or normalized_platform
 
     with session_factory() as session:
+        normalized_current_status, normalized_current_stage, source_state_metadata = _normalize_application_state_input(
+            session,
+            current_status=current_status,
+            current_stage_key=current_stage_key,
+        )
         candidate_repo = CandidateRepository(session)
         idx_repo = CandidatePlatformIdxRepository(session)
         candidate = None if normalized_candidate_person_id is None else candidate_repo.get(normalized_candidate_person_id)
@@ -392,6 +396,11 @@ def upsert_candidate(
                     stage_key=normalized_current_stage,
                 )
             )
+            _align_state_snapshot(
+                snapshot,
+                status=normalized_current_status,
+                stage_key=normalized_current_stage,
+            )
             contact_snapshot = merge_contact_info({}, dict(candidate.contact_info or {}))
             if contact_snapshot:
                 snapshot["contact_channels"] = contact_channels_from_info(contact_snapshot)
@@ -410,6 +419,16 @@ def upsert_candidate(
                     source_observation,
                     field_name="source_observation",
                 )
+            if source_state_metadata:
+                existing_source_state = (
+                    combined_application_metadata.get("source_state")
+                    if isinstance(combined_application_metadata.get("source_state"), dict)
+                    else {}
+                )
+                combined_application_metadata["source_state"] = {
+                    **existing_source_state,
+                    **source_state_metadata,
+                }
             if combined_application_metadata:
                 payload["application_metadata"] = combined_application_metadata
             if application is None:
@@ -646,14 +665,20 @@ def transition_application(
             candidate_person_id=candidate_person_id,
             job_description_id=job_description_id,
         )
+        normalized_to_status = _normalize_required_text(to_status, field_name="to_status")
+        normalized_metadata = _normalize_mapping(metadata, field_name="metadata") if metadata is not _UNSET else {}
+        normalized_stage_key = _normalize_optional_text(stage_key)
+        if normalized_stage_key and normalized_stage_key != normalized_to_status:
+            normalized_metadata.setdefault("requested_stage_key", normalized_stage_key)
+            normalized_stage_key = normalized_to_status
         thread = create_application_status_transition(
             session,
             application.candidate_application_id,
             CandidateStateTransitionRequest(
-                to_status=_normalize_required_text(to_status, field_name="to_status"),
+                to_status=normalized_to_status,
                 phase_key=_normalize_optional_text(phase_key),
                 phase_label=_normalize_optional_text(phase_label),
-                stage_key=_normalize_optional_text(stage_key),
+                stage_key=normalized_stage_key,
                 stage_label=_normalize_optional_text(stage_label),
                 note=_normalize_optional_text(note),
                 source="agent",
@@ -661,7 +686,7 @@ def transition_application(
                 actor_id=_normalize_optional_text(actor_id),
                 trigger=_normalize_optional_text(trigger) or "agent_tool",
                 override_reason=_normalize_optional_text(override_reason),
-                metadata=_normalize_mapping(metadata, field_name="metadata") if metadata is not _UNSET else {},
+                metadata=normalized_metadata,
                 interview_round=interview_round,
                 contact_channels=contact_channels,
             ),
@@ -1136,6 +1161,42 @@ def _resume_snapshot_from_candidate(candidate) -> dict[str, Any]:
         "file_path": candidate.resume_path,
         "source": candidate.platform,
     }
+
+
+def _normalize_application_state_input(
+    session: Session,
+    *,
+    current_status: Any,
+    current_stage_key: Any,
+) -> tuple[str, str, dict[str, Any]]:
+    known_statuses = set(available_state_statuses(session))
+    requested_status = _normalize_optional_text(current_status) or "discovered"
+    requested_stage = _normalize_optional_text(current_stage_key)
+
+    if requested_status in known_statuses:
+        normalized_status = requested_status
+    elif requested_stage in known_statuses:
+        normalized_status = requested_stage
+    else:
+        normalized_status = "discovered"
+
+    normalized_stage = requested_stage if requested_stage in known_statuses else normalized_status
+    source_state: dict[str, Any] = {}
+    if requested_status != normalized_status:
+        source_state["requested_current_status"] = requested_status
+        source_state["normalized_current_status"] = normalized_status
+    if requested_stage is not None and requested_stage != normalized_stage:
+        source_state["requested_current_stage_key"] = requested_stage
+        source_state["normalized_current_stage_key"] = normalized_stage
+    return normalized_status, normalized_stage, source_state
+
+
+def _align_state_snapshot(snapshot: dict[str, Any], *, status: str, stage_key: str) -> None:
+    default_snapshot = default_candidate_state_snapshot(status=status, stage_key=stage_key)
+    snapshot["current_stage_key"] = stage_key
+    snapshot.setdefault("current_stage_label", default_snapshot["current_stage_label"])
+    snapshot["next_recommended_stages"] = list(default_snapshot["next_recommended_stages"])
+    snapshot.setdefault("snapshot_metadata", default_snapshot["snapshot_metadata"])
 
 
 def _normalize_datetime(value: Any, *, field_name: str) -> datetime | None:

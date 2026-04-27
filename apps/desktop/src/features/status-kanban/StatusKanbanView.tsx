@@ -272,10 +272,10 @@ export function StatusKanbanView({
         if (!definition || definition.matchingMode === "all") {
           return true;
         }
-        if (definition.includeStatuses.length && !definition.includeStatuses.includes(item.currentStatus)) {
+        if (definition.includeStatuses.length && !definition.includeStatuses.includes(item.displayStatus)) {
           return false;
         }
-        if (definition.excludeStatuses.includes(item.currentStatus)) {
+        if (definition.excludeStatuses.includes(item.displayStatus)) {
           return false;
         }
         return true;
@@ -311,7 +311,7 @@ export function StatusKanbanView({
   const countByStatus = useMemo(() => {
     const counts = new Map<string, number>();
     for (const item of filteredModels) {
-      counts.set(item.currentStatus, (counts.get(item.currentStatus) ?? 0) + 1);
+      counts.set(item.displayStatus, (counts.get(item.displayStatus) ?? 0) + 1);
     }
     return counts;
   }, [filteredModels]);
@@ -404,7 +404,7 @@ export function StatusKanbanView({
     () =>
       selectedStatus === "all"
         ? filteredModels
-        : filteredModels.filter((item) => item.currentStatus === selectedStatus),
+        : filteredModels.filter((item) => item.displayStatus === selectedStatus),
     [filteredModels, selectedStatus],
   );
   const detailRecord = tableApplications.find((item) => item.application.id === detailApplicationId) ?? null;
@@ -454,7 +454,7 @@ export function StatusKanbanView({
     }
     setJobFilter("all");
     setVisibilityFilter("all");
-    setSelectedStatus(target.currentStatus);
+    setSelectedStatus(target.displayStatus);
     setActiveConversationApplicationId(preferredApplicationId);
   }, [models, preferredApplicationId, preferredConversationToken]);
 

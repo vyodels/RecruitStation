@@ -524,6 +524,7 @@ export interface ApplicationThreadRecord {
   reviewDecisions: ApplicationReviewDecisionRecord[];
   syncRecords: TalentPoolSyncRecord[];
   availableStatuses: string[];
+  availableTransitions: Array<Record<string, unknown>>;
   runtimeApprovals: ApprovalItem[];
   runtimeInteractions: OperatorInteractionRecord[];
 }

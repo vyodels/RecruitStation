@@ -16,7 +16,7 @@
 - 当前主路径是桌面端 `chat-overlay + floating bubble` 与后端 `assistant / autonomous + shared kernel`
 - 共享招聘业务能力应通过通用 `plugin / toolkit / MCP / tool surface` 暴露，不应建模成某个 Agent 私有动作目录
 - 外部招聘站点接入不能 hardcode 到主程序；主程序只提供通用流程语义、MCP 桥接、审批、记忆和持久化
-- UI 验收时，主程序页面只能通过 `chrome-devtools` 操作；`browser-mcp` 只保留给主程序内部驱动外部站点
+- UI 验收时，外部开发代理可以通过 Playwright、Chrome DevTools 或等价 UI 工具操作主程序前端；`browser-mcp` 只保留给主程序内部 Agent 驱动外部 / mock 招聘站点
 
 ## 桌面端重点入口
 

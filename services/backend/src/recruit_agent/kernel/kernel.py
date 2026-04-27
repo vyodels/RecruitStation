@@ -57,6 +57,7 @@ class AgentKernel:
             provider=self.provider,
             messages=messages,
             tool_registry=self.tool_registry,
+            goal=goal,
             observation=sensed,
             plugin_host=self.plugin_host,
             limits=active_limits,

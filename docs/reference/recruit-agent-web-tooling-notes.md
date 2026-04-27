@@ -37,7 +37,7 @@
 
 `browser_screenshot` 仅用于提高定位和留证效率：它只能截取目标窗口当前活跃 tab；如果传入 inactive `tabId`，上游会失败返回，避免截错页。browser 上游还维护了页面 JS 可观测面验证，用来确认只读观察工具和 active-tab 截图不会向页面 JS 暴露额外输入痕迹。
 
-测试和回归场景应优先复用已有 browser 测试标签页。`browser_open_tab` 传入 `tabId` 时会导航已有 tab，不应在循环回归中持续打开新标签页。
+测试和回归场景应优先复用已有 browser 测试标签页。`browser_open_tab` 传入 `tabId` 时会导航已有 tab，不应在循环回归中持续打开新标签页。招聘网站执行目标是例外：为降低 VirtualHID 目标窗口错配风险，目标招聘页应尽量放在同一个 Google Chrome 应用内的独立普通窗口，但仍必须先复用已有同 URL / 同 origin tab，必要时再用 `newWindow: true` 拆分既有目标 tab；只有找不到可复用目标时才创建新的普通 Chrome 窗口。这不是新 profile 或新 Chrome 进程。
 
 ### 2. 写网页
 

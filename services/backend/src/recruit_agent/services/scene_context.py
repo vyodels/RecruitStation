@@ -23,6 +23,7 @@ from recruit_agent.runtime.result_semantics import (
     extract_structured_result_payload,
     normalize_result_payload,
 )
+from recruit_agent.runtime.target_contracts import derive_browser_target
 from recruit_agent.runtime.tools import ToolRegistry
 
 
@@ -435,7 +436,21 @@ def _normalize_scene_request(arguments: dict[str, Any], *, default_max_rounds: i
     context = _as_dict(arguments.get("context"))
     input_payload = _as_dict(arguments.get("input"))
     browser_target = _normalize_browser_target(
-        arguments.get("browser_target") or environment_requirements.get("browser_target") or context.get("browser_target")
+        derive_browser_target(
+            existing=arguments.get("browser_target")
+            or environment_requirements.get("browser_target")
+            or context.get("browser_target"),
+            structured_sources=(arguments, environment_requirements, context, input_payload, success_criteria, output_contract),
+            text_sources=(
+                instruction,
+                title,
+                arguments.get("description"),
+                input_payload.get("goal"),
+                input_payload.get("goal_text"),
+                context.get("goal"),
+                context.get("goal_text"),
+            ),
+        )
     )
     computer_target = _normalize_computer_target(
         arguments.get("computer_target") or environment_requirements.get("computer_target") or context.get("computer_target")
@@ -507,7 +522,11 @@ def _build_scene_goal_text(request: dict[str, Any]) -> str:
         parts.append(
             "当 browser_target.url 存在时，必须以该 URL 的完整 origin（包含端口）作为目标边界。"
             "不要把同 hostname 但不同端口、不同 origin 或旧测试 tab 当成当前任务目标；"
-            "如果 browser_list_tabs 没有匹配该 origin 的 tab，先用 browser_open_tab 或等价浏览器导航打开目标 URL。"
+            "如果 browser_list_tabs 已有匹配该 origin 的 tab，必须优先复用该 tab，必要时用 browser_open_tab({tabId, newWindow: true}) 拆到独立窗口；"
+            "只有完全没有匹配该 origin 的 tab 时，才允许用 browser_open_tab({url, newWindow: true}) 获取初始目标。"
+            "browser_open_tab({url, newWindow: true}) 本身也应先复用同 URL / 同 origin tab，找不到才创建新窗口。"
+            "browser_open_tab 只用于初始目标获取、恢复目标 URL 或拆窗；进入站内其它路径、点击链接、提交表单、下载等阶段推进必须走 HID 动作。"
+            "browser_reload_extension 属于外部维护/恢复动作，不能在 autonomous scene 内调用。"
         )
     if request["computer_target"] or "computer" in _scene_capabilities(request["preferred_capabilities"]):
         parts.append(
@@ -732,10 +751,21 @@ def _validate_scene_browser_tool_target(
     request: dict[str, Any],
     browser_semantics: dict[str, Any],
 ) -> dict[str, Any] | None:
-    if tool_name not in {"browser_select_tab", "browser_snapshot"}:
-        return None
+    if tool_name == "browser_reload_extension":
+        return {
+            "success": False,
+            "error": "scene_browser_reload_not_allowed",
+            "message": (
+                "browser_reload_extension is a maintenance/debug action and is not allowed inside autonomous scene execution. "
+                "Restore browser MCP outside the scene, then retry the autonomous run."
+            ),
+        }
     target_origin = _scene_target_origin(request)
     if target_origin is None:
+        return None
+    if tool_name == "browser_open_tab":
+        return _validate_scene_browser_open_tab(arguments, request=request, target_origin=target_origin)
+    if tool_name not in {"browser_select_tab", "browser_snapshot"}:
         return None
     tab_id = _optional_int(arguments.get("tabId") or arguments.get("tab_id"))
     if tab_id is None:
@@ -750,6 +780,40 @@ def _validate_scene_browser_tool_target(
         "message": "Selected browser tab does not match the scene browser_target origin. Open or select the target URL from the scene contract before observing or acting.",
         "targetOrigin": target_origin,
         "tab": {"tabId": tab_id, "url": tab_url},
+    }
+
+
+def _validate_scene_browser_open_tab(
+    arguments: dict[str, Any],
+    *,
+    request: dict[str, Any],
+    target_origin: str,
+) -> dict[str, Any] | None:
+    requested_url = _optional_string(arguments.get("url"))
+    if requested_url is None:
+        return None
+    if not _scene_url_matches_target_origin(requested_url, target_origin=target_origin):
+        return {
+            "success": False,
+            "error": "scene_browser_target_mismatch",
+            "message": "browser_open_tab may only open or detach the current scene browser_target origin.",
+            "targetOrigin": target_origin,
+            "requestedUrl": requested_url,
+        }
+
+    target_url = _scene_target_url(request)
+    if target_url is None or _same_browser_url(requested_url, target_url):
+        return None
+    return {
+        "success": False,
+        "error": "scene_browser_navigation_requires_hid",
+        "message": (
+            "browser_open_tab is only for initial target acquisition or window isolation. "
+            "In-site navigation within the scene target must be performed by selecting an observed element "
+            "and executing hid_action, then confirming the result with browser observation."
+        ),
+        "targetUrl": target_url,
+        "requestedUrl": requested_url,
     }
 
 
@@ -798,9 +862,34 @@ def _scene_target_origin(request: dict[str, Any]) -> str | None:
     return host.lower() if host else None
 
 
+def _scene_target_url(request: dict[str, Any]) -> str | None:
+    browser_target = _as_dict(request.get("browser_target"))
+    return _optional_string(browser_target.get("url"))
+
+
 def _scene_url_matches_target_origin(value: Any, *, target_origin: str) -> bool:
     observed_origin = _origin_from_url(value) or _host_from_url(value)
     return observed_origin == target_origin
+
+
+def _same_browser_url(left: Any, right: Any) -> bool:
+    left_url = _optional_string(left)
+    right_url = _optional_string(right)
+    if not left_url or not right_url:
+        return False
+    parsed_left = urlparse(left_url)
+    parsed_right = urlparse(right_url)
+    return (
+        parsed_left.scheme.lower(),
+        parsed_left.netloc.lower(),
+        parsed_left.path.rstrip("/") or "/",
+        parsed_left.query,
+    ) == (
+        parsed_right.scheme.lower(),
+        parsed_right.netloc.lower(),
+        parsed_right.path.rstrip("/") or "/",
+        parsed_right.query,
+    )
 
 
 def _normalize_scene_hid_action_arguments(

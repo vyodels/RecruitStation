@@ -222,6 +222,69 @@ def test_scene_context_rejects_browser_tab_from_different_target_origin(tmp_path
         assert mismatch_results
 
 
+def test_scene_context_derives_browser_target_from_instruction_url(tmp_path: Path) -> None:
+    session_factory = _session_factory(tmp_path)
+    open_calls: list[dict[str, object]] = []
+    provider = ScriptedProvider(
+        provider_name="scene-scripted",
+        responses=[
+            LLMResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="open-stale",
+                        name="browser_open_tab",
+                        arguments={"url": "http://127.0.0.1:64872/candidate/jobs.html", "active": True},
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(content='{"status":"blocked","summary":"stale target"}'),
+        ],
+    )
+    tools = ToolRegistry()
+    tools.register(
+        ToolDefinition(
+            name="browser_open_tab",
+            description="Open tab.",
+            parameters={"type": "object", "properties": {"url": {"type": "string"}}, "additionalProperties": True},
+            handler=lambda arguments: open_calls.append(dict(arguments)) or {"success": True},
+            metadata={"capabilities": ["browser"], "external_tool": True, "real_environment": True},
+        )
+    )
+
+    service = SceneContextService(
+        session_factory=session_factory,
+        provider=provider,
+        tool_registry=tools,
+        plugin_host=PluginHost(),
+    )
+
+    result = service.delegate(
+        {
+            "title": "从 instruction 提取目标 URL",
+            "instruction": "在 http://127.0.0.1:64932/jobs 执行模拟招聘流程。",
+            "preferred_capabilities": ["browser", "computer"],
+        }
+    )
+
+    assert result["status"] == "blocked"
+    assert open_calls == []
+    assert result["environment_context"]["browser_target"] == {
+        "host": "127.0.0.1:64932",
+        "url": "http://127.0.0.1:64932/jobs",
+    }
+    with session_factory() as session:
+        episode = session.query(ExecutionEpisode).one()
+        blocked_results = [
+            item
+            for item in episode.observations
+            if item["type"] == "tool_result"
+            and item["payload"]["tool_name"] == "browser_open_tab"
+            and item["payload"]["output"].get("error") == "scene_browser_target_mismatch"
+        ]
+        assert blocked_results
+
+
 def test_scene_context_does_not_mark_failed_structured_final_as_completed(tmp_path: Path) -> None:
     session_factory = _session_factory(tmp_path)
     provider = ScriptedProvider(
@@ -756,3 +819,128 @@ def test_scene_context_preserves_autonomous_artifact_expectation_aliases(tmp_pat
         episode = session.query(ExecutionEpisode).one()
         stored = episode.execution_contract["artifact_expectations"]
         assert stored["download_lookup"]["require_source_correlation"] is True
+
+
+def test_scene_context_blocks_browser_open_tab_for_in_site_navigation(tmp_path: Path) -> None:
+    session_factory = _session_factory(tmp_path)
+    open_calls: list[dict[str, object]] = []
+    provider = ScriptedProvider(
+        provider_name="scene-scripted",
+        responses=[
+            LLMResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="tool-1",
+                        name="browser_open_tab",
+                        arguments={
+                            "tabId": 613,
+                            "url": "https://recruit.example.test/candidates?job=1",
+                            "active": True,
+                            "newWindow": False,
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(content='{"status":"blocked","summary":"browser navigation requires HID"}'),
+        ],
+    )
+    tools = ToolRegistry()
+    tools.register(
+        ToolDefinition(
+            name="browser_open_tab",
+            description="Open or detach tab.",
+            parameters={"type": "object", "properties": {"tabId": {"type": "number"}, "url": {"type": "string"}}, "additionalProperties": True},
+            handler=lambda arguments: open_calls.append(dict(arguments)) or {"success": True},
+            metadata={"capabilities": ["browser"], "external_tool": True, "real_environment": True},
+        )
+    )
+
+    service = SceneContextService(
+        session_factory=session_factory,
+        provider=provider,
+        tool_registry=tools,
+        plugin_host=PluginHost(),
+    )
+
+    result = service.delegate(
+        {
+            "title": "站内导航必须走 HID",
+            "instruction": "不要用 browser_open_tab 进行站内阶段推进。",
+            "preferred_capabilities": ["browser", "computer"],
+            "browser_target": {"url": "https://recruit.example.test/jobs"},
+        }
+    )
+
+    assert result["status"] == "blocked"
+    assert open_calls == []
+    with session_factory() as session:
+        episode = session.query(ExecutionEpisode).one()
+        blocked_results = [
+            item
+            for item in episode.observations
+            if item["type"] == "tool_result"
+            and item["payload"]["tool_name"] == "browser_open_tab"
+            and item["payload"]["output"].get("error") == "scene_browser_navigation_requires_hid"
+        ]
+        assert blocked_results
+
+
+def test_scene_context_blocks_browser_reload_extension(tmp_path: Path) -> None:
+    session_factory = _session_factory(tmp_path)
+    reload_calls: list[dict[str, object]] = []
+    provider = ScriptedProvider(
+        provider_name="scene-scripted",
+        responses=[
+            LLMResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="tool-1",
+                        name="browser_reload_extension",
+                        arguments={},
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(content='{"status":"blocked","summary":"browser reload is maintenance only"}'),
+        ],
+    )
+    tools = ToolRegistry()
+    tools.register(
+        ToolDefinition(
+            name="browser_reload_extension",
+            description="Reload browser extension.",
+            parameters={"type": "object", "properties": {}, "additionalProperties": False},
+            handler=lambda arguments: reload_calls.append(dict(arguments)) or {"success": True},
+            metadata={"capabilities": ["browser"], "external_tool": True, "real_environment": True},
+        )
+    )
+
+    service = SceneContextService(
+        session_factory=session_factory,
+        provider=provider,
+        tool_registry=tools,
+        plugin_host=PluginHost(),
+    )
+
+    result = service.delegate(
+        {
+            "title": "scene 内禁止 reload browser extension",
+            "instruction": "不要在 autonomous scene 内重载 browser extension。",
+            "preferred_capabilities": ["browser", "computer"],
+            "browser_target": {"url": "https://recruit.example.test/jobs"},
+        }
+    )
+
+    assert result["status"] == "blocked"
+    assert reload_calls == []
+    with session_factory() as session:
+        episode = session.query(ExecutionEpisode).one()
+        blocked_results = [
+            item
+            for item in episode.observations
+            if item["type"] == "tool_result"
+            and item["payload"]["tool_name"] == "browser_reload_extension"
+            and item["payload"]["output"].get("error") == "scene_browser_reload_not_allowed"
+        ]
+        assert blocked_results

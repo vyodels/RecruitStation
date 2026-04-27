@@ -7,6 +7,7 @@ import shutil
 import socket
 import tempfile
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,6 +37,7 @@ LEGACY_MCP_TOOL_CALL_PROTOCOL = "json_socket_tool_call"
 LEGACY_BROWSER_COMMAND_PROTOCOL = "json_socket_browser_command"
 MCP_PROTOCOL_VERSION = "2025-03-26"
 MCP_STDIO_REQUEST_TIMEOUT_SECONDS = 8.0
+MCP_TRANSIENT_RETRY_DELAY_SECONDS = 0.35
 BROWSER_LOCATE_DOWNLOAD_MAX_WAIT_MS = 5_000
 VIRTUALHID_SOCKET_PRESET_KEY = "virtualhid-json-socket"
 _VIRTUALHID_MCP_SERVER_ENV = "VIRTUALHID_MCP_SERVER"
@@ -480,6 +482,23 @@ def _mcp_call_tool(server: McpServer, tool_name: str, arguments: dict[str, Any])
     return result
 
 
+def _is_transient_mcp_error(error: BaseException) -> bool:
+    message = str(error).lower()
+    return any(
+        marker in message
+        for marker in (
+            "transport closed",
+            "socket not found",
+            "connect enoent",
+            "connection refused",
+            "timed out",
+            "returned no response",
+            "mcp unavailable",
+            "native host unavailable",
+        )
+    )
+
+
 def _normalize_mcp_tool_arguments(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(arguments or {})
     if tool_name != "browser_locate_download":
@@ -878,6 +897,26 @@ class McpRegistryService:
         return self._invoke_tool_unlocked(server, remote_name, arguments)
 
     def _invoke_tool_unlocked(self, server: McpServer, remote_name: str, arguments: dict[str, Any]) -> Any:
+        last_error: McpBridgeError | None = None
+        for attempt in range(2):
+            try:
+                result = self._invoke_tool_once(server, remote_name, arguments)
+                if attempt > 0:
+                    self._mark_server_health(server.id, status="healthy", error_message=None)
+                return result
+            except McpBridgeError as exc:
+                last_error = exc
+                if attempt == 0 and _is_transient_mcp_error(exc):
+                    time.sleep(MCP_TRANSIENT_RETRY_DELAY_SECONDS)
+                    continue
+                if _is_transient_mcp_error(exc):
+                    self._mark_server_health(server.id, status="unhealthy", error_message=str(exc))
+                raise
+        if last_error is not None:
+            raise last_error
+        raise McpBridgeError(f"MCP tool failed without response: {remote_name}")
+
+    def _invoke_tool_once(self, server: McpServer, remote_name: str, arguments: dict[str, Any]) -> Any:
         if server.protocol == STANDARD_MCP_PROTOCOL:
             return _mcp_call_tool(server, remote_name, arguments)
         if server.transport_kind != "unix_socket":
@@ -899,6 +938,21 @@ class McpRegistryService:
                 },
             )
         raise McpBridgeError(f"Unsupported MCP protocol: {server.protocol}")
+
+    def _mark_server_health(self, server_id: str, *, status: str, error_message: str | None) -> None:
+        with self.session_factory() as session:
+            repo = McpServerRepository(session)
+            current = repo.get(server_id)
+            if current is None:
+                return
+            repo.update(
+                current,
+                {
+                    "health_status": status,
+                    "health_error": error_message,
+                    "last_health_at": utcnow(),
+                },
+            )
 
     def _to_tool_definition(self, server: McpServer, tool: McpTool) -> ToolDefinition:
         def _handler(

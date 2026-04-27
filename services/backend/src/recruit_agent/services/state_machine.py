@@ -192,6 +192,42 @@ def available_state_statuses(session: Session) -> list[str]:
     return [str(node.get("id")) for node in machine["nodes"] if node.get("id")]
 
 
+def _transition_endpoint(transition: dict[str, Any], key: str) -> str:
+    camel_key = "fromState" if key == "from" else "toState"
+    snake_key = "from_state" if key == "from" else "to_state"
+    return str(transition.get(camel_key) or transition.get(snake_key) or "").strip()
+
+
+def available_state_transitions(session: Session, *, from_status: str | None = None) -> list[dict[str, Any]]:
+    state_machine = ensure_latest_state_machine(session)
+    resolved_from_status = str(from_status or "discovered").strip() or "discovered"
+    transitions: list[dict[str, Any]] = []
+    for transition in [*state_machine["transitions"], *state_machine["globalTransitions"]]:
+        transition_from = _transition_endpoint(transition, "from")
+        transition_to = _transition_endpoint(transition, "to")
+        if not transition_to:
+            continue
+        if transition_from not in {"*", resolved_from_status}:
+            continue
+        transitions.append(
+            {
+                "id": str(transition.get("id") or f"{transition_from}_to_{transition_to}"),
+                "fromStatus": transition_from or resolved_from_status,
+                "toStatus": transition_to,
+                "label": transition.get("label"),
+                "trigger": transition.get("trigger"),
+                "condition": transition.get("condition"),
+                "allowedActors": list(transition.get("allowedActors") or transition.get("allowed_actors") or []),
+                "requiresNote": bool(transition.get("requiresNote") or transition.get("requires_note") or False),
+            }
+        )
+    return transitions
+
+
+def available_state_transition_targets(session: Session, *, from_status: str | None = None) -> list[str]:
+    return [str(transition["toStatus"]) for transition in available_state_transitions(session, from_status=from_status)]
+
+
 def _node_index(state_machine: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {str(node["id"]): dict(node) for node in state_machine["nodes"]}
 
@@ -377,7 +413,12 @@ def transition_candidate(
 
     matched_transition = _find_transition(state_machine, from_status=current_status, to_status=payload.to_status)
     if matched_transition is None and not payload.override_reason:
-        raise StateMachineValidationError(f"Illegal transition: {current_status} -> {payload.to_status}")
+        allowed_targets = [item["toStatus"] for item in available_state_transitions(session, from_status=current_status)]
+        allowed_hint = ", ".join(allowed_targets) if allowed_targets else "<none>"
+        raise StateMachineValidationError(
+            f"Illegal transition: {current_status} -> {payload.to_status}. "
+            f"Allowed next statuses from {current_status}: {allowed_hint}."
+        )
 
     next_deepest_milestone = _advance_milestone(
         state_machine,

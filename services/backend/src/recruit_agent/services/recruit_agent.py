@@ -395,6 +395,18 @@ def default_candidate_state_snapshot(
 ) -> dict[str, Any]:
     resolved_stage_key = stage_key or status
     resolved_stage_label = stage_label or resolved_stage_key.replace("_", " ")
+    recommended_stages_by_status = {
+        "discovered": ["ai_online_screening", "resume_received"],
+        "ai_online_screening": ["ai_online_passed", "ai_online_rejected", "resume_received"],
+        "ai_online_passed": ["outreach_pending", "resume_received"],
+        "outreach_pending": ["outreach_sent", "resume_received"],
+        "outreach_sent": ["in_conversation", "resume_received"],
+        "in_conversation": ["resume_requested", "resume_received"],
+        "resume_requested": ["resume_received"],
+        "resume_received": ["offline_scoring"],
+        "offline_scoring": ["offline_score_passed", "offline_score_rejected"],
+        "offline_score_passed": ["pending_human_review"],
+    }
     return {
         "current_phase_key": "discovery_and_screening",
         "current_phase_label": "发现与初筛",
@@ -407,7 +419,7 @@ def default_candidate_state_snapshot(
         "ai_assessment_status": "pending",
         "human_assessment_status": "pending",
         "operator_flags": [],
-        "next_recommended_stages": ["profile_reviewed"],
+        "next_recommended_stages": recommended_stages_by_status.get(status, []),
         "interview_plan": {
             "active_round": 0,
             "rounds": [

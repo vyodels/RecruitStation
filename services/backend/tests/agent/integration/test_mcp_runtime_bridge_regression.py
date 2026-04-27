@@ -401,3 +401,123 @@ def test_browser_hid_runtime_requires_observe_after_substantive_hid_action(tmp_p
     ]
 
     _reset_browser_hid_sequence_state_for_tests()
+
+
+def test_standard_mcp_tool_retries_once_on_transient_failure(tmp_path, monkeypatch) -> None:
+    discovered_tools = [
+        {
+            "name": "dynamic_echo",
+            "description": "Echo back the payload.",
+            "inputSchema": {"type": "object", "properties": {}, "additionalProperties": True},
+            "annotations": {"readOnlyHint": True},
+        }
+    ]
+    tool_calls: list[tuple[str, str, dict[str, Any]]] = []
+
+    def fake_list_tools(server) -> list[dict[str, Any]]:
+        assert server.endpoint == "mcp://retry-runtime"
+        return discovered_tools
+
+    def fake_call_tool(server, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        tool_calls.append((server.endpoint, tool_name, dict(arguments)))
+        if len(tool_calls) == 1:
+            raise McpBridgeError("Transport closed while reading MCP response")
+        return {"ok": True, "tool": tool_name, "arguments": dict(arguments)}
+
+    monkeypatch.setattr("recruit_agent.services.mcp_registry._mcp_list_tools", fake_list_tools)
+    monkeypatch.setattr("recruit_agent.services.mcp_registry._mcp_call_tool", fake_call_tool)
+    monkeypatch.setattr("recruit_agent.services.mcp_registry.time.sleep", lambda _: None)
+
+    settings = AppSettings(
+        data_dir=str(tmp_path / "data"),
+        database_url=f"sqlite:///{tmp_path / 'mcp-transient-retry.db'}",
+        provider_config={},
+    )
+    container = AppContainer.build(settings)
+    container.mcp_registry.create_server(
+        {
+            "server_key": "dynamic-mcp",
+            "name": "Dynamic MCP",
+            "transport_kind": "stdio",
+            "protocol": "mcp_jsonrpc",
+            "endpoint": "mcp://retry-runtime",
+            "enabled": True,
+            "auth_config": {},
+            "server_metadata": {},
+            "tools": [],
+        }
+    )
+
+    with container.session_factory() as session:
+        server = session.query(McpServer).one()
+        tool = session.query(McpTool).one()
+        result = container.mcp_registry.invoke_tool(server, tool, {"text": "retry"})
+
+    assert result == {"ok": True, "tool": "dynamic_echo", "arguments": {"text": "retry"}}
+    assert tool_calls == [
+        ("mcp://retry-runtime", "dynamic_echo", {"text": "retry"}),
+        ("mcp://retry-runtime", "dynamic_echo", {"text": "retry"}),
+    ]
+    with container.session_factory() as session:
+        server = session.query(McpServer).one()
+        assert server.health_status == "healthy"
+        assert server.health_error is None
+
+
+def test_standard_mcp_tool_marks_server_unhealthy_after_persistent_transient_failure(tmp_path, monkeypatch) -> None:
+    discovered_tools = [
+        {
+            "name": "dynamic_echo",
+            "description": "Echo back the payload.",
+            "inputSchema": {"type": "object", "properties": {}, "additionalProperties": True},
+            "annotations": {"readOnlyHint": True},
+        }
+    ]
+    tool_calls: list[tuple[str, str, dict[str, Any]]] = []
+
+    def fake_list_tools(server) -> list[dict[str, Any]]:
+        assert server.endpoint == "mcp://retry-runtime"
+        return discovered_tools
+
+    def fake_call_tool(server, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        tool_calls.append((server.endpoint, tool_name, dict(arguments)))
+        raise McpBridgeError("MCP socket not found: /tmp/browser-mcp.sock")
+
+    monkeypatch.setattr("recruit_agent.services.mcp_registry._mcp_list_tools", fake_list_tools)
+    monkeypatch.setattr("recruit_agent.services.mcp_registry._mcp_call_tool", fake_call_tool)
+    monkeypatch.setattr("recruit_agent.services.mcp_registry.time.sleep", lambda _: None)
+
+    settings = AppSettings(
+        data_dir=str(tmp_path / "data"),
+        database_url=f"sqlite:///{tmp_path / 'mcp-transient-unhealthy.db'}",
+        provider_config={},
+    )
+    container = AppContainer.build(settings)
+    container.mcp_registry.create_server(
+        {
+            "server_key": "dynamic-mcp",
+            "name": "Dynamic MCP",
+            "transport_kind": "stdio",
+            "protocol": "mcp_jsonrpc",
+            "endpoint": "mcp://retry-runtime",
+            "enabled": True,
+            "auth_config": {},
+            "server_metadata": {},
+            "tools": [],
+        }
+    )
+
+    with container.session_factory() as session:
+        server = session.query(McpServer).one()
+        tool = session.query(McpTool).one()
+        with pytest.raises(McpBridgeError, match="MCP socket not found"):
+            container.mcp_registry.invoke_tool(server, tool, {"text": "retry"})
+
+    assert tool_calls == [
+        ("mcp://retry-runtime", "dynamic_echo", {"text": "retry"}),
+        ("mcp://retry-runtime", "dynamic_echo", {"text": "retry"}),
+    ]
+    with container.session_factory() as session:
+        server = session.query(McpServer).one()
+        assert server.health_status == "unhealthy"
+        assert server.health_error == "MCP socket not found: /tmp/browser-mcp.sock"

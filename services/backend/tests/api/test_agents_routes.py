@@ -841,6 +841,37 @@ def test_autonomous_goal_creation_accepts_action_style_metadata(tmp_path: Path) 
         load_settings.cache_clear()
 
 
+def test_autonomous_goal_creation_materializes_browser_target_from_goal_url(tmp_path: Path) -> None:
+    client, app = _build_client(tmp_path)
+    client.__enter__()
+    try:
+        created = client.post(
+            "/api/agents/autonomous/goals",
+            json={
+                "title": "模拟招聘流程",
+                "goal_text": "通过普通浏览器在 http://127.0.0.1:64932/jobs 执行自动化招聘。",
+                "goal_kind": "candidate_discovery",
+                "requested_by": "ui-test",
+            },
+        )
+        assert created.status_code == 201
+        payload = created.json()
+
+        session_factory = app.state.session_factory
+        with session_factory() as session:
+            goal = session.query(GoalSpec).filter_by(id=payload["goalId"]).one()
+            run = session.query(AgentRun).filter_by(run_id=payload["runId"]).one()
+            expected_target = {"host": "127.0.0.1:64932", "url": "http://127.0.0.1:64932/jobs"}
+            assert goal.context_hints["browser_target"] == expected_target
+            assert goal.constraints["browser_target"] == expected_target
+            assert run.context_manifest["browser_target"] == expected_target
+            assert run.runtime_metadata["browser_target"] == expected_target
+    finally:
+        client.__exit__(None, None, None)
+        os.environ.pop("RECRUIT_AGENT_DATA_DIR", None)
+        load_settings.cache_clear()
+
+
 def test_scene_template_route_materializes_autonomous_goal(tmp_path: Path) -> None:
     client, app = _build_client(tmp_path)
     client.__enter__()

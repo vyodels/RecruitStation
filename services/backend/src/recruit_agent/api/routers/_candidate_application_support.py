@@ -49,7 +49,12 @@ from recruit_agent.schemas import (
 from recruit_agent.services.application_subjects import application_payload_from_application
 from recruit_agent.services.candidate_identity import merge_contact_info, relink_application_person_by_contact_info
 from recruit_agent.services.recruit_agent import default_candidate_state_snapshot
-from recruit_agent.services.state_machine import available_state_statuses, transition_candidate
+from recruit_agent.services.state_machine import (
+    available_state_statuses,
+    available_state_transition_targets,
+    available_state_transitions,
+    transition_candidate,
+)
 
 
 def _now() -> datetime:
@@ -272,6 +277,7 @@ def _build_application_thread(session: Session, application, person) -> Candidat
         review_decisions=review_decisions,
         sync_records=sync_records,
         available_statuses=available_state_statuses(session),
+        available_transitions=available_state_transitions(session, from_status=application.current_status),
         runtime_approvals=runtime_approvals,
         runtime_interactions=_runtime_interactions_for_application(
             session,
@@ -454,6 +460,8 @@ def create_application_resume_artifact(
     if payload.artifact_type == "resume":
         snapshot["resume_status"] = "received"
         snapshot["latest_note"] = payload.file_name or snapshot.get("latest_note")
+        if "resume_received" in available_state_transition_targets(session, from_status=application.current_status):
+            snapshot["next_recommended_stages"] = ["resume_received"]
         resume_snapshot = {
             **dict(application.resume_snapshot or {}),
             "available": True,

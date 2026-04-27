@@ -114,8 +114,9 @@
 - `Assistant` 与 `Autonomous` 的差异应体现在目标、记忆、生命周期与执行策略，而不是能力是否被单独挂载
 
 ### 4. 外部开发代理边界
-- 主程序 UI 验收时，外部开发代理只能通过 `chrome-devtools` 操作主程序页面
-- `browser-mcp` 只保留给主程序内部 Agent 驱动外部网站，不作为外部开发代理的主程序 UI 控制器
+- 主程序 UI 验收时，外部开发代理可以通过 Playwright、Chrome DevTools 或等价 UI 自动化工具操作主程序页面
+- `browser-mcp` 只保留给主程序内部 Agent 驱动外部 / mock 招聘网站，不作为外部开发代理的主程序 UI 控制器
+- 外部开发代理可以用 UI 工具触发 goal、配置参数和查看状态，但不能用 Playwright、Chrome DevTools、页面 JS 或 `browser-mcp` 直接替内部 Autonomous Agent 操作招聘网站
 
 ### 5. 文档整理规则
 - 规范沉淀的是稳定骨架、设计思想与设计规范

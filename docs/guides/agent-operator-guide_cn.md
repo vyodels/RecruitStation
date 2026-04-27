@@ -51,6 +51,8 @@ args = ["/Users/vyodels/AgentProjects/VirtualHID/mcp/server.mjs"]
 browser observe/wait -> Agent decision -> hid_action write -> browser observe/wait -> Agent decision -> hid_action write
 ```
 
+这条时序约束描述的是 `recruit-agent` 内部 Agent 操作外部 / mock 招聘网站的产品执行链路，不限制外部测试 harness 操作 `recruit-agent` 自己的前端。测试 harness 可以用 Playwright、Chrome DevTools 或等价 UI 工具启动 goal、配置参数和查看运行状态；一旦进入招聘网站执行，页面观察和写入仍必须回到 `browser-mcp` + `VirtualHID` 组合链路。
+
 - `browser_*` 提供类似 Playwright locator / page state 的观察层。
 - `hid_action` 提供类似 Playwright click/type/scroll 的写入层，只是写入由 macOS HID 事件完成。
 - 点击、输入、发送聊天内容、滚动、拖拽、快捷键等浏览器目标 HID 动作后，下一次浏览器目标 HID 动作前必须先调用 `browser_snapshot`、`browser_wait_for_*`、`browser_query_elements`、`browser_locate_download` 或等价 browser 观察工具确认页面、下载或消息状态。
@@ -76,9 +78,9 @@ browser observe/wait -> Agent decision -> hid_action write -> browser observe/wa
 |---|---|
 | `browser_list_tabs` | 列举所有窗口 / 标签页 |
 | `browser_get_active_tab` | 当前激活的标签页 |
-| `browser_reload_extension` | 重载扩展，调试工具 contract 漂移时使用 |
+| `browser_reload_extension` | 重载扩展，只允许外部维护/调试时使用，不能在 autonomous scene 内调用 |
 | `browser_select_tab` | 激活指定标签页（顺带把 Chrome 窗口置前） |
-| `browser_open_tab` | 默认在最后聚焦的 Chrome 窗口打开新标签页；传 `windowId` 可指定窗口；传 `tabId` 时复用并导航已有标签页 |
+| `browser_open_tab` | 默认在最后聚焦的 Chrome 窗口打开新标签页；传 `windowId` 可指定窗口；传 `tabId` 时复用并导航已有标签页；传 `newWindow: true` 时先复用 / 拆分已有同 URL 或同 origin 标签页，找不到才创建新的普通 Chrome 窗口 |
 
 ### 2.2 读页面（核心）
 
@@ -114,6 +116,10 @@ browser observe/wait -> Agent decision -> hid_action write -> browser observe/wa
 - 当前 `browser-mcp` 没有 `browser_close_tab`、`browser_navigate`、`browser_go_back`、`browser_reload`、`browser_wait` 这类旧动作。
 - 需要打开目标 URL 时，走 `browser_open_tab`。
 - 测试和回归场景应优先复用已有测试 tab，传 `tabId + url` 导航，不要大量打开新标签页。
+- 如果 operator goal 已明确给出目标 URL，该 URL 必须进入 `browser_target.url`，并从 URL 派生 `browser_target.host`；目标边界按完整 origin 判断，包含端口，不能用同 hostname 的旧 tab 替代。
+- 招聘网站目标页应尽量独占一个普通 Google Chrome 窗口：先用 `browser_list_tabs` 查找同 origin 目标页；如果已存在目标 tab 但混在其它窗口里，用 `browser_open_tab({ tabId, newWindow: true, active: true })` 把它拆到独立窗口；只有完全没有同 origin 目标页时，才用 `browser_open_tab({ url, newWindow: true, active: true })` 获取初始目标。这里的独立窗口不是独立 Chrome 进程或独立 profile，避免制造同 bundle 多进程导致 VirtualHID 错窗。
+- 在 scene / 招聘网站执行链路里，`browser_open_tab` 只能用于初始目标获取、恢复 scene 目标 URL 或拆窗；进入站内其它路径、点击链接、筛选、提交、下载等阶段推进必须走 `hid_*`，再用 browser 观察确认结果。
+- `browser_reload_extension` 只能在外部维护流程中使用，用来恢复 browser MCP runtime；不能交给 autonomous scene 当成任务内恢复动作，否则会主动打断当前 native-host / socket 链路。
 - 需要真实点击、输入、滚动时，统一走 `hid_*`。
 - 需要截图辅助定位时，可用 `browser_screenshot`，但如果传入 inactive `tabId` 会失败返回；必须先显式 `browser_select_tab` 激活目标页。
 - 下载记录和本地路径定位走 `browser_locate_download` 这类 background/downloads 只读证据，不走页面 JS、mock DOM 标记或 fixture URL 直连。

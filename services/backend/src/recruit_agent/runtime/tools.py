@@ -342,7 +342,7 @@ def build_delegate_scene_context_tool(
                 },
                 "browser_target": {
                     "type": "object",
-                    "description": "Optional top-level shortcut for the browser target; equivalent to environment_requirements.browser_target.",
+                    "description": "Optional top-level shortcut for the browser target; equivalent to environment_requirements.browser_target. When the operator goal or current contract includes an explicit web target URL, preserve it here as browser_target.url and derive host from that URL/browser evidence so stale tabs on a different origin are rejected.",
                 },
                 "computer_target": {
                     "type": "object",

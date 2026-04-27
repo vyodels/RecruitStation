@@ -8,6 +8,9 @@ export interface ApplicationViewModel {
   currentStatus: string;
   currentNode?: StateNode;
   currentStatusLabel: string;
+  displayStatus: string;
+  displayNode?: StateNode;
+  displayStatusLabel: string;
   deepestMilestone?: string | null;
   deepestMilestoneLabel?: string;
   latestActivityAt?: string;
@@ -304,6 +307,45 @@ export function createTransitionMap(stateMachine: RecruitmentStateMachine): Map<
   return map;
 }
 
+function isDisplayableStatusNode(node: StateNode | undefined): node is StateNode {
+  return Boolean(node && node.uiConfig?.showInKanban !== false && !node.isTransient);
+}
+
+export function resolveApplicationDisplayStatus(
+  currentStatus: string,
+  stateMachine: RecruitmentStateMachine,
+  nodeById = createNodeMap(stateMachine),
+  transitionsByFromState = createTransitionMap(stateMachine),
+): string {
+  if (isDisplayableStatusNode(nodeById.get(currentStatus))) {
+    return currentStatus;
+  }
+
+  const visited = new Set<string>([currentStatus]);
+  const queue = [currentStatus];
+
+  while (queue.length) {
+    const status = queue.shift();
+    if (!status) {
+      continue;
+    }
+    for (const transition of transitionsByFromState.get(status) ?? []) {
+      const targetStatus = transition.toState;
+      if (visited.has(targetStatus)) {
+        continue;
+      }
+      visited.add(targetStatus);
+      const targetNode = nodeById.get(targetStatus);
+      if (isDisplayableStatusNode(targetNode)) {
+        return targetStatus;
+      }
+      queue.push(targetStatus);
+    }
+  }
+
+  return currentStatus;
+}
+
 function buildMilestoneReachedAt(application: ApplicationRecord, thread?: ApplicationThreadRecord): Record<string, string> {
   const reachedAt: Record<string, string> = {};
   const transitions = [...(thread?.statusTransitions ?? [])].sort((left, right) => left.createdAt.localeCompare(right.createdAt));
@@ -411,11 +453,19 @@ export function buildApplicationViewModels(
 ): ApplicationViewModel[] {
   const threadByApplicationId = new Map(threads.map((thread) => [thread.application.id, thread]));
   const nodeById = createNodeMap(stateMachine);
+  const transitionsByFromState = createTransitionMap(stateMachine);
 
   return applications.map((application) => {
     const thread = threadByApplicationId.get(application.id);
     const currentStatus = resolveApplicationCurrentStatus(application);
     const currentNode = nodeById.get(currentStatus);
+    const displayStatus = resolveApplicationDisplayStatus(
+      currentStatus,
+      stateMachine,
+      nodeById,
+      transitionsByFromState,
+    );
+    const displayNode = nodeById.get(displayStatus);
     const deepestMilestone = resolveApplicationDeepestMilestone(application, stateMachine, currentNode);
     return {
       application,
@@ -423,10 +473,15 @@ export function buildApplicationViewModels(
       currentStatus,
       currentNode,
       currentStatusLabel: resolveApplicationStatusLabel(currentNode),
+      displayStatus,
+      displayNode,
+      displayStatusLabel: resolveApplicationStatusLabel(displayNode),
       deepestMilestone,
       deepestMilestoneLabel: resolveApplicationMilestoneLabel(deepestMilestone),
       latestActivityAt: resolveLatestActivity(application, thread),
-      humanRequired: currentNode?.executionConfig?.mode === "human_required",
+      humanRequired:
+        currentNode?.executionConfig?.mode === "human_required" ||
+        displayNode?.executionConfig?.mode === "human_required",
       onlineResumeAvailable: application.resumeAvailable || Boolean(application.summary?.trim()),
       offlineResumeAvailable: Boolean(thread?.resumeArtifacts.length),
       contactSummary: resolveContactSummary(application, thread),

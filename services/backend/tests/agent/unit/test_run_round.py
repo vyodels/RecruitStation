@@ -80,6 +80,59 @@ def test_run_round_uses_seed_tool_calls_without_calling_provider() -> None:
     assert outcome.tool_results[0].output == {"echo": "hello"}
 
 
+def test_run_round_merges_goal_url_into_delegate_scene_context_contract() -> None:
+    provider = ScriptedProvider(
+        provider_name="scripted",
+        responses=[
+            LLMResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="scene-1",
+                        name="delegate_scene_context",
+                        arguments={
+                            "instruction": "执行当前招聘目标，但模型漏掉了 browser_target。",
+                            "preferred_capabilities": ["browser", "computer"],
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
+            )
+        ],
+    )
+    captured_arguments: list[dict[str, object]] = []
+    tools = ToolRegistry()
+    tools.register(
+        ToolDefinition(
+            name="delegate_scene_context",
+            description="Delegate scene context.",
+            parameters={"type": "object", "properties": {}, "additionalProperties": True},
+            handler=lambda arguments: captured_arguments.append(dict(arguments)) or {"status": "completed"},
+            metadata={"capabilities": ["scene", "scene_delegate"]},
+        )
+    )
+    kernel = AgentKernel(provider=provider, tool_registry=tools, plugin_host=PluginHost())
+
+    outcome = kernel.run_round(
+        goal=GoalRef(
+            goal_id="goal-1",
+            scope_kind="global",
+            scope_ref="workspace",
+            goal_text="在模拟招聘网站 http://127.0.0.1:64932/jobs 完成候选人发现与简历下载。",
+            constraints={"goal_kind": "candidate_discovery", "context_hints": {}},
+        ),
+        observation=Observation(scope_kind="global", scope_ref="workspace"),
+        limits=RoundLimits(),
+    )
+
+    assert outcome.status == "continue"
+    assert captured_arguments
+    scene_arguments = captured_arguments[0]
+    expected_target = {"host": "127.0.0.1:64932", "url": "http://127.0.0.1:64932/jobs"}
+    assert scene_arguments["browser_target"] == expected_target
+    assert scene_arguments["environment_requirements"]["browser_target"] == expected_target
+    assert scene_arguments["context"]["browser_target"] == expected_target
+
+
 def test_run_round_marks_structured_blocked_final_result_as_escalate() -> None:
     provider = ScriptedProvider(
         provider_name="scripted",

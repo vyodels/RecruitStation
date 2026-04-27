@@ -36,6 +36,7 @@ from recruit_agent.repositories.domain import (
     TaskQueueRepository,
 )
 from recruit_agent.runtime.business_state_projection import project_runtime_business_state
+from recruit_agent.runtime.target_contracts import derive_browser_target
 from recruit_agent.schemas.domain import (
     AgentGlobalMemoryRead,
     ApprovalRead,
@@ -235,6 +236,16 @@ def build_router(container: AppContainer) -> APIRouter:
                 if requested_conversation_id not in {None, "", AUTONOMOUS_PRIMARY_CONVERSATION_ID}
                 else None
             )
+            context_hints = dict(payload.context_hints or {})
+            browser_target = derive_browser_target(
+                existing=context_hints.get("browser_target"),
+                structured_sources=(context_hints, constraints),
+                text_sources=(payload.goal_text, payload.title),
+            )
+            if browser_target:
+                context_hints["browser_target"] = browser_target
+                constraints.setdefault("browser_target", browser_target)
+
             goal = GoalSpec(
                 agent_profile_id=profile.id,
                 title=payload.title,
@@ -246,7 +257,7 @@ def build_router(container: AppContainer) -> APIRouter:
                 requested_by=payload.requested_by,
                 constraints=constraints,
                 success_criteria=dict(payload.success_criteria or {}),
-                context_hints=dict(payload.context_hints or {}),
+                context_hints=context_hints,
                 trial_budget=dict(payload.trial_budget or {}),
                 run_preferences=dict(payload.run_preferences or {}),
                 summary=payload.summary or f"围绕目标“{payload.title}”启动 Autonomous run。",
@@ -277,6 +288,7 @@ def build_router(container: AppContainer) -> APIRouter:
                     "conversation_id": conversation_id,
                     "parent_conversation_id": parent_conversation_id,
                     "goal_id": goal.id,
+                    **({"browser_target": browser_target} if browser_target else {}),
                 },
                 runtime_metadata={
                     "goal_title": payload.title,
@@ -286,6 +298,7 @@ def build_router(container: AppContainer) -> APIRouter:
                     "conversation_id": conversation_id,
                     "parent_conversation_id": parent_conversation_id,
                     "goal_id": goal.id,
+                    **({"browser_target": browser_target} if browser_target else {}),
                 },
                 run_id=uuid4().hex,
                 agent_kind="autonomous",
@@ -824,6 +837,12 @@ def _default_run_envelope(
     goal: Any,
 ) -> dict[str, Any]:
     constraints = dict(getattr(goal, "constraints", {}) or {})
+    context_hints = dict(getattr(goal, "context_hints", {}) or {})
+    browser_target = derive_browser_target(
+        existing=context_hints.get("browser_target") or constraints.get("browser_target") or (run.context_manifest or {}).get("browser_target"),
+        structured_sources=(context_hints, constraints, run.context_manifest, run.runtime_metadata),
+        text_sources=((run.context_manifest or {}).get("goal"), getattr(goal, "goal_text", None), getattr(goal, "title", None)),
+    )
     scope_kind = "job" if run.job_description_id else str(constraints.get("scope_kind") or "global")
     scope_ref = (
         run.job_description_id
@@ -840,10 +859,12 @@ def _default_run_envelope(
             "goal_id": goal.id,
             "goal_title": goal.title,
             "requested_by": goal.requested_by,
+            **({"browser_target": browser_target} if browser_target else {}),
         },
         "metadata": {
             "agent_kind": run.agent_kind,
             "goal_spec_id": goal.id,
+            **({"browser_target": browser_target} if browser_target else {}),
         },
     }
 

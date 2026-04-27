@@ -6,8 +6,9 @@ from typing import Any
 from recruit_agent.kernel.guard import run_preflight
 from recruit_agent.plugins.host import PluginHost
 from recruit_agent.runtime.limits import RoundLimits
-from recruit_agent.runtime.models import CancellationToken, Deliberation, LLMResponse, LLMUsage, Message, Observation, ToolCall, ToolExecutionResult
+from recruit_agent.runtime.models import CancellationToken, Deliberation, GoalRef, LLMResponse, LLMUsage, Message, Observation, ToolCall, ToolExecutionResult
 from recruit_agent.runtime.providers import LLMProvider
+from recruit_agent.runtime.target_contracts import merge_browser_target_into_scene_arguments
 from recruit_agent.runtime.tools import ToolRegistry
 
 
@@ -17,6 +18,7 @@ def deliberate(
     messages: list[Message],
     tool_registry: ToolRegistry,
     observation: Observation,
+    goal: GoalRef | None = None,
     plugin_host: PluginHost | None = None,
     limits: RoundLimits | None = None,
     cancel_token: CancellationToken | None = None,
@@ -87,6 +89,8 @@ def deliberate(
         stop_reason = "cancelled"
     else:
         for call in response.tool_calls[: active_limits.max_tool_roundtrips]:
+            if goal is not None:
+                call.arguments = _normalize_tool_call_arguments(call=call, goal=goal, observation=observation)
             if event_sink is not None:
                 event_sink("tool_call", {"id": call.id, "name": call.name, "arguments": dict(call.arguments or {})})
             if cancel_token is not None and cancel_token.is_cancelled():
@@ -147,6 +151,25 @@ def deliberate(
             "cancelled": bool(cancel_token and cancel_token.cancelled),
             "pending_tool_calls": [call.to_provider_payload() for call in pending_tool_calls],
         },
+    )
+
+
+def _normalize_tool_call_arguments(*, call: ToolCall, goal: GoalRef, observation: Observation) -> dict[str, Any]:
+    if call.name != "delegate_scene_context":
+        return dict(call.arguments or {})
+    context_hints = dict(goal.constraints.get("context_hints") or {})
+    return merge_browser_target_into_scene_arguments(
+        call.arguments,
+        structured_sources=(
+            goal.constraints,
+            context_hints,
+            observation.world_snapshot,
+        ),
+        text_sources=(
+            goal.goal_text,
+            goal.title,
+            observation.world_snapshot.get("goal") if isinstance(observation.world_snapshot, dict) else None,
+        ),
     )
 
 

@@ -951,6 +951,7 @@ class CandidateThreadRead(BaseModel):
     )
     sync_records: list[TalentPoolSyncRecordRead] = Field(default_factory=list, serialization_alias="syncRecords")
     available_statuses: list[str] = Field(default_factory=list, serialization_alias="availableStatuses")
+    available_transitions: list[dict[str, Any]] = Field(default_factory=list, serialization_alias="availableTransitions")
     runtime_approvals: list["ApprovalRead"] = Field(default_factory=list, serialization_alias="runtimeApprovals")
     runtime_interactions: list["OperatorInteractionRead"] = Field(
         default_factory=list,
