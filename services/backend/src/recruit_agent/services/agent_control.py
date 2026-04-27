@@ -23,7 +23,6 @@ class AgentControlService:
         priority: int = 100,
         application_id: str | None = None,
         person_id: str | None = None,
-        candidate_id: str | None = None,
     ) -> str:
         resolved_task_id = task_id or uuid4().hex
         envelope = _build_task_envelope(
@@ -31,7 +30,6 @@ class AgentControlService:
             metadata=metadata,
             application_id=application_id,
             person_id=person_id,
-            candidate_id=candidate_id,
         )
         with self.session_factory() as session:
             TaskQueueRepository(session).enqueue(
@@ -81,7 +79,6 @@ class AgentControlService:
                         metadata=metadata,
                         application_id=resume_task.get("application_id"),
                         person_id=resume_task.get("person_id"),
-                        candidate_id=resume_task.get("candidate_id"),
                     ),
                 )
                 payload_snapshot["resumed_task_id"] = task_id
@@ -105,7 +102,6 @@ def _build_task_envelope(
     metadata: dict[str, Any] | None,
     application_id: str | None,
     person_id: str | None,
-    candidate_id: str | None,
 ) -> dict[str, Any]:
     raw_payload = dict(payload or {}) if isinstance(payload, dict) else {}
     merged_metadata = {
@@ -117,9 +113,6 @@ def _build_task_envelope(
         person_id
         or raw_payload.get("person_id")
         or raw_payload.get("personId")
-        or candidate_id
-        or raw_payload.get("candidate_id")
-        or raw_payload.get("candidateId")
     )
     if any(key in raw_payload for key in ("run_pk", "run_id")):
         envelope = dict(raw_payload)

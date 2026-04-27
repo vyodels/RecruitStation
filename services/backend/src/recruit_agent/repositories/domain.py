@@ -1539,7 +1539,7 @@ class TaskQueueRepository:
         )
         return self.session.scalar(stmt) is not None
 
-    def open_candidate_ids_for_task_types(
+    def open_subject_ids_for_task_types(
         self,
         task_types: list[str],
         *,
@@ -1552,13 +1552,13 @@ class TaskQueueRepository:
             TaskQueueItem.task_type.in_(normalized_types),
             TaskQueueItem.status.in_(statuses),
         )
-        candidate_ids: set[str] = set()
+        subject_ids: set[str] = set()
         for payload in self.session.scalars(stmt).all():
             envelope = dict(payload or {})
-            candidate_id = str(envelope.get("application_id") or envelope.get("candidate_id") or "").strip()
-            if candidate_id:
-                candidate_ids.add(candidate_id)
-        return candidate_ids
+            subject_id = str(envelope.get("application_id") or envelope.get("person_id") or "").strip()
+            if subject_id:
+                subject_ids.add(subject_id)
+        return subject_ids
 
     def claim_next(self, *, locked_by: str = "scheduler") -> TaskQueueItem | None:
         now = utcnow()

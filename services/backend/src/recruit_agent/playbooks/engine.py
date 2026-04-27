@@ -63,7 +63,8 @@ class PlaybookEngine:
             TaskEnvelope(
                 task_id=f"{task.task_id}:{node.node_id}",
                 task_type=node.task_type,
-                candidate_id=task.candidate_id,
+                person_id=task.person_id,
+                application_id=task.application_id,
                 priority=max(task.priority - 1, 1),
                 payload=dict(task.payload),
                 metadata={

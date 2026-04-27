@@ -864,16 +864,10 @@ def _resolve_person_subject(
     candidates: list[Any] = [
         envelope.get("person_id"),
         envelope.get("personId"),
-        envelope.get("candidate_id"),
-        envelope.get("candidateId"),
         metadata.get("person_id"),
         metadata.get("personId"),
-        metadata.get("candidate_id"),
-        metadata.get("candidateId"),
         world_snapshot.get("person_id"),
         world_snapshot.get("personId"),
-        world_snapshot.get("candidate_id"),
-        world_snapshot.get("candidateId"),
         _resolve_run_person_id(run),
     ]
     if goal is not None:
@@ -881,12 +875,8 @@ def _resolve_person_subject(
             [
                 (goal.constraints or {}).get("person_id"),
                 (goal.constraints or {}).get("personId"),
-                (goal.constraints or {}).get("candidate_id"),
-                (goal.constraints or {}).get("candidateId"),
                 (goal.context_hints or {}).get("person_id"),
                 (goal.context_hints or {}).get("personId"),
-                (goal.context_hints or {}).get("candidate_id"),
-                (goal.context_hints or {}).get("candidateId"),
                 (goal.goal_metadata or {}).get("person_id"),
                 (goal.goal_metadata or {}).get("personId"),
             ]

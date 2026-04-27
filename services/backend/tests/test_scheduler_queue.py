@@ -15,6 +15,7 @@ if str(SRC) not in sys.path:
 from recruit_agent.core.settings import AppSettings
 from recruit_agent.db.session import create_engine_from_settings, create_session_factory, initialize_database
 from recruit_agent.models import SyncBacklogEntry, TaskQueueItem
+from recruit_agent.repositories.domain import TaskQueueRepository
 from recruit_agent.scheduler.queue import InMemoryQueue, SqlAlchemyQueue, TaskEnvelope
 from recruit_agent.scheduler.scheduler import SerialScheduler
 from recruit_agent.runtime.models import AgentResult
@@ -46,8 +47,8 @@ class QueueTests(unittest.TestCase):
             session_factory = create_session_factory(engine)
             queue = SqlAlchemyQueue(session_factory)
 
-            queue.put(TaskEnvelope(task_id="low", task_type="screen", priority=1, candidate_id="cand-low"))
-            queue.put(TaskEnvelope(task_id="high", task_type="screen", priority=10, candidate_id="cand-high"))
+            queue.put(TaskEnvelope(task_id="low", task_type="screen", priority=1, person_id="person-low"))
+            queue.put(TaskEnvelope(task_id="high", task_type="screen", priority=10, person_id="person-high"))
 
             self.assertEqual(queue.size(), 2)
             self.assertEqual(queue.peek().task_id, "high")
@@ -55,7 +56,7 @@ class QueueTests(unittest.TestCase):
             claimed = queue.get()
             self.assertIsNotNone(claimed)
             self.assertEqual(claimed.task_id, "high")
-            self.assertEqual(claimed.candidate_id, "cand-high")
+            self.assertEqual(claimed.person_id, "person-high")
             self.assertEqual(queue.size(), 1)
 
             queue.mark_complete(claimed.task_id)
@@ -78,7 +79,7 @@ class QueueTests(unittest.TestCase):
                     task_type="screen",
                     priority=10,
                     application_id="app-001",
-                    candidate_id="person-001",
+                    person_id="person-001",
                 )
             )
 
@@ -86,9 +87,9 @@ class QueueTests(unittest.TestCase):
 
             self.assertIsNotNone(claimed)
             self.assertEqual(claimed.application_id, "app-001")
-            self.assertEqual(claimed.candidate_id, "person-001")
+            self.assertEqual(claimed.person_id, "person-001")
 
-    def test_sqlalchemy_queue_does_not_backfill_application_from_candidate(self) -> None:
+    def test_sqlalchemy_queue_does_not_backfill_application_from_person(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             settings = AppSettings(
                 data_dir=tempdir,
@@ -99,13 +100,33 @@ class QueueTests(unittest.TestCase):
             session_factory = create_session_factory(engine)
             queue = SqlAlchemyQueue(session_factory)
 
-            queue.put(TaskEnvelope(task_id="person-only", task_type="screen", priority=10, candidate_id="person-001"))
+            queue.put(TaskEnvelope(task_id="person-only", task_type="screen", priority=10, person_id="person-001"))
 
             claimed = queue.get()
 
             self.assertIsNotNone(claimed)
             self.assertIsNone(claimed.application_id)
-            self.assertEqual(claimed.candidate_id, "person-001")
+            self.assertEqual(claimed.person_id, "person-001")
+
+    def test_task_queue_repository_lists_open_subject_ids_from_current_scope_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            settings = AppSettings(
+                data_dir=tempdir,
+                database_url="sqlite:///./queue-subjects.db",
+            )
+            engine = create_engine_from_settings(settings)
+            initialize_database(engine)
+            session_factory = create_session_factory(engine)
+            queue = SqlAlchemyQueue(session_factory)
+
+            queue.put(TaskEnvelope(task_id="application-scope", task_type="screen", priority=10, application_id="app-001"))
+            queue.put(TaskEnvelope(task_id="person-scope", task_type="screen", priority=9, person_id="person-001"))
+            queue.put(TaskEnvelope(task_id="unscoped", task_type="screen", priority=8))
+
+            with session_factory() as session:
+                subject_ids = TaskQueueRepository(session).open_subject_ids_for_task_types(["screen"])
+
+            self.assertEqual(subject_ids, {"app-001", "person-001"})
 
     def test_agent_control_enqueue_task_surfaces_application_id_in_run_envelope(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
