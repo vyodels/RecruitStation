@@ -110,19 +110,6 @@ export function jdStatusLabel(bucket: JdStatusBucket): string {
   }
 }
 
-function statusRank(bucket: JdStatusBucket): number {
-  switch (bucket) {
-    case "recruiting":
-      return 0;
-    case "paused":
-      return 1;
-    case "closed":
-      return 2;
-    default:
-      return 3;
-  }
-}
-
 function applicationBelongsToJob(application: ApplicationViewModel, job: JobDescriptionSummaryRecord): boolean {
   const applicationJobId = application.application.jobDescriptionId || application.application.jobDescription.jobDescriptionId;
   if (job.jobDescriptionId && applicationJobId) {
@@ -266,11 +253,7 @@ export function buildJdManagementModel(
       funnelSteps: buildFunnelSteps(stats),
       recentApplications: buildRecentApplications(relatedApplications),
     } satisfies JdManagementRow;
-  }).sort((left, right) => (
-    statusRank(left.statusBucket) - statusRank(right.statusBucket) ||
-    (right.currentApplicants ?? -1) - (left.currentApplicants ?? -1) ||
-    left.job.title.localeCompare(right.job.title, "zh-CN")
-  ));
+  });
 
   return {
     rows,

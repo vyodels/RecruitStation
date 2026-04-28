@@ -3,7 +3,7 @@ import type {
   ApplicationTransitionPayload,
   RecruitmentStateMachine,
 } from "@recruit-agent/shared";
-import { AppLayout, Sidebar, TopBar } from "../../components";
+import { AppLayout, Sidebar, ToastNotification, TopBar } from "../../components";
 import { ChatOverlay, FloatingBubble, useChatOverlay } from "../chat-overlay";
 import { apiClient } from "../../lib/api";
 import { useI18n } from "../../lib/i18n";
@@ -87,6 +87,7 @@ export function DesktopWorkspace(): JSX.Element {
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [transport, setTransport] = useState(apiClient.describe().transport);
   const [errorMessage, setErrorMessage] = useState<string>();
+  const [dismissedErrorMessage, setDismissedErrorMessage] = useState<string>();
   const [candidateWorkspaceFocus, setCandidateWorkspaceFocus] = useState<{
     applicationId?: string;
     conversationToken: number;
@@ -113,6 +114,7 @@ export function DesktopWorkspace(): JSX.Element {
       });
       setTransport("http");
       setErrorMessage(undefined);
+      setDismissedErrorMessage(undefined);
     } catch (error) {
       const backendReachable = await apiClient.checkHealth();
       setTransport(backendReachable ? "http" : "offline");
@@ -455,6 +457,7 @@ export function DesktopWorkspace(): JSX.Element {
   })();
   const applicationSurface =
     tab === "applicationFunnel" || tab === "applicationFollowUp" || tab === "jdManagement";
+  const visibleErrorMessage = errorMessage && errorMessage !== dismissedErrorMessage ? errorMessage : undefined;
 
   return (
     <>
@@ -486,23 +489,16 @@ export function DesktopWorkspace(): JSX.Element {
           />
         }
       >
-        {errorMessage ? (
-          <div
-            style={{
-              borderRadius: "var(--radius-md)",
-              border: "1px solid var(--danger)",
-              background: "var(--danger-soft)",
-              color: "var(--danger)",
-              padding: "var(--space-3) var(--space-4)",
-              fontSize: "var(--font-size-sm)",
-              lineHeight: "var(--line-height-base)",
-            }}
-          >
-            {errorMessage}
-          </div>
-        ) : null}
         {content}
       </AppLayout>
+
+      {visibleErrorMessage ? (
+        <ToastNotification
+          title={copy("Workspace refresh failed", "工作区刷新失败")}
+          message={visibleErrorMessage}
+          onClose={() => setDismissedErrorMessage(visibleErrorMessage)}
+        />
+      ) : null}
 
       {tab === "jdManagement" ? null : (
         <FloatingBubble

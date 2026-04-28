@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from "react";
 import type { ApplicationTransitionPayload, HumanActionDefinition, RecruitmentStateMachine } from "@recruit-agent/shared";
-import { StatusBadge } from "../../components";
+import { StatusBadge, ToolbarInput, ToolbarRefreshButton } from "../../components";
 import { formatCompactDate } from "../../lib/format";
 import { useI18n } from "../../lib/i18n";
 import { ChatInputArea } from "./ChatInputArea";
@@ -108,7 +108,7 @@ export function CandidateCommunicationPanel({
       <section className="candidate-communication-panel">
         <aside className="candidate-communication-panel__rail">
           <div className="candidate-communication-panel__search">
-            <input
+            <ToolbarInput
               className="candidate-communication-panel__search-input"
               value={search}
               onChange={(event) => setSearch(event.target.value)}
@@ -151,10 +151,11 @@ export function CandidateCommunicationPanel({
                 {selectedRecord.latestActivityAt ? formatCompactDate(selectedRecord.latestActivityAt) : "—"}
               </span>
             </div>
-            <button
-              type="button"
-              className="candidate-communication-panel__refresh"
-              disabled={refreshing}
+            <ToolbarRefreshButton
+              refreshing={refreshing}
+              disabled={!onRefresh}
+              label={copy("Refresh", "刷新")}
+              refreshingLabel={copy("Refreshing...", "刷新中...")}
               onClick={async () => {
                 if (!onRefresh) {
                   return;
@@ -166,9 +167,7 @@ export function CandidateCommunicationPanel({
                   setRefreshing(false);
                 }
               }}
-            >
-              ↺
-            </button>
+            />
           </header>
 
           <div className="candidate-communication-panel__feed">

@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { funnelMilestones } from "@recruit-agent/shared";
 import type { ApplicationTransitionPayload, RecruitmentStateMachine } from "@recruit-agent/shared";
+import { ToolbarField, ToolbarSelect } from "../../components";
 import { CandidateTable } from "../kanban-shared/CandidateTable";
 import { CandidateCommunicationPanel } from "../kanban-shared/CandidateCommunicationPanel";
 import {
@@ -180,17 +181,16 @@ export function FunnelKanbanView({
         </div>
 
         <div className="application-funnel-sidebar__filters">
-          <label className="kanban-filter">
-            <span className="kanban-filter__label">{copy("Role", "岗位")}</span>
-            <select value={jobFilter} onChange={(event) => setJobFilter(event.target.value)} className="kanban-filter__select">
+          <ToolbarField label={copy("Role", "岗位")}>
+            <ToolbarSelect value={jobFilter} onChange={(event) => setJobFilter(event.target.value)}>
               <option value="all">{copy("All roles", "全部")}</option>
               {jobOptions.map((jobTitle) => (
                 <option key={jobTitle} value={jobTitle}>
                   {jobTitle}
                 </option>
               ))}
-            </select>
-          </label>
+            </ToolbarSelect>
+          </ToolbarField>
           <CandidateDateRangeControl value={dateRange} onChange={setDateRange} />
         </div>
 

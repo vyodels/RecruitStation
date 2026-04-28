@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { useI18n } from "../lib/i18n";
 import type { SettingsSnapshot } from "../lib/types";
 import { StatusBadge } from "./StatusBadge";
+import { ToolbarRefreshButton } from "./ToolbarControls";
 
 interface TopBarProps {
   settings: SettingsSnapshot;
@@ -75,9 +76,12 @@ export function TopBar({
           })}
         </div>
 
-        <button type="button" className="workspace-topbar__button" onClick={onRefresh} disabled={refreshing}>
-          {refreshing ? copy("Refreshing...", "刷新中...") : copy("Refresh", "刷新")}
-        </button>
+        <ToolbarRefreshButton
+          onClick={onRefresh}
+          refreshing={refreshing}
+          label={copy("Refresh", "刷新")}
+          refreshingLabel={copy("Refreshing...", "刷新中...")}
+        />
       </div>
     </header>
   );

@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import type { ApplicationTransitionPayload, RecruitmentStateMachine, StateNode } from "@recruit-agent/shared";
+import { ToolbarField, ToolbarInput, ToolbarRefreshButton, ToolbarSelect } from "../../components";
 import {
   CandidateDateRangeControl,
   createApplicationDateRangeState,
@@ -297,20 +298,18 @@ export function StatusKanbanView({
   return (
     <div className="application-followup-page">
       <div className="application-followup-toolbar">
-        <label>
-          <span>{copy("Role", "岗位")}</span>
-          <select value={jobFilter} onChange={(event) => setJobFilter(event.target.value)}>
+        <ToolbarField label={copy("Role", "岗位")}>
+          <ToolbarSelect value={jobFilter} onChange={(event) => setJobFilter(event.target.value)}>
             <option value="all">{copy("All roles", "全部")}</option>
             {jobOptions.map((jobTitle) => (
               <option key={jobTitle} value={jobTitle}>
                 {jobTitle}
               </option>
             ))}
-          </select>
-        </label>
-        <label>
-          <span>{copy("Status filter", "状态筛选")}</span>
-          <select value={statusFilter} onChange={(event) => {
+          </ToolbarSelect>
+        </ToolbarField>
+        <ToolbarField label={copy("Status filter", "状态筛选")}>
+          <ToolbarSelect value={statusFilter} onChange={(event) => {
             setStatusFilter(event.target.value as ApplicationFollowUpSummaryDefinition["key"]);
             setSelectedStatus("all");
           }}>
@@ -319,12 +318,11 @@ export function StatusKanbanView({
                 {option.key === "all" ? copy("All", "全部") : option.label} · {option.count}
               </option>
             ))}
-          </select>
-        </label>
+          </ToolbarSelect>
+        </ToolbarField>
         <CandidateDateRangeControl value={dateRange} onChange={setDateRange} />
-        <label>
-          <span>{copy("Status view", "状态视图")}</span>
-          <select value={selectedStatus} onChange={(event) => setSelectedStatus(event.target.value)}>
+        <ToolbarField label={copy("Status view", "状态视图")}>
+          <ToolbarSelect value={selectedStatus} onChange={(event) => setSelectedStatus(event.target.value)}>
             <option value="all">{copy("Main flow", "主流程")}</option>
             {stateMachine.nodes
               .filter((node) => node.uiConfig?.showInKanban !== false && !node.isTransient)
@@ -333,17 +331,21 @@ export function StatusKanbanView({
                   {applicationStatusLabel(node.label)}
                 </option>
               ))}
-          </select>
-        </label>
-        <label className="application-followup-toolbar__search">
-          <span>{copy("Search", "搜索")}</span>
-          <input
+          </ToolbarSelect>
+        </ToolbarField>
+        <ToolbarField label={copy("Search", "搜索")} className="application-followup-toolbar__search">
+          <ToolbarInput
             value={topSearch}
             onChange={(event) => setTopSearch(event.target.value)}
             placeholder={copy("Application / name / phone / email", "搜索投递记录 / 姓名 / 手机号 / 邮箱")}
           />
-        </label>
-        <button type="button" onClick={() => void onRefresh?.()}>{copy("Refresh", "刷新")}</button>
+        </ToolbarField>
+        <ToolbarRefreshButton
+          onClick={() => void onRefresh?.()}
+          disabled={!onRefresh}
+          label={copy("Refresh", "刷新")}
+          refreshingLabel={copy("Refreshing...", "刷新中...")}
+        />
       </div>
 
       <div

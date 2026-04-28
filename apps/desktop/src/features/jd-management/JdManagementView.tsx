@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
+import { ToolbarButton, ToolbarField, ToolbarInput, ToolbarRefreshButton, ToolbarSelect } from "../../components";
 import type { ApplicationViewModel } from "../kanban-shared/kanbanUtils";
 import { apiClient } from "../../lib/api";
 import { formatDateTime } from "../../lib/format";
@@ -109,6 +110,27 @@ function rowMatchesKeyword(row: JdManagementRow, keyword: string): boolean {
     row.ownerName,
     row.job.companyName,
   ].join(" ").toLowerCase().includes(query);
+}
+
+function rowMatchesApplicantKeyword(row: JdManagementRow, keyword: string): boolean {
+  const query = keyword.trim().toLowerCase();
+  if (!query) {
+    return true;
+  }
+  return row.applications.some((item) => {
+    const person = item.application.person;
+    const contactInfo = asObject(person.contactInfo);
+    const contactSnapshot = asObject(item.application.contactSnapshot);
+    return [
+      person.name,
+      contactInfo.phone,
+      contactInfo.mobile,
+      contactInfo.email,
+      contactSnapshot.phone,
+      contactSnapshot.mobile,
+      contactSnapshot.email,
+    ].join(" ").toLowerCase().includes(query);
+  });
 }
 
 function makeFormState(job: JobDescriptionSummaryRecord): JdFormState {
@@ -569,11 +591,11 @@ export function JdManagementView({
   jobDescriptions,
   onRefresh,
 }: JdManagementViewProps): JSX.Element {
-  const [serverJobs, setServerJobs] = useState<JobDescriptionSummaryRecord[]>(jobDescriptions);
-  const [serverTotal, setServerTotal] = useState(jobDescriptions.length);
+  const [serverJobs, setServerJobs] = useState<JobDescriptionSummaryRecord[]>([]);
+  const [serverTotal, setServerTotal] = useState(0);
   const [kpiTotals, setKpiTotals] = useState<JdManagementStats | null>(null);
   const [funnelStatsByJobId, setFunnelStatsByJobId] = useState<Record<string, JobDescriptionFunnelStatsRecord>>({});
-  const [serverLoading, setServerLoading] = useState(false);
+  const [serverLoading, setServerLoading] = useState(true);
   const [serverError, setServerError] = useState<string | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
   const [statusFilter, setStatusFilter] = useState<"all" | JdStatusBucket>("all");
@@ -581,6 +603,7 @@ export function JdManagementView({
   const [departmentFilter, setDepartmentFilter] = useState("all");
   const [ownerFilter, setOwnerFilter] = useState("all");
   const [keyword, setKeyword] = useState("");
+  const [applicantKeyword, setApplicantKeyword] = useState("");
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [drawerRow, setDrawerRow] = useState<JdManagementRow | null>(null);
   const [creating, setCreating] = useState(false);
@@ -604,9 +627,10 @@ export function JdManagementView({
       (cityFilter === "all" || row.job.location === cityFilter) &&
       (departmentFilter === "all" || row.job.department === departmentFilter) &&
       (ownerFilter === "all" || getOwnerDisplay(row) === ownerFilter) &&
-      rowMatchesKeyword(row, keyword)
+      rowMatchesKeyword(row, keyword) &&
+      rowMatchesApplicantKeyword(row, applicantKeyword)
     )),
-    [cityFilter, departmentFilter, keyword, model.rows, ownerFilter, statusFilter],
+    [applicantKeyword, cityFilter, departmentFilter, keyword, model.rows, ownerFilter, statusFilter],
   );
   const pageCount = Math.max(1, Math.ceil(serverTotal / pageSize));
   const currentPage = clampPage(page, pageCount);
@@ -623,7 +647,7 @@ export function JdManagementView({
 
   useEffect(() => {
     setPage(1);
-  }, [cityFilter, departmentFilter, keyword, ownerFilter, pageSize, statusFilter]);
+  }, [applicantKeyword, cityFilter, departmentFilter, keyword, ownerFilter, pageSize, statusFilter]);
 
   useEffect(() => {
     setPage((current) => clampPage(current, pageCount));
@@ -786,71 +810,52 @@ export function JdManagementView({
   return (
     <section className="jd-management-page">
       <main className="jd-management-workspace">
-        <header className="jd-management-titlebar">
-          <div className="jd-management-titlebar__main">
-            <h1>职位管理</h1>
-          </div>
-          <div className="jd-management-titlebar__actions">
-            <input className="jd-management-global-search" placeholder="搜索候选人姓名/手机号" />
-            <span className="jd-management-user-avatar" aria-label="当前用户">{getOwnerInitial(selectedRow)}</span>
-            <span className="jd-management-user-name">
-              {selectedRow ? getOwnerDisplay(selectedRow) : "—"}
-            </span>
-          </div>
-        </header>
-
         <div className="jd-management-filterbar">
           <div className="jd-management-filterbar__group">
-            <label className="jd-management-filter">
-              岗位状态
-              <select className="jd-management-select" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as "all" | JdStatusBucket)}>
+            <ToolbarField label="岗位状态">
+              <ToolbarSelect value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as "all" | JdStatusBucket)}>
                 <option value="all">全部</option>
                 <option value="recruiting">招聘中</option>
                 <option value="paused">暂停中</option>
                 <option value="closed">已关闭</option>
-              </select>
-            </label>
-            <label className="jd-management-filter">
-              城市
-              <select className="jd-management-select" value={cityFilter} onChange={(event) => setCityFilter(event.target.value)}>
+              </ToolbarSelect>
+            </ToolbarField>
+            <ToolbarField label="城市">
+              <ToolbarSelect value={cityFilter} onChange={(event) => setCityFilter(event.target.value)}>
                 <option value="all">全部</option>
                 {cityOptions.map((city) => <option key={city} value={city}>{city}</option>)}
-              </select>
-            </label>
-            <label className="jd-management-filter">
-              用人部门
-              <select className="jd-management-select" value={departmentFilter} onChange={(event) => setDepartmentFilter(event.target.value)}>
+              </ToolbarSelect>
+            </ToolbarField>
+            <ToolbarField label="用人部门">
+              <ToolbarSelect value={departmentFilter} onChange={(event) => setDepartmentFilter(event.target.value)}>
                 <option value="all">全部</option>
                 {departmentOptions.map((department) => <option key={department} value={department}>{department}</option>)}
-              </select>
-            </label>
-            <label className="jd-management-filter">
-              招聘负责人
-              <select className="jd-management-select" value={ownerFilter} onChange={(event) => setOwnerFilter(event.target.value)}>
+              </ToolbarSelect>
+            </ToolbarField>
+            <ToolbarField label="招聘负责人">
+              <ToolbarSelect value={ownerFilter} onChange={(event) => setOwnerFilter(event.target.value)}>
                 <option value="all">全部</option>
                 {ownerOptions.map((owner) => <option key={owner} value={owner}>{owner}</option>)}
-              </select>
-            </label>
+              </ToolbarSelect>
+            </ToolbarField>
           </div>
-          <div className="jd-management-filterbar__group">
-            <input
-              className="jd-management-input"
-              value={keyword}
-              onChange={(event) => setKeyword(event.target.value)}
-              placeholder="搜索职位名称 / JD名称 / 职位ID"
-            />
-            <button type="button" className="jd-management-button jd-management-button--primary" onClick={() => {
-              setCreating(true);
-              setDrawerRow(null);
-            }}>
-              + 新建职位
-            </button>
-            <button type="button" className="jd-management-button" onClick={() => {
-              void onRefresh();
-              setReloadToken((value) => value + 1);
-            }}>
-              刷新
-            </button>
+          <div className="jd-management-filterbar__group jd-management-filterbar__group--search">
+            <ToolbarField label="职位搜索">
+              <ToolbarInput
+                className="jd-management-toolbar-input"
+                value={keyword}
+                onChange={(event) => setKeyword(event.target.value)}
+                placeholder="职位名称 / JD名称 / 职位ID"
+              />
+            </ToolbarField>
+            <ToolbarField label="投递人搜索">
+              <ToolbarInput
+                className="jd-management-toolbar-input jd-management-toolbar-input--applicant"
+                value={applicantKeyword}
+                onChange={(event) => setApplicantKeyword(event.target.value)}
+                placeholder="姓名 / 手机号"
+              />
+            </ToolbarField>
           </div>
         </div>
 
@@ -866,7 +871,6 @@ export function JdManagementView({
             <table className="jd-management-table">
               <thead>
                 <tr>
-                  <th><input className="jd-management-checkbox" type="checkbox" aria-label="全选职位" /></th>
                   <th>职位名称</th>
                   <th>城市</th>
                   <th>部门</th>
@@ -883,17 +887,16 @@ export function JdManagementView({
               <tbody>
                 {serverError ? (
                   <tr>
-                    <td colSpan={12} className="jd-management-table__empty">{serverError}</td>
+                    <td colSpan={11} className="jd-management-table__empty">{serverError}</td>
                   </tr>
                 ) : null}
                 {!serverError && !paginatedRows.length ? (
                   <tr>
-                    <td colSpan={12} className="jd-management-table__empty">{serverLoading ? "加载中" : "暂无职位"}</td>
+                    <td colSpan={11} className="jd-management-table__empty">{serverLoading ? "加载中" : "暂无职位"}</td>
                   </tr>
                 ) : null}
                 {paginatedRows.map((row) => (
                   <tr key={row.key} data-active={selectedRow?.key === row.key ? "true" : undefined} onClick={() => setSelectedKey(row.key)}>
-                    <td><input className="jd-management-checkbox" type="checkbox" checked={selectedRow?.key === row.key} readOnly aria-label={`选择 ${row.job.title}`} /></td>
                     <td>
                       <span className="jd-management-role-cell">
                         <strong>{row.job.title}</strong>
@@ -974,7 +977,25 @@ export function JdManagementView({
         </footer>
       </main>
 
-      <JdDetailCard row={selectedRow} onOpenDrawer={(row) => void openDrawer(row)} />
+      <div className="jd-management-side-rail">
+        <div className="jd-management-side-actions">
+          <ToolbarButton variant="primary" onClick={() => {
+            setCreating(true);
+            setDrawerRow(null);
+          }}>
+            + 新建职位
+          </ToolbarButton>
+          <ToolbarRefreshButton
+            onClick={() => {
+              void onRefresh();
+              setReloadToken((value) => value + 1);
+            }}
+            label="刷新"
+            refreshingLabel="刷新中"
+          />
+        </div>
+        <JdDetailCard row={selectedRow} onOpenDrawer={(row) => void openDrawer(row)} />
+      </div>
 
       {(drawerRow || creating) ? (
         <JdFullDrawer

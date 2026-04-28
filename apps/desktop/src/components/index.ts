@@ -6,5 +6,7 @@ export * from "./SectionTabs";
 export * from "./Sidebar";
 export * from "./StatusBadge";
 export * from "./Timeline";
+export * from "./ToastNotification";
+export * from "./ToolbarControls";
 export * from "./TopBar";
 export * from "./TopTabPage";

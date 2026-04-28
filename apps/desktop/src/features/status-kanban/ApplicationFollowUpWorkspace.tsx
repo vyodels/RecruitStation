@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import type { ApplicationTransitionPayload, HumanActionDefinition, RecruitmentStateMachine } from "@recruit-agent/shared";
-import { StatusBadge } from "../../components";
+import { StatusBadge, ToolbarInput, ToolbarRefreshButton, ToolbarSelect } from "../../components";
 import { apiClient } from "../../lib/api";
 import { formatChineseMessageTime, formatCompactDate } from "../../lib/format";
 import { useI18n } from "../../lib/i18n";
@@ -541,7 +541,7 @@ export function ApplicationFollowUpWorkspace({
 
         <div className="application-followup-records__title-row">
           <strong>{copy("In follow-up", "沟通中")} ({filteredApplications.length})</strong>
-          <select
+          <ToolbarSelect
             value={sidebarStatusFilter}
             onChange={(event) => setSidebarStatusFilter(event.target.value as SidebarStatusFilter)}
             aria-label={copy("Record filter", "投递记录筛选")}
@@ -550,11 +550,11 @@ export function ApplicationFollowUpWorkspace({
             {sidebarStatusOptions.map(([status, label]) => (
               <option key={status} value={status}>{label}</option>
             ))}
-          </select>
+          </ToolbarSelect>
         </div>
 
         <label className="application-followup-records__search">
-          <input
+          <ToolbarInput
             value={sidebarSearch}
             onChange={(event) => setSidebarSearch(event.target.value)}
             aria-label={copy("Search application", "搜索投递记录")}
@@ -921,9 +921,12 @@ export function ApplicationFollowUpWorkspace({
                 );
               })}
               <button type="button" onClick={() => setOverrideOpen(true)}>{copy("Manual override", "人工修改状态")}</button>
-              <button type="button" disabled={refreshing} onClick={() => void refresh()}>
-                {refreshing ? copy("Refreshing...", "刷新中...") : copy("Refresh", "刷新")}
-              </button>
+              <ToolbarRefreshButton
+                onClick={() => void refresh()}
+                refreshing={refreshing}
+                label={copy("Refresh", "刷新")}
+                refreshingLabel={copy("Refreshing...", "刷新中...")}
+              />
             </div>
           </FollowUpCollapsiblePanel>
         </div>

@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { ToolbarField, ToolbarSelect } from "../../components";
 import { useI18n } from "../../lib/i18n";
 import type { ApplicationDateFilter } from "./kanbanUtils";
 
@@ -284,9 +285,8 @@ export function CandidateDateRangeControl({ value, onChange }: CandidateDateRang
 
   return (
     <div className="candidate-date-range" ref={rootRef}>
-      <label className="kanban-filter">
-        <span className="kanban-filter__label">{copy("Time", "时间")}</span>
-        <select
+      <ToolbarField label={copy("Time", "时间")}>
+        <ToolbarSelect
           value={value.preset}
           onChange={(event) => {
             const nextPreset = event.target.value as ApplicationDatePreset;
@@ -301,7 +301,6 @@ export function CandidateDateRangeControl({ value, onChange }: CandidateDateRang
               endDate: "",
             });
           }}
-          className="kanban-filter__select"
         >
           <option value="all">{copy("All", "全部")}</option>
           <option value="manual">{copy("Custom", "自定义")}</option>
@@ -310,10 +309,10 @@ export function CandidateDateRangeControl({ value, onChange }: CandidateDateRang
           <option value="lastMonth">{copy("Last month", "最近一个月")}</option>
           <option value="lastQuarter">{copy("Last quarter", "最近三个月")}</option>
           <option value="lastYear">{copy("Last year", "最近一年")}</option>
-        </select>
-      </label>
+        </ToolbarSelect>
+      </ToolbarField>
 
-      <button type="button" className="candidate-date-range__trigger" onClick={openManualPicker}>
+      <button type="button" className="candidate-date-range__trigger toolbar-input" onClick={openManualPicker}>
         <span className="candidate-date-range__field">
           <span className="candidate-date-range__field-label">{copy("Start", "开始")}</span>
           <span className="candidate-date-range__field-value">{displayedStart}</span>
