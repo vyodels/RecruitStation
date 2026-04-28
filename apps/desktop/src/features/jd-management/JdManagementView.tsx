@@ -172,6 +172,14 @@ function getDemoOwner(row: JdManagementRow): string {
   return row.ownerName === "—" ? "未设置" : row.ownerName;
 }
 
+function getOwnerInitial(row: JdManagementRow | null): string {
+  if (!row) {
+    return "招";
+  }
+  const owner = getDemoOwner(row);
+  return owner && owner !== "未设置" ? owner.slice(0, 1) : "招";
+}
+
 function JdStatusPill({ status }: { status: JdStatusBucket }): JSX.Element {
   return (
     <span className="jd-management-status" data-tone={statusTone(status)}>
@@ -186,16 +194,18 @@ function JdStatCard({
   caption,
   ratio,
   tone = "positive",
+  icon,
 }: {
   label: string;
   value: number;
   caption: string;
   ratio?: string;
   tone?: "positive" | "warning" | "neutral";
+  icon: "briefcase" | "cap" | "pause" | "closed";
 }): JSX.Element {
   return (
     <div className="jd-management-kpi" data-tone={tone}>
-      <span className="jd-management-kpi__icon" aria-hidden="true">{tone === "warning" ? "⏸" : tone === "neutral" ? "●" : "▣"}</span>
+      <span className="jd-management-kpi__icon" data-icon={icon} aria-hidden="true" />
       <div className="jd-management-kpi__body">
         <span className="jd-management-kpi__label">{label}</span>
         <strong className="jd-management-kpi__value">{value}</strong>
@@ -224,6 +234,7 @@ function JdDetailCard({
   const job = row.job;
   const trendCount = getJdMetadataNumber(job, ["trendCount", "trend_count"], row.currentApplicants);
   const trendRate = getJdMetadataString(job, ["trendRate", "trend_rate"], row.currentApplicants ? "+4.2%" : "0%");
+  const recommendedBy = getJdMetadataString(job, ["recommendedBy", "recommended_by", "sourceName"], "Agent 推荐");
   const focus = getJdMetadataString(
     job,
     ["focus", "focusText", "focus_text", "keyFocus"],
@@ -234,9 +245,12 @@ function JdDetailCard({
     <aside className="jd-management-detail">
       <header className="jd-management-detail__header">
         <div className="jd-management-detail__head">
-          <strong className="jd-management-detail__title">{job.title}</strong>
+          <div className="jd-management-detail__title-row">
+            <strong className="jd-management-detail__title">{job.title}</strong>
+            <JdStatusPill status={row.statusBucket} />
+          </div>
           <span className="jd-management-detail__subtitle">{job.jobDescriptionId || "—"}</span>
-          <JdStatusPill status={row.statusBucket} />
+          <span className="jd-management-agent-badge">{recommendedBy}</span>
         </div>
         <button type="button" className="jd-management-link-button" onClick={() => onOpenDrawer(row)}>
           查看完整 JD
@@ -252,7 +266,10 @@ function JdDetailCard({
           <span className="jd-management-detail__label">部门</span>
           <span className="jd-management-detail__value">{job.department || "—"}</span>
           <span className="jd-management-detail__label">负责人</span>
-          <span className="jd-management-detail__value">{getDemoOwner(row)}</span>
+          <span className="jd-management-owner-line">
+            <span className="jd-management-avatar jd-management-avatar--sm">{getOwnerInitial(row)}</span>
+            <span>{getDemoOwner(row)}</span>
+          </span>
           <span className="jd-management-detail__label">招聘目标</span>
           <span className="jd-management-detail__value">{job.headcount != null ? `${job.headcount} 人` : "—"}</span>
           <span className="jd-management-detail__label">发布时间</span>
@@ -269,7 +286,7 @@ function JdDetailCard({
           </section>
         ) : null}
 
-        <section className="jd-management-drawer__card">
+        <section className="jd-management-panel-card">
           <strong className="jd-management-drawer__section-title">招聘进展</strong>
           <div className="jd-management-funnel">
             {row.funnelSteps.map((step) => (
@@ -282,7 +299,7 @@ function JdDetailCard({
           </div>
         </section>
 
-        <section className="jd-management-drawer__card">
+        <section className="jd-management-panel-card">
           <div className="jd-management-titlebar__actions">
             <strong className="jd-management-drawer__section-title">近期候选人</strong>
             <button type="button" className="jd-management-link-button">查看全部</button>
@@ -303,13 +320,13 @@ function JdDetailCard({
           </div>
         </section>
 
-        <section className="jd-management-drawer__card">
+        <section className="jd-management-panel-card">
           <strong className="jd-management-drawer__section-title">当前转化概览</strong>
           <div className="jd-management-detail__meta-grid">
             <span className="jd-management-detail__label">投递量</span>
             <span className="jd-management-detail__value">{trendCount}</span>
             <span className="jd-management-detail__label">沟通率</span>
-            <span className="jd-management-detail__value">{percentOf(row.funnelSteps[1]?.value ?? 0, row.currentApplicants)} · {trendRate}</span>
+            <span className="jd-management-detail__value">{percentOf(row.communicating, row.currentApplicants)} · {trendRate}</span>
             <span className="jd-management-detail__label">面试率</span>
             <span className="jd-management-detail__value">{percentOf(row.interviewing, row.currentApplicants)}</span>
             <span className="jd-management-detail__label">Offer率</span>
@@ -317,12 +334,12 @@ function JdDetailCard({
           </div>
         </section>
 
-        <section className="jd-management-drawer__card">
+        <section className="jd-management-panel-card">
           <strong className="jd-management-drawer__section-title">关键要点</strong>
           <p className="jd-management-summary-text">{focus}</p>
         </section>
 
-        <section className="jd-management-drawer__card">
+        <section className="jd-management-panel-card">
           <div className="jd-management-titlebar__actions">
             <strong className="jd-management-drawer__section-title">JD 预览摘要</strong>
             <button type="button" className="jd-management-link-button" onClick={() => onOpenDrawer(row)}>
@@ -365,21 +382,17 @@ function JdFullDrawer({
     <div className="drawer-backdrop" role="presentation">
       <aside className="drawer jd-management-drawer" role="dialog" aria-modal="true" aria-label="JD 详情">
         <header className="drawer__header">
-          <div>
-            <div className="drawer__eyebrow">JD 详情</div>
-            <h2 className="drawer__title">{creating ? "新建职位" : form.title || "未命名职位"}</h2>
-            <p className="drawer__description">{form.jobDescriptionId || "保存后生成职位 ID"}</p>
-          </div>
+          <h2 className="drawer__title">JD 详情</h2>
           <div className="jd-management-drawer__actions">
-            <button type="button" className="jd-management-button" onClick={onClose}>收起</button>
+            <button type="button" className="jd-management-drawer__collapse" onClick={onClose}>« 收起</button>
             <button type="button" className="drawer__close" onClick={onClose} aria-label="关闭">×</button>
           </div>
         </header>
 
         <div className="drawer__body">
-          <section className="jd-management-drawer__card">
+          <div className="jd-management-drawer__toolbar-row">
             <div className="jd-management-drawer__actions">
-              <button type="button" className="jd-management-button">编辑 JD</button>
+              <button type="button" className="jd-management-button jd-management-button--outline-primary">编辑 JD</button>
               <button
                 type="button"
                 className="jd-management-button jd-management-button--danger"
@@ -389,7 +402,7 @@ function JdFullDrawer({
                 删除 JD
               </button>
             </div>
-          </section>
+          </div>
 
           <form className="jd-management-drawer__form" onSubmit={(event) => {
             event.preventDefault();
@@ -427,11 +440,19 @@ function JdFullDrawer({
 
             <section className="jd-management-drawer__card">
               <strong className="jd-management-drawer__section-title">二、职位描述</strong>
-              <div className="jd-management-drawer__toolbar">B I U · 对齐 · 列表 · 链接</div>
+              <div className="jd-management-drawer__formatbar" aria-label="编辑工具栏">
+                {["↶", "↷", "B", "I", "U", "≡", "•", "↗"].map((item) => (
+                  <button key={item} type="button" aria-label={`格式 ${item}`}>{item}</button>
+                ))}
+              </div>
               <label className="jd-management-drawer__field">
                 <span className="jd-management-drawer__label">职位描述</span>
                 <textarea className="jd-management-drawer__textarea" value={form.description} onChange={(event) => setField("description", event.target.value)} />
               </label>
+            </section>
+
+            <section className="jd-management-drawer__card">
+              <strong className="jd-management-drawer__section-title">三、任职要求</strong>
               <label className="jd-management-drawer__field">
                 <span className="jd-management-drawer__label">任职要求</span>
                 <textarea className="jd-management-drawer__textarea" value={form.requirements} onChange={(event) => setField("requirements", event.target.value)} />
@@ -439,7 +460,7 @@ function JdFullDrawer({
             </section>
 
             <section className="jd-management-drawer__card">
-              <strong className="jd-management-drawer__section-title">三、招聘信息</strong>
+              <strong className="jd-management-drawer__section-title">四、招聘信息</strong>
               <div className="jd-management-drawer__grid">
                 <label className="jd-management-drawer__field">
                   <span className="jd-management-drawer__label">学历要求</span>
@@ -469,15 +490,24 @@ function JdFullDrawer({
                   <span className="jd-management-drawer__label">来源</span>
                   <input className="jd-management-drawer__input" value={form.source} onChange={(event) => setField("source", event.target.value)} />
                 </label>
-                <label className="jd-management-drawer__field jd-management-drawer__field--full">
-                  <span className="jd-management-drawer__label">标签</span>
-                  <input className="jd-management-drawer__input" value={form.benefitTags} onChange={(event) => setField("benefitTags", event.target.value)} />
-                </label>
               </div>
             </section>
 
             <section className="jd-management-drawer__card">
-              <strong className="jd-management-drawer__section-title">四、发布记录</strong>
+              <strong className="jd-management-drawer__section-title">五、标签</strong>
+              <label className="jd-management-drawer__field">
+                <span className="jd-management-drawer__label">岗位标签</span>
+                <input className="jd-management-drawer__input" value={form.benefitTags} onChange={(event) => setField("benefitTags", event.target.value)} />
+              </label>
+              <div className="jd-management-tag-list">
+                {form.benefitTags.split(/[，,]/).map((tag) => tag.trim()).filter(Boolean).slice(0, 8).map((tag) => (
+                  <span key={tag} className="jd-management-tag">{tag}</span>
+                ))}
+              </div>
+            </section>
+
+            <section className="jd-management-drawer__card">
+              <strong className="jd-management-drawer__section-title">六、发布记录</strong>
               <div className="jd-management-drawer__history">
                 <div className="jd-management-drawer__history-item">
                   <span className="jd-management-drawer__history-dot" />
@@ -609,8 +639,20 @@ export function JdManagementView({
     <section className="jd-management-page">
       <main className="jd-management-workspace">
         <header className="jd-management-titlebar">
-          <h1>职位管理</h1>
+          <div className="jd-management-titlebar__main">
+            <h1>职位管理</h1>
+          </div>
           <div className="jd-management-titlebar__actions">
+            <input className="jd-management-global-search" placeholder="搜索候选人姓名/手机号" />
+            <span className="jd-management-user-avatar" aria-label="当前用户">{getOwnerInitial(selectedRow)}</span>
+            <span className="jd-management-user-name">
+              {selectedRow && getDemoOwner(selectedRow) !== "未设置" ? getDemoOwner(selectedRow) : "招聘负责人"}
+            </span>
+          </div>
+        </header>
+
+        <div className="jd-management-filterbar">
+          <div className="jd-management-filterbar__group">
             <label className="jd-management-filter">
               岗位状态
               <select className="jd-management-select" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as "all" | JdStatusBucket)}>
@@ -620,11 +662,6 @@ export function JdManagementView({
                 <option value="closed">已关闭</option>
               </select>
             </label>
-          </div>
-        </header>
-
-        <div className="jd-management-filterbar">
-          <div className="jd-management-filterbar__group">
             <label className="jd-management-filter">
               城市
               <select className="jd-management-select" value={cityFilter} onChange={(event) => setCityFilter(event.target.value)}>
@@ -667,10 +704,10 @@ export function JdManagementView({
         </div>
 
         <section className="jd-management-kpis">
-          <JdStatCard label="全部职位" value={model.stats.total} caption="较昨日 +3" />
-          <JdStatCard label="招聘中" value={model.stats.recruiting} caption="较昨日 +2" ratio={percentOf(model.stats.recruiting, model.stats.total)} />
-          <JdStatCard label="暂停中" value={model.stats.paused} caption="较昨日 -1" ratio={percentOf(model.stats.paused, model.stats.total)} tone="warning" />
-          <JdStatCard label="已关闭" value={model.stats.closed} caption="较昨日 +2" ratio={percentOf(model.stats.closed, model.stats.total)} tone="neutral" />
+          <JdStatCard label="全部职位" value={model.stats.total} caption="较昨日 +3" icon="briefcase" />
+          <JdStatCard label="招聘中" value={model.stats.recruiting} caption="较昨日 +2" ratio={percentOf(model.stats.recruiting, model.stats.total)} icon="cap" />
+          <JdStatCard label="暂停中" value={model.stats.paused} caption="较昨日 -1" ratio={percentOf(model.stats.paused, model.stats.total)} tone="warning" icon="pause" />
+          <JdStatCard label="已关闭" value={model.stats.closed} caption="较昨日 +2" ratio={percentOf(model.stats.closed, model.stats.total)} tone="neutral" icon="closed" />
         </section>
 
         <section className="jd-management-table-card">
@@ -685,6 +722,7 @@ export function JdManagementView({
                   <th>HC</th>
                   <th>在招状态</th>
                   <th>当前候选人</th>
+                  <th>沟通中</th>
                   <th>面试中</th>
                   <th>Offer中</th>
                   <th>最近更新</th>
@@ -706,6 +744,7 @@ export function JdManagementView({
                     <td>{row.job.headcount ?? "—"}</td>
                     <td><JdStatusPill status={row.statusBucket} /></td>
                     <td>{row.currentApplicants}</td>
+                    <td>{row.communicating}</td>
                     <td>{row.interviewing}</td>
                     <td>{row.offers}</td>
                     <td>{row.latestUpdateText || "—"}</td>

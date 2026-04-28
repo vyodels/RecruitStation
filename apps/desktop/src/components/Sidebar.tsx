@@ -115,7 +115,7 @@ export function Sidebar({
     <aside className="workspace-sidebar" data-expanded={expanded ? "true" : undefined}>
       <div className="workspace-sidebar__brand">
         <div className="workspace-sidebar__logo">RA</div>
-        <div className="workspace-sidebar__eyebrow">{copy("Smart recruiting", "智能招聘")}</div>
+        <div className="workspace-sidebar__eyebrow">{copy("Smart recruiting hub", "智能招聘中台")}</div>
         <button
           type="button"
           className="workspace-sidebar__toggle"
@@ -168,6 +168,15 @@ export function Sidebar({
       </nav>
 
       <div className="workspace-sidebar__footer">
+        <button
+          type="button"
+          className="workspace-sidebar__footer-toggle"
+          onClick={() => onExpandedChange?.(!expanded)}
+          aria-label={expanded ? copy("Collapse sidebar", "收起菜单") : copy("Expand sidebar", "展开菜单")}
+        >
+          <span aria-hidden="true">{expanded ? "‹" : "›"}</span>
+          <span>{expanded ? copy("Collapse menu", "收起菜单") : copy("Expand menu", "展开菜单")}</span>
+        </button>
         <StatusBadge tone="positive">{copy("local", "本地")}</StatusBadge>
       </div>
     </aside>

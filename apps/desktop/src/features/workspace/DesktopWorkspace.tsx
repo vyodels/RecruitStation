@@ -161,6 +161,12 @@ export function DesktopWorkspace(): JSX.Element {
     }
   }, [loadSettingsWorkspace, settingsLoaded, tab]);
 
+  useEffect(() => {
+    if (tab === "jdManagement") {
+      setSidebarExpanded(true);
+    }
+  }, [tab]);
+
   const sectionMeta = useMemo(
     (): Record<WorkspaceTab, { eyebrow: string; title: string; description: string }> => ({
       home: {
@@ -453,7 +459,7 @@ export function DesktopWorkspace(): JSX.Element {
   return (
     <>
       <AppLayout
-        hideTopbar={tab === "applicationFollowUp"}
+        hideTopbar={tab === "applicationFollowUp" || tab === "jdManagement"}
         sidebarExpanded={sidebarExpanded}
         sidebar={
           <Sidebar
@@ -498,10 +504,12 @@ export function DesktopWorkspace(): JSX.Element {
         {content}
       </AppLayout>
 
-      <FloatingBubble
-        status={summary.agent.status}
-        pendingCount={summary.approvals.filter((approval) => approval.status === "pending").length}
-      />
+      {tab === "jdManagement" ? null : (
+        <FloatingBubble
+          status={summary.agent.status}
+          pendingCount={summary.approvals.filter((approval) => approval.status === "pending").length}
+        />
+      )}
       <ChatOverlay transport={transport} workspaceAgent={summary.agent} />
     </>
   );

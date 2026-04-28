@@ -27,6 +27,7 @@ export interface JdManagementRow {
   statusLabel: string;
   applications: ApplicationViewModel[];
   currentApplicants: number;
+  communicating: number;
   interviewing: number;
   offers: number;
   ownerName: string;
@@ -172,12 +173,13 @@ function hasStatusToken(application: ApplicationViewModel, tokens: string[]): bo
 
 function buildFunnelSteps(applications: ApplicationViewModel[]): JdFunnelStep[] {
   const total = applications.length;
+  const communicating = applications.filter((item) => hasStatusToken(item, ["communicat", "dialogue", "沟通", "对话"])).length;
   const interviewing = applications.filter((item) => hasStatusToken(item, ["interview", "面试"])).length;
   const offers = applications.filter((item) => hasStatusToken(item, ["offer", "录用"])).length;
   const hired = applications.filter((item) => hasStatusToken(item, ["hired", "入职"])).length;
   const steps = [
     { key: "applications", label: "投递", value: total },
-    { key: "communicating", label: "沟通中", value: applications.filter((item) => hasStatusToken(item, ["communicat", "dialogue", "沟通", "对话"])).length },
+    { key: "communicating", label: "沟通中", value: communicating },
     { key: "interviewing", label: "面试中", value: interviewing },
     { key: "offers", label: "Offer中", value: offers },
     { key: "hired", label: "入职", value: hired },
@@ -241,11 +243,13 @@ function resolveLatestUpdateText(job: JobDescriptionSummaryRecord, applications:
 
 function resolveJdCounts(applications: ApplicationViewModel[]): {
   currentApplicants: number;
+  communicating: number;
   interviewing: number;
   offers: number;
 } {
   return {
     currentApplicants: applications.length,
+    communicating: applications.filter((item) => hasStatusToken(item, ["communicat", "dialogue", "沟通", "对话"])).length,
     interviewing: applications.filter((item) => hasStatusToken(item, ["interview", "面试"])).length,
     offers: applications.filter((item) => hasStatusToken(item, ["offer", "录用"])).length,
   };
