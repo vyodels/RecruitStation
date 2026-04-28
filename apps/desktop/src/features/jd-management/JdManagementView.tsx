@@ -252,13 +252,10 @@ function JdDetailCard({
           <span className="jd-management-detail__subtitle">{job.jobDescriptionId || "—"}</span>
           <span className="jd-management-agent-badge">{recommendedBy}</span>
         </div>
-        <button type="button" className="jd-management-link-button" onClick={() => onOpenDrawer(row)}>
-          查看完整 JD
-        </button>
       </header>
 
       <div className="jd-management-detail__body">
-        <section className="jd-management-detail__meta-grid">
+        <section className="jd-management-detail__meta-grid jd-management-detail__meta-grid--primary">
           <span className="jd-management-detail__label">JD名称</span>
           <span className="jd-management-detail__value">{job.title}</span>
           <span className="jd-management-detail__label">城市</span>
@@ -287,7 +284,10 @@ function JdDetailCard({
         ) : null}
 
         <section className="jd-management-panel-card">
-          <strong className="jd-management-drawer__section-title">招聘进展</strong>
+          <div className="jd-management-detail__section-head">
+            <strong className="jd-management-drawer__section-title">招聘进展</strong>
+            <span>当前岗位</span>
+          </div>
           <div className="jd-management-funnel">
             {row.funnelSteps.map((step) => (
               <div key={step.key} className="jd-management-funnel__step">
@@ -300,7 +300,7 @@ function JdDetailCard({
         </section>
 
         <section className="jd-management-panel-card">
-          <div className="jd-management-titlebar__actions">
+          <div className="jd-management-detail__section-head">
             <strong className="jd-management-drawer__section-title">近期候选人</strong>
             <button type="button" className="jd-management-link-button">查看全部</button>
           </div>
@@ -320,27 +320,35 @@ function JdDetailCard({
           </div>
         </section>
 
-        <section className="jd-management-panel-card">
-          <strong className="jd-management-drawer__section-title">当前转化概览</strong>
-          <div className="jd-management-detail__meta-grid">
-            <span className="jd-management-detail__label">投递量</span>
-            <span className="jd-management-detail__value">{trendCount}</span>
-            <span className="jd-management-detail__label">沟通率</span>
-            <span className="jd-management-detail__value">{percentOf(row.communicating, row.currentApplicants)} · {trendRate}</span>
-            <span className="jd-management-detail__label">面试率</span>
-            <span className="jd-management-detail__value">{percentOf(row.interviewing, row.currentApplicants)}</span>
-            <span className="jd-management-detail__label">Offer率</span>
-            <span className="jd-management-detail__value">{percentOf(row.offers, row.currentApplicants)}</span>
-          </div>
-        </section>
+        <div className="jd-management-detail__analysis-grid">
+          <section className="jd-management-panel-card jd-management-panel-card--compact">
+            <div className="jd-management-detail__section-head">
+              <strong className="jd-management-drawer__section-title">当前转化概览</strong>
+              <span>近7天</span>
+            </div>
+            <div className="jd-management-detail__metric-list">
+              <span>投递量</span>
+              <strong>{trendCount}</strong>
+              <span>沟通率</span>
+              <strong>{percentOf(row.communicating, row.currentApplicants)} <i>{trendRate}</i></strong>
+              <span>面试率</span>
+              <strong>{percentOf(row.interviewing, row.currentApplicants)}</strong>
+              <span>Offer率</span>
+              <strong>{percentOf(row.offers, row.currentApplicants)}</strong>
+            </div>
+          </section>
+
+          <section className="jd-management-panel-card jd-management-panel-card--compact">
+            <div className="jd-management-detail__section-head">
+              <strong className="jd-management-drawer__section-title">关键要点</strong>
+              <span>摘要</span>
+            </div>
+            <p className="jd-management-summary-text">{focus}</p>
+          </section>
+        </div>
 
         <section className="jd-management-panel-card">
-          <strong className="jd-management-drawer__section-title">关键要点</strong>
-          <p className="jd-management-summary-text">{focus}</p>
-        </section>
-
-        <section className="jd-management-panel-card">
-          <div className="jd-management-titlebar__actions">
+          <div className="jd-management-detail__section-head">
             <strong className="jd-management-drawer__section-title">JD 预览摘要</strong>
             <button type="button" className="jd-management-link-button" onClick={() => onOpenDrawer(row)}>
               查看完整 JD

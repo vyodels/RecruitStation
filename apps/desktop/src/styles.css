@@ -1455,6 +1455,12 @@ a:hover {
   line-height: var(--line-height-tight);
 }
 
+.jd-management-detail__title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .jd-management-role-cell span,
 .jd-management-detail__subtitle {
   min-width: 0;
@@ -1519,7 +1525,7 @@ a:hover {
   min-height: 0;
   display: grid;
   align-content: start;
-  gap: var(--space-3);
+  gap: var(--space-2);
   padding: var(--space-3);
   overflow-y: auto;
 }
@@ -1529,14 +1535,14 @@ a:hover {
   align-items: flex-start;
   justify-content: space-between;
   gap: var(--space-3);
-  padding: var(--space-4);
+  padding: var(--space-3) var(--space-3) var(--space-2);
   border-bottom: 1px solid var(--border-line);
 }
 
 .jd-management-detail__head {
   min-width: 0;
   display: grid;
-  gap: var(--space-1);
+  gap: 6px;
 }
 
 .jd-management-detail__title-row {
@@ -1544,6 +1550,12 @@ a:hover {
   display: flex;
   align-items: center;
   gap: var(--space-2);
+  flex-wrap: nowrap;
+}
+
+.jd-management-detail__title-row .jd-management-status {
+  min-height: 20px;
+  flex: 0 0 auto;
 }
 
 .jd-management-detail__meta-grid,
@@ -1554,11 +1566,17 @@ a:hover {
   align-items: baseline;
 }
 
+.jd-management-detail__meta-grid--primary {
+  padding: 2px 0 0;
+  grid-template-columns: 70px minmax(0, 1fr);
+  gap: 7px var(--space-3);
+}
+
 .jd-management-detail__value {
   min-width: 0;
   color: var(--text-primary);
   font-size: var(--font-size-xs);
-  line-height: var(--line-height-base);
+  line-height: 1.45;
 }
 
 .jd-management-owner-line {
@@ -1572,7 +1590,7 @@ a:hover {
 
 .jd-management-agent-badge {
   width: fit-content;
-  min-height: 24px;
+  min-height: 22px;
   display: inline-flex;
   align-items: center;
   gap: var(--space-1);
@@ -1588,11 +1606,29 @@ a:hover {
 .jd-management-panel-card {
   min-width: 0;
   display: grid;
-  gap: var(--space-3);
-  padding: var(--space-3);
+  gap: var(--space-2);
+  padding: var(--space-2);
   border: 1px solid var(--border-line);
   border-radius: var(--radius-md);
   background: var(--bg-card);
+}
+
+.jd-management-panel-card--compact {
+  align-content: start;
+}
+
+.jd-management-detail__section-head {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.jd-management-detail__section-head > span {
+  color: var(--text-secondary);
+  font-size: 11px;
+  white-space: nowrap;
 }
 
 .jd-management-tag-list,
@@ -1615,7 +1651,7 @@ a:hover {
 }
 
 .jd-management-tag {
-  min-height: 22px;
+  min-height: 20px;
   display: inline-flex;
   align-items: center;
   padding: 0 var(--space-2);
@@ -1632,21 +1668,34 @@ a:hover {
 }
 
 .jd-management-funnel__step {
+  position: relative;
   min-width: 0;
   display: grid;
-  gap: var(--space-1);
+  gap: 2px;
   align-content: center;
-  min-height: 54px;
-  padding: var(--space-2);
+  min-height: 56px;
+  padding: 6px 4px;
   border: 1px solid var(--border-line);
   border-radius: var(--radius-sm);
   background: var(--bg-card);
   text-align: center;
 }
 
+.jd-management-funnel__step:not(:last-child)::after {
+  content: "→";
+  position: absolute;
+  top: 50%;
+  right: -9px;
+  z-index: 1;
+  transform: translateY(-50%);
+  color: var(--text-placeholder);
+  font-size: 11px;
+  line-height: 1;
+}
+
 .jd-management-funnel__step strong {
   color: var(--text-primary);
-  font-size: var(--font-size-md);
+  font-size: var(--font-size-base);
   font-weight: var(--font-weight-medium);
   line-height: 1;
 }
@@ -1663,6 +1712,7 @@ a:hover {
   grid-template-columns: 32px minmax(0, 1fr) auto;
   gap: var(--space-2);
   align-items: center;
+  min-height: 38px;
 }
 
 .jd-management-avatar {
@@ -1724,6 +1774,42 @@ a:hover {
 .jd-management-summary-text {
   line-height: var(--line-height-base);
   white-space: normal;
+}
+
+.jd-management-detail__analysis-grid {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+
+.jd-management-detail__metric-list {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr);
+  gap: 6px var(--space-2);
+  align-items: baseline;
+}
+
+.jd-management-detail__metric-list span {
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: var(--line-height-tight);
+}
+
+.jd-management-detail__metric-list strong {
+  min-width: 0;
+  color: var(--text-primary);
+  font-size: 11px;
+  font-weight: var(--font-weight-medium);
+  line-height: var(--line-height-tight);
+  white-space: nowrap;
+}
+
+.jd-management-detail__metric-list i {
+  color: var(--success);
+  font-style: normal;
+  margin-left: 4px;
 }
 
 .jd-management-empty {
