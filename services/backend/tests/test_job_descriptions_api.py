@@ -112,6 +112,69 @@ def test_job_description_list_pagination_metadata(tmp_path: Path) -> None:
         load_settings.cache_clear()
 
 
+def test_job_description_list_filters_by_applicant_keyword(tmp_path: Path) -> None:
+    os.environ["RECRUIT_AGENT_DATA_DIR"] = str(tmp_path)
+    load_settings.cache_clear()
+    app = create_app()
+    client = TestClient(app)
+    client.__enter__()
+    try:
+        session_factory = app.state.session_factory
+        with session_factory() as session:
+            sales_job = JobDescriptionRepository(session).create({"title": "销售工程师"})
+            java_job = JobDescriptionRepository(session).create({"title": "Java 开发工程师"})
+            person = CandidateRepository(session).create(
+                {
+                    "name": "李明宇",
+                    "platform": "boss",
+                    "platform_candidate_id": "boss-limingyu",
+                    "contact_info": {"phone": "13800138123", "email": "limingyu@example.com"},
+                }
+            )
+            other_person = CandidateRepository(session).create(
+                {
+                    "name": "王思雨",
+                    "platform": "boss",
+                    "platform_candidate_id": "boss-wangsiyu",
+                }
+            )
+            CandidateApplicationRepository(session).create(
+                {
+                    "person_id": person.candidate_person_id,
+                    "job_description_id": sales_job.job_description_id,
+                    "platform": "boss",
+                    "source_platform": "boss",
+                    "current_status": "communicating",
+                    "current_stage_key": "communicating",
+                }
+            )
+            CandidateApplicationRepository(session).create(
+                {
+                    "person_id": other_person.candidate_person_id,
+                    "job_description_id": java_job.job_description_id,
+                    "platform": "boss",
+                    "source_platform": "boss",
+                    "current_status": "communicating",
+                    "current_stage_key": "communicating",
+                    "contact_snapshot": {"mobile": "13900139123"},
+                }
+            )
+
+        by_name = client.get("/api/job-descriptions?limit=10&applicant_keyword=李明宇")
+        assert by_name.status_code == 200
+        assert by_name.json()["total"] == 1
+        assert by_name.json()["items"][0]["title"] == "销售工程师"
+
+        by_phone = client.get("/api/job-descriptions?limit=10&applicant_keyword=13900139123")
+        assert by_phone.status_code == 200
+        assert by_phone.json()["total"] == 1
+        assert by_phone.json()["items"][0]["title"] == "Java 开发工程师"
+    finally:
+        client.__exit__(None, None, None)
+        os.environ.pop("RECRUIT_AGENT_DATA_DIR", None)
+        load_settings.cache_clear()
+
+
 def test_job_description_funnel_stats_use_state_machine_milestones(tmp_path: Path) -> None:
     os.environ["RECRUIT_AGENT_DATA_DIR"] = str(tmp_path)
     load_settings.cache_clear()

@@ -1,4 +1,5 @@
 import React from "react";
+import { FormTextarea } from "../../components";
 import { useI18n } from "../../lib/i18n";
 import type { AgentKind } from "../../lib/types";
 
@@ -39,7 +40,7 @@ export function ChatComposer({
         <button type="button" className="chat-composer__icon-button" disabled aria-label={copy("Attachment coming soon", "附件能力后续补齐")}>
           +
         </button>
-        <textarea
+        <FormTextarea
           className="chat-composer__input"
           placeholder={
             agentKind === "assistant"

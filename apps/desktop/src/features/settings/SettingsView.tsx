@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Panel, StatusBadge } from "../../components";
+import { FormButton, FormCheckbox, FormInput, FormSelect, FormTextarea, Panel, StatusBadge } from "../../components";
 import { useI18n } from "../../lib/i18n";
 import { translateUiToken } from "../../lib/uiText";
 import type { McpPresetTemplateRecord, McpServerRecord, ProviderConfig, SettingsSnapshot } from "../../lib/types";
@@ -89,33 +89,10 @@ function translateSettingLabel(value: string): string {
   return table[value] ?? value;
 }
 
-const inputStyle = {
-  width: "100%",
-  borderRadius: theme.radius.sm,
-  border: `1px solid ${theme.colors.border}`,
-  background: theme.colors.panel,
-  color: theme.colors.text,
-  minHeight: "var(--space-8)",
-  padding: "0 var(--space-3)",
-} as const;
-
 const providerHintStyle = {
   color: theme.colors.muted,
   fontSize: "var(--font-size-xs)",
   lineHeight: 1.6,
-} as const;
-
-const buttonStyle = {
-  ...inputStyle,
-  cursor: "pointer",
-  padding: "0 var(--space-4)",
-  width: "auto",
-} as const;
-
-const dangerButtonStyle = {
-  ...buttonStyle,
-  border: `1px solid ${theme.colors.critical}`,
-  color: theme.colors.critical,
 } as const;
 
 function providerHostExample(kind: ProviderConfig["kind"]): { example: string; noteEn: string; noteZh: string } {
@@ -215,7 +192,7 @@ export function SettingsView({
             {copy("Locale", "语言区域")} {draft.locale} · {copy("Timezone", "时区")} {draft.timezone}
           </div>
           <label style={{ display: "flex", alignItems: "center", gap: "var(--space-3)", fontSize: "var(--font-size-base)" }}>
-            <input
+            <FormCheckbox
               type="checkbox"
               checked={draft.intranetEnabled}
               onChange={(event) => setDraft((current) => ({ ...current, intranetEnabled: event.target.checked }))}
@@ -223,7 +200,7 @@ export function SettingsView({
             {copy("Enable intranet sync", "启用内网同步")}
           </label>
           <label style={{ display: "flex", alignItems: "center", gap: "var(--space-3)", fontSize: "var(--font-size-base)" }}>
-            <input
+            <FormCheckbox
               type="checkbox"
               checked={draft.desktopApprovalsOnly}
               onChange={(event) => setDraft((current) => ({ ...current, desktopApprovalsOnly: event.target.checked }))}
@@ -231,7 +208,7 @@ export function SettingsView({
             {copy("Keep reviews desktop-only", "复核仅在桌面端完成")}
           </label>
           <label style={{ display: "flex", alignItems: "center", gap: "var(--space-3)", fontSize: "var(--font-size-base)" }}>
-            <input
+            <FormCheckbox
               type="checkbox"
               checked={draft.autonomyEnabled}
               onChange={(event) => setDraft((current) => ({ ...current, autonomyEnabled: event.target.checked }))}
@@ -239,7 +216,7 @@ export function SettingsView({
             {copy("Enable autonomous sourcing loop", "启用自主补人循环")}
           </label>
           <label style={{ display: "flex", alignItems: "center", gap: "var(--space-3)", fontSize: "var(--font-size-base)" }}>
-            <input
+            <FormCheckbox
               type="checkbox"
               checked={draft.skillHealthAutonomyEnabled}
               onChange={(event) =>
@@ -253,7 +230,7 @@ export function SettingsView({
           </label>
           <label style={{ display: "grid", gap: "var(--space-2)", fontSize: "var(--font-size-sm)", color: theme.colors.muted }}>
             {copy("Review check interval (seconds)", "复核检查间隔（秒）")}
-            <input
+            <FormInput
               type="number"
               min={1}
               value={draft.skillHealthAutonomyIntervalSeconds ?? 300}
@@ -263,7 +240,6 @@ export function SettingsView({
                   skillHealthAutonomyIntervalSeconds: Number(event.target.value || current.skillHealthAutonomyIntervalSeconds || 300),
                 }))
               }
-              style={inputStyle}
             />
           </label>
         </div>
@@ -272,7 +248,7 @@ export function SettingsView({
         <div style={{ display: "grid", gap: "var(--space-3)" }}>
           <label style={{ display: "grid", gap: "var(--space-2)", fontSize: "var(--font-size-sm)", color: theme.colors.muted }}>
             {copy("Account", "账号")}
-            <input
+            <FormInput
               type="text"
               value={draft.platform.account}
               onChange={(event) =>
@@ -281,12 +257,11 @@ export function SettingsView({
                   platform: { ...current.platform, account: event.target.value },
                 }))
               }
-              style={inputStyle}
             />
           </label>
           <label style={{ display: "grid", gap: "var(--space-2)", fontSize: "var(--font-size-sm)", color: theme.colors.muted }}>
             {copy("Cooldown days", "冷却天数")}
-            <input
+            <FormInput
               type="number"
               min={1}
               value={draft.platform.cooldownDays}
@@ -299,12 +274,11 @@ export function SettingsView({
                   },
                 }))
               }
-              style={inputStyle}
             />
           </label>
           <label style={{ display: "grid", gap: "var(--space-2)", fontSize: "var(--font-size-sm)", color: theme.colors.muted }}>
             {copy("Max concurrent sessions", "最大并发会话")}
-            <input
+            <FormInput
               type="number"
               min={1}
               value={draft.platform.maxConcurrentRuns}
@@ -317,12 +291,11 @@ export function SettingsView({
                   },
                 }))
               }
-              style={inputStyle}
             />
           </label>
           <label style={{ display: "grid", gap: "var(--space-2)", fontSize: "var(--font-size-sm)", color: theme.colors.muted }}>
             {copy("Minimum funnel candidates before auto sourcing", "触发自主补人的最小漏斗人数")}
-            <input
+            <FormInput
               type="number"
               min={0}
               value={draft.platform.minFunnelCandidates}
@@ -335,14 +308,13 @@ export function SettingsView({
                   },
                 }))
               }
-              style={inputStyle}
             />
           </label>
           <StatusBadge tone={draft.platform.allowOutboundMessaging ? "positive" : "warning"}>
             {draft.platform.allowOutboundMessaging ? copy("outreach enabled", "外联已启用") : copy("outreach gated", "外联受控")}
           </StatusBadge>
           <label style={{ display: "flex", alignItems: "center", gap: "var(--space-3)", fontSize: "var(--font-size-base)" }}>
-            <input
+            <FormCheckbox
               type="checkbox"
               checked={draft.platform.allowOutboundMessaging}
               onChange={(event) =>
@@ -368,7 +340,7 @@ export function SettingsView({
                 </div>
                 <div style={{ display: "grid", gap: "var(--space-3)", marginTop: "var(--space-3)" }}>
                   <label style={{ display: "flex", alignItems: "center", gap: "var(--space-3)", fontSize: "var(--font-size-base)" }}>
-                    <input
+                    <FormCheckbox
                       type="checkbox"
                       checked={provider.enabled}
                       onChange={(event) => updateProvider(index, { enabled: event.target.checked })}
@@ -377,21 +349,19 @@ export function SettingsView({
                   </label>
                   <label style={{ display: "grid", gap: "var(--space-2)", fontSize: "var(--font-size-sm)", color: theme.colors.muted }}>
                     {copy("Model", "模型")}
-                    <input
+                    <FormInput
                       type="text"
                       value={provider.model}
                       onChange={(event) => updateProvider(index, { model: event.target.value })}
-                      style={inputStyle}
                       placeholder={provider.kind === "anthropic" ? "claude-sonnet-4" : "gpt-5.4"}
                     />
                   </label>
                   <label style={{ display: "grid", gap: "var(--space-2)", fontSize: "var(--font-size-sm)", color: theme.colors.muted }}>
                     {copy("Host / Base URL", "Host / Base URL")}
-                    <input
+                    <FormInput
                       type="text"
                       value={provider.baseUrl ?? ""}
                       onChange={(event) => updateProvider(index, { baseUrl: event.target.value })}
-                      style={inputStyle}
                       placeholder={hint.example}
                     />
                     <span style={providerHintStyle}>
@@ -401,7 +371,7 @@ export function SettingsView({
                   </label>
                   <label style={{ display: "grid", gap: "var(--space-2)", fontSize: "var(--font-size-sm)", color: theme.colors.muted }}>
                     {copy("Response wait time (seconds)", "响应等待时间（秒）")}
-                    <input
+                    <FormInput
                       type="number"
                       min={1}
                       step={1}
@@ -411,7 +381,6 @@ export function SettingsView({
                           timeoutSeconds: Math.max(1, Number(event.target.value || provider.timeoutSeconds || 180)),
                         })
                       }
-                      style={inputStyle}
                     />
                     <span style={providerHintStyle}>
                       {copy(
@@ -422,11 +391,10 @@ export function SettingsView({
                   </label>
                   <label style={{ display: "grid", gap: "var(--space-2)", fontSize: "var(--font-size-sm)", color: theme.colors.muted }}>
                     {copy("Access key", "访问密钥")}
-                    <input
+                    <FormInput
                       type="password"
                       value={provider.apiKey ?? ""}
                       onChange={(event) => updateProvider(index, { apiKey: event.target.value })}
-                      style={inputStyle}
                       placeholder={provider.kind === "anthropic" ? "sk-ant-..." : "sk-..."}
                       autoComplete="off"
                     />
@@ -463,7 +431,7 @@ export function SettingsView({
                 <div style={providerHintStyle}>
                   {copy("Example endpoint", "示例地址")} {preset.endpointExample}
                 </div>
-                <button
+                <FormButton
                   type="button"
                   onClick={() =>
                     onInstallMcpPreset(preset.key, {
@@ -472,10 +440,9 @@ export function SettingsView({
                       endpoint: preset.endpointExample,
                     })
                   }
-                  style={buttonStyle}
                 >
                   {copy("Install", "安装")}
-                </button>
+                </FormButton>
               </div>
             ))}
           </div>
@@ -491,7 +458,7 @@ export function SettingsView({
                 return (
                   <div key={server.id} style={{ display: "grid", gap: "var(--space-2)", padding: "var(--space-3)", border: `1px solid ${theme.colors.border}`, borderRadius: theme.radius.md, background: "var(--bg-page)" }}>
                     <div style={compactRowStyle}>
-                      <input
+                      <FormInput
                         type="text"
                         value={serverDraft.name}
                         onChange={(event) =>
@@ -500,9 +467,8 @@ export function SettingsView({
                             [server.id]: { ...serverDraft, name: event.target.value },
                           }))
                         }
-                        style={inputStyle}
                       />
-                      <input
+                      <FormInput
                         type="text"
                         value={serverDraft.endpoint}
                         onChange={(event) =>
@@ -511,10 +477,9 @@ export function SettingsView({
                             [server.id]: { ...serverDraft, endpoint: event.target.value },
                           }))
                         }
-                        style={inputStyle}
                       />
                       <label style={{ display: "flex", alignItems: "center", gap: "var(--space-2)", fontSize: "var(--space-3)" }}>
-                        <input
+                        <FormCheckbox
                           type="checkbox"
                           checked={serverDraft.enabled}
                           onChange={(event) =>
@@ -530,7 +495,7 @@ export function SettingsView({
                         {server.healthStatus}
                       </StatusBadge>
                       <div style={{ display: "flex", gap: "var(--space-2)", justifyContent: "flex-end" }}>
-                        <button
+                        <FormButton
                           type="button"
                           onClick={() =>
                             onUpdateMcpServer(server.id, {
@@ -539,24 +504,22 @@ export function SettingsView({
                               enabled: serverDraft.enabled,
                             })
                           }
-                          style={buttonStyle}
                         >
                           {copy("Save", "保存")}
-                        </button>
-                        <button
+                        </FormButton>
+                        <FormButton
                           type="button"
                           onClick={() => onHealthcheckMcpServer(server.id)}
-                          style={buttonStyle}
                         >
                           {copy("Check status", "检查状态")}
-                        </button>
-                        <button
+                        </FormButton>
+                        <FormButton
                           type="button"
+                          variant="danger"
                           onClick={() => onDeleteMcpServer(server.id)}
-                          style={dangerButtonStyle}
                         >
                           {copy("Delete", "删除")}
-                        </button>
+                        </FormButton>
                       </div>
                     </div>
                     <div style={providerHintStyle}>
@@ -573,46 +536,42 @@ export function SettingsView({
           <div style={{ display: "grid", gap: "var(--space-2)" }}>
             <strong style={{ fontSize: "var(--font-size-sm)" }}>{copy("Add custom connection", "新增自定义连接")}</strong>
             <div style={{ display: "grid", gap: "var(--space-2)", gridTemplateColumns: "repeat(2, minmax(0, 1fr))" }}>
-              <input
+              <FormInput
                 type="text"
                 placeholder={copy("Server key", "服务 key")}
                 value={customServer.serverKey}
                 onChange={(event) => setCustomServer((current) => ({ ...current, serverKey: event.target.value }))}
-                style={inputStyle}
               />
-              <input
+              <FormInput
                 type="text"
                 placeholder={copy("Display name", "显示名称")}
                 value={customServer.name}
                 onChange={(event) => setCustomServer((current) => ({ ...current, name: event.target.value }))}
-                style={inputStyle}
               />
-              <input
+              <FormInput
                 type="text"
                 placeholder={copy("Connection endpoint", "连接地址")}
                 value={customServer.endpoint}
                 onChange={(event) => setCustomServer((current) => ({ ...current, endpoint: event.target.value }))}
-                style={inputStyle}
               />
-              <select
+              <FormSelect
                 value={customServer.protocol}
                 onChange={(event) => setCustomServer((current) => ({ ...current, protocol: event.target.value }))}
-                style={inputStyle}
               >
                 <option value="mcp_jsonrpc">mcp_jsonrpc</option>
                 <option value="json_socket_tool_call">json_socket_tool_call</option>
                 <option value="json_socket_browser_command">json_socket_browser_command</option>
-              </select>
+              </FormSelect>
             </div>
-            <textarea
+            <FormTextarea
               value={customServer.toolsJson}
               onChange={(event) => setCustomServer((current) => ({ ...current, toolsJson: event.target.value }))}
-              style={{ ...inputStyle, minHeight: "calc(var(--space-12) + var(--space-12) + var(--space-6))", fontFamily: "var(--font-mono)", padding: "var(--space-3)" }}
+              className="settings-form-textarea--tools"
               placeholder='[{"name":"custom_tool","description":"...","parameters":{"type":"object"},"capabilities":["browser"]}]'
             />
             {mcpError ? <div style={{ ...providerHintStyle, color: theme.colors.critical }}>{mcpError}</div> : null}
             <div style={{ display: "flex", justifyContent: "flex-end" }}>
-              <button
+              <FormButton
                 type="button"
                 onClick={() => {
                   try {
@@ -640,16 +599,16 @@ export function SettingsView({
                     setMcpError(error instanceof Error ? error.message : copy("Invalid tools JSON.", "工具 JSON 无效。"));
                   }
                 }}
-                style={buttonStyle}
               >
                 {copy("Add connection", "创建连接")}
-              </button>
+              </FormButton>
             </div>
           </div>
         </div>
         <div style={{ marginTop: "var(--space-4)", display: "flex", justifyContent: "flex-end" }}>
-          <button
+          <FormButton
             type="button"
+            variant="primary"
             onClick={() =>
               onSave({
                 intranetEnabled: draft.intranetEnabled,
@@ -662,18 +621,9 @@ export function SettingsView({
               })
             }
             disabled={saving}
-            style={{
-              border: `1px solid ${theme.colors.accent}`,
-              borderRadius: theme.radius.sm,
-              background: "var(--brand-primary-soft)",
-              color: theme.colors.text,
-              padding: "0 var(--space-4)",
-              cursor: "pointer",
-              fontWeight: 600,
-            }}
           >
             {saving ? copy("Saving...", "保存中...") : copy("Save settings", "保存设置")}
-          </button>
+          </FormButton>
         </div>
       </Panel>
     </div>

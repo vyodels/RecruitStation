@@ -1299,6 +1299,7 @@ function jobDescriptionPagePath(params?: JobDescriptionPageParams): string {
     ["department", params?.department],
     ["owner", params?.owner],
     ["keyword", params?.keyword],
+    ["applicant_keyword", params?.applicantKeyword],
   ];
   for (const [key, value] of entries) {
     if (value != null && String(value).trim()) {

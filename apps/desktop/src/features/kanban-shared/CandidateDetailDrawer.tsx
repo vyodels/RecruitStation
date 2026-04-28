@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import type { ApplicationTransitionPayload, HumanActionDefinition, RecruitmentStateMachine } from "@recruit-agent/shared";
-import { SectionTabs, StatusBadge } from "../../components";
+import { FormTextarea, SectionTabs, StatusBadge } from "../../components";
 import { formatCompactDate } from "../../lib/format";
 import { useI18n } from "../../lib/i18n";
 import {
@@ -417,7 +417,7 @@ export function CandidateDetailDrawer({
           {pendingAction ? (
             <div className="drawer__note-box">
               <strong>{applicationScopedLabel(pendingAction.action.label)}</strong>
-              <textarea
+              <FormTextarea
                 className="drawer__textarea"
                 rows={3}
                 value={pendingAction.note}

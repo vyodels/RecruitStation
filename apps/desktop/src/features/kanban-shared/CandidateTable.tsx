@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from "react";
 import type { ApplicationTransitionPayload, HumanActionDefinition, RecruitmentStateMachine } from "@recruit-agent/shared";
-import { StatusBadge } from "../../components";
+import { FormTextarea, StatusBadge } from "../../components";
 import { formatCompactDate } from "../../lib/format";
 import { useI18n } from "../../lib/i18n";
 import { deriveHumanActionsForNode, nodeTone } from "./kanbanUtils";
@@ -196,7 +196,7 @@ export function CandidateTable({
                         <strong>{pendingNoteAction.action.label}</strong>
                         <span>{copy("Note required", "需要备注")}</span>
                       </div>
-                      <textarea
+                      <FormTextarea
                         className="candidate-table__note-input"
                         value={noteDraft}
                         onChange={(event) => setNoteDraft(event.target.value)}

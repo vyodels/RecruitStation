@@ -232,6 +232,7 @@ class JobDescriptionRepository(BaseRepository[JobDescription]):
         department: str | None = None,
         owner: str | None = None,
         keyword: str | None = None,
+        applicant_keyword: str | None = None,
     ):
         stmt = select(JobDescription)
         normalized_status = str(status or "").strip()
@@ -265,6 +266,28 @@ class JobDescriptionRepository(BaseRepository[JobDescription]):
                     JobDescription.location.ilike(pattern),
                 )
             )
+        normalized_applicant_keyword = str(applicant_keyword or "").strip()
+        if normalized_applicant_keyword:
+            pattern = f"%{normalized_applicant_keyword}%"
+            matching_job_ids = (
+                select(CandidateApplication.job_description_id)
+                .join(Candidate, Candidate.id == CandidateApplication.person_id)
+                .where(
+                    CandidateApplication.job_description_id.is_not(None),
+                    or_(
+                        Candidate.name.ilike(pattern),
+                        Candidate.candidate_person_id.ilike(pattern),
+                        Candidate.platform_candidate_id.ilike(pattern),
+                        Candidate.contact_info["phone"].as_string().ilike(pattern),
+                        Candidate.contact_info["mobile"].as_string().ilike(pattern),
+                        Candidate.contact_info["email"].as_string().ilike(pattern),
+                        CandidateApplication.contact_snapshot["phone"].as_string().ilike(pattern),
+                        CandidateApplication.contact_snapshot["mobile"].as_string().ilike(pattern),
+                        CandidateApplication.contact_snapshot["email"].as_string().ilike(pattern),
+                    ),
+                )
+            )
+            stmt = stmt.where(JobDescription.id.in_(matching_job_ids))
         return stmt
 
     def list_page(
@@ -275,11 +298,19 @@ class JobDescriptionRepository(BaseRepository[JobDescription]):
         department: str | None = None,
         owner: str | None = None,
         keyword: str | None = None,
+        applicant_keyword: str | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[JobDescription]:
         stmt = (
-            self._filtered_query(status=status, location=location, department=department, owner=owner, keyword=keyword)
+            self._filtered_query(
+                status=status,
+                location=location,
+                department=department,
+                owner=owner,
+                keyword=keyword,
+                applicant_keyword=applicant_keyword,
+            )
             .order_by(JobDescription.updated_at.desc(), JobDescription.job_description_id.asc())
             .offset(offset)
             .limit(limit)
@@ -294,8 +325,16 @@ class JobDescriptionRepository(BaseRepository[JobDescription]):
         department: str | None = None,
         owner: str | None = None,
         keyword: str | None = None,
+        applicant_keyword: str | None = None,
     ) -> int:
-        filtered = self._filtered_query(status=status, location=location, department=department, owner=owner, keyword=keyword).subquery()
+        filtered = self._filtered_query(
+            status=status,
+            location=location,
+            department=department,
+            owner=owner,
+            keyword=keyword,
+            applicant_keyword=applicant_keyword,
+        ).subquery()
         stmt = select(func.count()).select_from(filtered)
         return int(self.session.scalar(stmt) or 0)
 

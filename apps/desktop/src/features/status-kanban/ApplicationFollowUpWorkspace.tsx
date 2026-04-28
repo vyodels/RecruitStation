@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import type { ApplicationTransitionPayload, HumanActionDefinition, RecruitmentStateMachine } from "@recruit-agent/shared";
-import { StatusBadge, ToolbarInput, ToolbarRefreshButton, ToolbarSelect } from "../../components";
+import { FormTextarea, StatusBadge, ToolbarInput, ToolbarRefreshButton, ToolbarSelect } from "../../components";
 import { apiClient } from "../../lib/api";
 import { formatChineseMessageTime, formatCompactDate } from "../../lib/format";
 import { useI18n } from "../../lib/i18n";
@@ -755,7 +755,7 @@ export function ApplicationFollowUpWorkspace({
               <button type="button" onClick={() => openDetail("profile")}>{copy("More", "更多")}</button>
             </div>
             <div className="application-followup-composer__input-row">
-              <textarea
+              <FormTextarea
                 ref={composerTextareaRef}
                 rows={1}
                 value={draft}
@@ -934,7 +934,7 @@ export function ApplicationFollowUpWorkspace({
         {pendingAction ? (
           <div className="application-followup-note-box">
             <strong>{applicationScopedLabel(pendingAction.action.label)}</strong>
-            <textarea
+            <FormTextarea
               rows={3}
               value={pendingAction.note}
               onChange={(event) => setPendingAction({ ...pendingAction, note: event.target.value })}

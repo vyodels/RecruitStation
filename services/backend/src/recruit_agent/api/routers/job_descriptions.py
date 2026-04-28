@@ -44,6 +44,7 @@ def list_job_descriptions(
     department: str | None = Query(default=None),
     owner: str | None = Query(default=None),
     keyword: str | None = Query(default=None),
+    applicant_keyword: str | None = Query(default=None),
     session: Session = Depends(get_session),
 ) -> JobDescriptionPageRead:
     repo = JobDescriptionRepository(session)
@@ -55,11 +56,19 @@ def list_job_descriptions(
             department=department,
             owner=owner,
             keyword=keyword,
+            applicant_keyword=applicant_keyword,
             limit=limit,
             offset=offset,
         )
     ]
-    total = repo.count_page(status=status, location=location, department=department, owner=owner, keyword=keyword)
+    total = repo.count_page(
+        status=status,
+        location=location,
+        department=department,
+        owner=owner,
+        keyword=keyword,
+        applicant_keyword=applicant_keyword,
+    )
     return JobDescriptionPageRead(
         items=items,
         total=total,

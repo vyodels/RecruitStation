@@ -1,4 +1,5 @@
 export * from "./AppLayout";
+export * from "./FormControls";
 export * from "./MetricCard";
 export * from "./Panel";
 export * from "./ProgressBars";

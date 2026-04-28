@@ -309,6 +309,127 @@ a:hover {
   transform: rotate(16deg);
 }
 
+.form-field {
+  min-width: 0;
+  display: grid;
+  gap: var(--space-2);
+  color: var(--text-secondary);
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-tight);
+}
+
+.form-field__label {
+  color: var(--text-secondary);
+}
+
+.form-input,
+.form-select,
+.form-textarea {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--border-input);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-base);
+}
+
+.form-input,
+.form-select {
+  min-height: var(--space-8);
+  height: var(--space-8);
+  padding: 0 var(--space-3);
+}
+
+.form-textarea {
+  min-height: 88px;
+  padding: var(--space-3);
+  resize: vertical;
+}
+
+.form-input::placeholder,
+.form-textarea::placeholder {
+  color: var(--text-placeholder);
+}
+
+.form-input:focus,
+.form-select:focus,
+.form-textarea:focus,
+.form-button:focus {
+  border-color: var(--border-focus);
+  box-shadow: var(--focus-ring);
+}
+
+.form-checkbox {
+  width: var(--space-4);
+  height: var(--space-4);
+  accent-color: var(--brand-primary);
+}
+
+.form-button {
+  min-height: var(--space-8);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-4);
+  border: 1px solid var(--border-input);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  color: var(--text-primary);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.form-button:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--brand-primary) 40%, var(--border-input));
+  color: var(--brand-primary);
+  background: var(--brand-primary-soft);
+}
+
+.form-button--primary {
+  border-color: var(--brand-primary);
+  background: var(--brand-primary);
+  color: var(--text-inverse);
+}
+
+.form-button--primary:hover:not(:disabled) {
+  border-color: var(--brand-primary-hover);
+  background: var(--brand-primary-hover);
+  color: var(--text-inverse);
+}
+
+.form-button--danger {
+  border-color: color-mix(in srgb, var(--danger) 34%, var(--border-input));
+  color: var(--danger);
+}
+
+.form-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.settings-form-textarea--tools {
+  min-height: calc(var(--space-12) + var(--space-12) + var(--space-6));
+  font-family: var(--font-mono);
+}
+
+.chat-overlay-form-textarea--medium {
+  min-height: 136px;
+}
+
+.chat-overlay-form-textarea--large {
+  min-height: 160px;
+}
+
+.chat-overlay-form-textarea--xlarge {
+  min-height: 196px;
+}
+
 .workspace-sidebar {
   min-width: var(--layout-sider-width);
   width: var(--layout-sider-width);
@@ -3279,7 +3400,7 @@ button.application-followup-avatar {
 
 .application-followup-workspace__main {
   display: grid;
-  grid-template-rows: 224px 42px minmax(0, 1fr);
+  grid-template-rows: 170px 42px minmax(0, 1fr);
   border: 1px solid var(--border-line);
   border-radius: 8px;
   background: var(--bg-card);
@@ -3288,20 +3409,20 @@ button.application-followup-avatar {
 
 .application-followup-profile {
   min-width: 0;
-  min-height: 224px;
-  max-height: 224px;
+  min-height: 170px;
+  max-height: 170px;
   display: grid;
-  grid-template-columns: 88px minmax(224px, 1.14fr) minmax(190px, 0.92fr) minmax(172px, 0.82fr) 178px;
-  grid-template-rows: minmax(152px, 1fr) 24px;
-  gap: 14px;
-  padding: 12px 16px;
+  grid-template-columns: 82px minmax(212px, 1.14fr) minmax(176px, 0.92fr) minmax(160px, 0.82fr) 170px;
+  grid-template-rows: 118px 22px;
+  gap: 8px 12px;
+  padding: 10px 14px;
   border-bottom: 1px solid var(--border-line);
   overflow: hidden;
 }
 
 .application-followup-profile > .application-followup-avatar {
-  width: 88px;
-  height: 112px;
+  width: 82px;
+  height: 104px;
   border-radius: 10px;
   font-size: var(--font-size-lg);
   border: 1px solid var(--border-line);
@@ -3313,7 +3434,7 @@ button.application-followup-avatar {
 .application-followup-profile__job {
   min-width: 0;
   display: grid;
-  gap: 7px;
+  gap: 5px;
   align-content: start;
 }
 
@@ -3333,7 +3454,7 @@ button.application-followup-avatar {
   overflow: hidden;
   margin: 0;
   color: var(--text-primary);
-  font-size: 20px;
+  font-size: 18px;
   line-height: var(--line-height-tight);
   font-weight: 600;
   text-overflow: ellipsis;
@@ -3341,8 +3462,8 @@ button.application-followup-avatar {
 }
 
 .application-followup-profile__title-row {
-  min-height: 24px;
-  max-height: 24px;
+  min-height: 22px;
+  max-height: 22px;
   flex-wrap: nowrap;
   overflow: hidden;
 }
@@ -3377,7 +3498,7 @@ button.application-followup-avatar {
 .application-followup-profile__meta {
   color: var(--text-secondary);
   font-size: 12px;
-  line-height: 18px;
+  line-height: 17px;
 }
 
 .application-followup-profile__meta span:not(:last-child)::after {
@@ -3403,10 +3524,10 @@ button.application-followup-avatar {
   min-width: 0;
   display: grid;
   align-items: center;
-  gap: 5px 10px;
+  gap: 4px 10px;
   color: var(--text-secondary);
   font-size: 12px;
-  line-height: 18px;
+  line-height: 17px;
 }
 
 .application-followup-profile__contact-grid {
@@ -3443,19 +3564,19 @@ button.application-followup-avatar {
 }
 
 .application-followup-profile__info-column {
-  grid-auto-rows: 18px;
-  gap: 4px 10px;
-  padding-top: 34px;
-  padding-left: 18px;
+  grid-auto-rows: 17px;
+  gap: 3px 10px;
+  padding-top: 27px;
+  padding-left: 14px;
   border-left: 1px solid var(--border-line);
 }
 
 .application-followup-profile__fact {
   min-width: 0;
   display: grid;
-  grid-template-columns: 58px minmax(0, 1fr);
-  align-items: center;
-  gap: 6px;
+  grid-template-columns: 56px minmax(0, 1fr);
+  align-items: baseline;
+  gap: 5px;
   overflow: hidden;
   white-space: nowrap;
 }
@@ -3475,7 +3596,7 @@ button.application-followup-avatar {
   min-width: 0;
   overflow: hidden;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: 11px;
   font-style: normal;
   font-weight: 500;
   text-overflow: ellipsis;
@@ -3490,7 +3611,7 @@ button.application-followup-avatar {
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
   flex-wrap: nowrap;
   overflow: hidden;
   white-space: nowrap;
@@ -3501,13 +3622,13 @@ button.application-followup-avatar {
 }
 
 .application-followup-profile__job {
-  padding: 12px;
+  padding: 10px;
   border: 1px solid var(--border-line);
   border-radius: 10px;
   background: var(--bg-card);
   color: var(--text-secondary);
-  font-size: 13px;
-  line-height: 1.45;
+  font-size: 12px;
+  line-height: 1.4;
   overflow: hidden;
 }
 

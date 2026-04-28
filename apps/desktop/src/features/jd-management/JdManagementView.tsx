@@ -1,5 +1,14 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { ToolbarButton, ToolbarField, ToolbarInput, ToolbarRefreshButton, ToolbarSelect } from "../../components";
+import {
+  FormInput,
+  FormSelect,
+  FormTextarea,
+  ToolbarButton,
+  ToolbarField,
+  ToolbarInput,
+  ToolbarRefreshButton,
+  ToolbarSelect,
+} from "../../components";
 import type { ApplicationViewModel } from "../kanban-shared/kanbanUtils";
 import { apiClient } from "../../lib/api";
 import { formatDateTime } from "../../lib/format";
@@ -110,27 +119,6 @@ function rowMatchesKeyword(row: JdManagementRow, keyword: string): boolean {
     row.ownerName,
     row.job.companyName,
   ].join(" ").toLowerCase().includes(query);
-}
-
-function rowMatchesApplicantKeyword(row: JdManagementRow, keyword: string): boolean {
-  const query = keyword.trim().toLowerCase();
-  if (!query) {
-    return true;
-  }
-  return row.applications.some((item) => {
-    const person = item.application.person;
-    const contactInfo = asObject(person.contactInfo);
-    const contactSnapshot = asObject(item.application.contactSnapshot);
-    return [
-      person.name,
-      contactInfo.phone,
-      contactInfo.mobile,
-      contactInfo.email,
-      contactSnapshot.phone,
-      contactSnapshot.mobile,
-      contactSnapshot.email,
-    ].join(" ").toLowerCase().includes(query);
-  });
 }
 
 function makeFormState(job: JobDescriptionSummaryRecord): JdFormState {
@@ -459,27 +447,27 @@ function JdFullDrawer({
               <div className="jd-management-drawer__grid">
                 <label className="jd-management-drawer__field">
                   <span className="jd-management-drawer__label">JD名称</span>
-                  <input className="jd-management-drawer__input" value={form.title} onChange={(event) => setField("title", event.target.value)} />
+                  <FormInput className="jd-management-drawer__input" value={form.title} onChange={(event) => setField("title", event.target.value)} />
                 </label>
                 <label className="jd-management-drawer__field">
                   <span className="jd-management-drawer__label">职位ID</span>
-                  <input className="jd-management-drawer__input" value={form.jobDescriptionId} disabled />
+                  <FormInput className="jd-management-drawer__input" value={form.jobDescriptionId} disabled />
                 </label>
                 <label className="jd-management-drawer__field">
                   <span className="jd-management-drawer__label">城市</span>
-                  <input className="jd-management-drawer__input" value={form.location} onChange={(event) => setField("location", event.target.value)} />
+                  <FormInput className="jd-management-drawer__input" value={form.location} onChange={(event) => setField("location", event.target.value)} />
                 </label>
                 <label className="jd-management-drawer__field">
                   <span className="jd-management-drawer__label">部门</span>
-                  <input className="jd-management-drawer__input" value={form.department} onChange={(event) => setField("department", event.target.value)} />
+                  <FormInput className="jd-management-drawer__input" value={form.department} onChange={(event) => setField("department", event.target.value)} />
                 </label>
                 <label className="jd-management-drawer__field">
                   <span className="jd-management-drawer__label">招聘负责人</span>
-                  <input className="jd-management-drawer__input" value={form.ownerName} onChange={(event) => setField("ownerName", event.target.value)} />
+                  <FormInput className="jd-management-drawer__input" value={form.ownerName} onChange={(event) => setField("ownerName", event.target.value)} />
                 </label>
                 <label className="jd-management-drawer__field">
                   <span className="jd-management-drawer__label">招聘目标</span>
-                  <input className="jd-management-drawer__input" value={form.headcount} onChange={(event) => setField("headcount", event.target.value)} />
+                  <FormInput className="jd-management-drawer__input" value={form.headcount} onChange={(event) => setField("headcount", event.target.value)} />
                 </label>
               </div>
             </section>
@@ -493,7 +481,7 @@ function JdFullDrawer({
               </div>
               <label className="jd-management-drawer__field">
                 <span className="jd-management-drawer__label">职位描述</span>
-                <textarea className="jd-management-drawer__textarea" value={form.description} onChange={(event) => setField("description", event.target.value)} />
+                <FormTextarea className="jd-management-drawer__textarea" value={form.description} onChange={(event) => setField("description", event.target.value)} />
               </label>
             </section>
 
@@ -501,7 +489,7 @@ function JdFullDrawer({
               <strong className="jd-management-drawer__section-title">三、任职要求</strong>
               <label className="jd-management-drawer__field">
                 <span className="jd-management-drawer__label">任职要求</span>
-                <textarea className="jd-management-drawer__textarea" value={form.requirements} onChange={(event) => setField("requirements", event.target.value)} />
+                <FormTextarea className="jd-management-drawer__textarea" value={form.requirements} onChange={(event) => setField("requirements", event.target.value)} />
               </label>
             </section>
 
@@ -510,31 +498,31 @@ function JdFullDrawer({
               <div className="jd-management-drawer__grid">
                 <label className="jd-management-drawer__field">
                   <span className="jd-management-drawer__label">学历要求</span>
-                  <input className="jd-management-drawer__input" value={form.educationRequirement} onChange={(event) => setField("educationRequirement", event.target.value)} />
+                  <FormInput className="jd-management-drawer__input" value={form.educationRequirement} onChange={(event) => setField("educationRequirement", event.target.value)} />
                 </label>
                 <label className="jd-management-drawer__field">
                   <span className="jd-management-drawer__label">工作经验</span>
-                  <input className="jd-management-drawer__input" value={form.experienceRequirement} onChange={(event) => setField("experienceRequirement", event.target.value)} />
+                  <FormInput className="jd-management-drawer__input" value={form.experienceRequirement} onChange={(event) => setField("experienceRequirement", event.target.value)} />
                 </label>
                 <label className="jd-management-drawer__field">
                   <span className="jd-management-drawer__label">薪资范围</span>
-                  <input className="jd-management-drawer__input" value={form.compensationText} onChange={(event) => setField("compensationText", event.target.value)} />
+                  <FormInput className="jd-management-drawer__input" value={form.compensationText} onChange={(event) => setField("compensationText", event.target.value)} />
                 </label>
                 <label className="jd-management-drawer__field">
                   <span className="jd-management-drawer__label">用工类型</span>
-                  <input className="jd-management-drawer__input" value={form.employmentType} onChange={(event) => setField("employmentType", event.target.value)} />
+                  <FormInput className="jd-management-drawer__input" value={form.employmentType} onChange={(event) => setField("employmentType", event.target.value)} />
                 </label>
                 <label className="jd-management-drawer__field">
                   <span className="jd-management-drawer__label">职位状态</span>
-                  <select className="jd-management-drawer__select" value={form.status} onChange={(event) => setField("status", event.target.value as JdStatusBucket)}>
+                  <FormSelect className="jd-management-drawer__select" value={form.status} onChange={(event) => setField("status", event.target.value as JdStatusBucket)}>
                     <option value="recruiting">招聘中</option>
                     <option value="paused">暂停中</option>
                     <option value="closed">已关闭</option>
-                  </select>
+                  </FormSelect>
                 </label>
                 <label className="jd-management-drawer__field">
                   <span className="jd-management-drawer__label">来源</span>
-                  <input className="jd-management-drawer__input" value={form.source} onChange={(event) => setField("source", event.target.value)} />
+                  <FormInput className="jd-management-drawer__input" value={form.source} onChange={(event) => setField("source", event.target.value)} />
                 </label>
               </div>
             </section>
@@ -543,7 +531,7 @@ function JdFullDrawer({
               <strong className="jd-management-drawer__section-title">五、标签</strong>
               <label className="jd-management-drawer__field">
                 <span className="jd-management-drawer__label">岗位标签</span>
-                <input className="jd-management-drawer__input" value={form.benefitTags} onChange={(event) => setField("benefitTags", event.target.value)} />
+                <FormInput className="jd-management-drawer__input" value={form.benefitTags} onChange={(event) => setField("benefitTags", event.target.value)} />
               </label>
               <div className="jd-management-tag-list">
                 {form.benefitTags.split(/[，,]/).map((tag) => tag.trim()).filter(Boolean).slice(0, 8).map((tag) => (
@@ -627,10 +615,9 @@ export function JdManagementView({
       (cityFilter === "all" || row.job.location === cityFilter) &&
       (departmentFilter === "all" || row.job.department === departmentFilter) &&
       (ownerFilter === "all" || getOwnerDisplay(row) === ownerFilter) &&
-      rowMatchesKeyword(row, keyword) &&
-      rowMatchesApplicantKeyword(row, applicantKeyword)
+      rowMatchesKeyword(row, keyword)
     )),
-    [applicantKeyword, cityFilter, departmentFilter, keyword, model.rows, ownerFilter, statusFilter],
+    [cityFilter, departmentFilter, keyword, model.rows, ownerFilter, statusFilter],
   );
   const pageCount = Math.max(1, Math.ceil(serverTotal / pageSize));
   const currentPage = clampPage(page, pageCount);
@@ -691,6 +678,7 @@ export function JdManagementView({
       department: departmentFilter === "all" ? null : departmentFilter,
       owner: ownerFilter === "all" ? null : ownerFilter,
       keyword: keyword.trim() || null,
+      applicantKeyword: applicantKeyword.trim() || null,
     }).then((result) => {
       if (cancelled) {
         return;
@@ -929,10 +917,10 @@ export function JdManagementView({
 
         <footer className="jd-management-pagination">
           <span className="jd-management-detail__value">共 {serverTotal} 条</span>
-          <select className="jd-management-select" value={pageSize} onChange={(event) => setPageSize(Number(event.target.value))}>
+          <ToolbarSelect value={pageSize} onChange={(event) => setPageSize(Number(event.target.value))}>
             <option value="20">20 条/页</option>
             <option value="50">50 条/页</option>
-          </select>
+          </ToolbarSelect>
           <span className="jd-management-detail__value">{pageStart}-{pageEnd}</span>
           <button
             type="button"
@@ -963,8 +951,8 @@ export function JdManagementView({
           </button>
           <label className="jd-management-filter">
             前往
-            <input
-              className="jd-management-input"
+            <ToolbarInput
+              className="jd-management-page-jump-input"
               style={{ width: "56px" }}
               type="number"
               min={1}

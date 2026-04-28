@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { FormTextarea } from "../../components";
 import { apiClient } from "../../lib/api";
 import { useI18n } from "../../lib/i18n";
 import type { ApplicationViewModel } from "./kanbanUtils";
@@ -53,7 +54,7 @@ export function ChatInputArea({ record, sending, onSubmit }: ChatInputAreaProps)
           {copy("Suggested phrasing", "建议话术")}
         </button>
       </div>
-      <textarea
+      <FormTextarea
         className="chat-input-area__input"
         rows={6}
         value={draft}

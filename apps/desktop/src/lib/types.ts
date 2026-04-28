@@ -1,4 +1,9 @@
-import type { ApplicationStatusTransition } from "@recruit-agent/shared";
+import type {
+  ApplicationStatusTransition,
+  JobDescriptionPageParams as SharedJobDescriptionPageParams,
+  JobDescriptionPageRecord as SharedJobDescriptionPageRecord,
+  JobDescriptionSummaryRecord as SharedJobDescriptionSummaryRecord,
+} from "@recruit-agent/shared";
 
 export type WorkspaceTab =
   | "home"
@@ -37,47 +42,9 @@ export interface PersonSummaryRecord {
   onlineResumeText?: string | null;
 }
 
-export interface JobDescriptionSummaryRecord {
-  jobDescriptionId?: string | null;
-  title: string;
-  companyName?: string | null;
-  department?: string | null;
-  location?: string | null;
-  employmentType?: string | null;
-  headcount?: number | null;
-  salaryMin?: number | null;
-  salaryMax?: number | null;
-  compensationText?: string | null;
-  experienceRequirement?: string | null;
-  educationRequirement?: string | null;
-  summary?: string | null;
-  description?: string | null;
-  requirements?: string | null;
-  benefitTags: string[];
-  detailMetadata: Record<string, unknown>;
-  status?: string | null;
-  source?: string | null;
-  createdAt?: string | number | null;
-  updatedAt?: string | number | null;
-}
-
-export interface JobDescriptionPageRecord {
-  items: JobDescriptionSummaryRecord[];
-  total: number;
-  limit: number;
-  offset: number;
-  hasNext: boolean;
-}
-
-export interface JobDescriptionPageParams {
-  limit?: number;
-  offset?: number;
-  status?: string | null;
-  location?: string | null;
-  department?: string | null;
-  owner?: string | null;
-  keyword?: string | null;
-}
+export type JobDescriptionSummaryRecord = SharedJobDescriptionSummaryRecord;
+export type JobDescriptionPageRecord = SharedJobDescriptionPageRecord;
+export type JobDescriptionPageParams = SharedJobDescriptionPageParams;
 
 export interface JobDescriptionFunnelStepRecord {
   key: string;

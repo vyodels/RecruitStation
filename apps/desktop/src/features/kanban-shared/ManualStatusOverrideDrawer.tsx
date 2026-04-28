@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import type { ApplicationTransitionPayload, RecruitmentStateMachine } from "@recruit-agent/shared";
-import { StatusBadge } from "../../components";
+import { FormSelect, FormTextarea, StatusBadge } from "../../components";
 import { useI18n } from "../../lib/i18n";
 import { applicationScopedLabel, type ApplicationViewModel } from "./kanbanUtils";
 
@@ -75,7 +75,7 @@ export function ManualStatusOverrideDrawer({
 
           <label className="drawer__field">
             <span>{copy("Target status", "目标状态")}</span>
-            <select
+            <FormSelect
               className="drawer__select"
               value={targetStatus}
               onChange={(event) => setTargetStatus(event.target.value)}
@@ -85,12 +85,12 @@ export function ManualStatusOverrideDrawer({
                   {applicationScopedLabel(option.label)}
                 </option>
               ))}
-            </select>
+            </FormSelect>
           </label>
 
           <label className="drawer__field">
             <span>{copy("Override reason", "覆盖理由")}</span>
-            <textarea
+            <FormTextarea
               className="drawer__textarea"
               rows={4}
               value={overrideReason}
@@ -101,7 +101,7 @@ export function ManualStatusOverrideDrawer({
 
           <label className="drawer__field">
             <span>{copy("Operator note", "备注")}</span>
-            <textarea
+            <FormTextarea
               className="drawer__textarea"
               rows={3}
               value={note}

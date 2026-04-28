@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { StatusBadge } from "../../components";
+import { FormCheckbox, FormInput, FormSelect, FormTextarea, StatusBadge } from "../../components";
 import { apiClient } from "../../lib/api";
 import { formatDateTime } from "../../lib/format";
 import { useI18n } from "../../lib/i18n";
@@ -444,21 +444,6 @@ function noticeStyle(tone: PanelNoticeTone): React.CSSProperties {
     padding: "var(--space-3) var(--space-4)",
     fontSize: "var(--font-size-sm)",
     lineHeight: "var(--line-height-base)",
-  };
-}
-
-function baseInputStyle(): React.CSSProperties {
-  return {
-    width: "100%",
-    minHeight: 36,
-    border: "1px solid var(--border-input)",
-    borderRadius: 10,
-    background: "var(--bg-card)",
-    color: "var(--chat-text-primary)",
-    fontSize: "var(--font-size-sm)",
-    lineHeight: "var(--line-height-base)",
-    fontFamily: "var(--font-sans)",
-    padding: "8px 12px",
   };
 }
 
@@ -1842,7 +1827,7 @@ export function ChatOverlay({ transport, workspaceAgent }: ChatOverlayProps): JS
               ) : null}
               <div style={{ display: "grid", gap: "var(--space-1)" }}>
                 <span className="chat-list-item__title">{copy("Title", "标题")}</span>
-                <input
+                <FormInput
                   type="text"
                   value={autonomousGoalDraft.title}
                   onChange={(event) =>
@@ -1852,12 +1837,11 @@ export function ChatOverlay({ transport, workspaceAgent }: ChatOverlayProps): JS
                     }))
                   }
                   placeholder={copy("JD-xxx recruit 3 candidates", "例如：JD-xxx 找够 3 名候选人")}
-                  style={baseInputStyle()}
                 />
               </div>
               <div style={{ display: "grid", gap: "var(--space-1)" }}>
                 <span className="chat-list-item__title">{copy("JD", "JD")}</span>
-                <select
+                <FormSelect
                   value={autonomousGoalDraft.jdId}
                   onChange={(event) =>
                     setAutonomousGoalDraft((current) => ({
@@ -1865,7 +1849,6 @@ export function ChatOverlay({ transport, workspaceAgent }: ChatOverlayProps): JS
                       jdId: event.target.value,
                     }))
                   }
-                  style={baseInputStyle()}
                 >
                   <option value="">{copy("Select a JD (optional)", "选择一个 JD（可选）")}</option>
                   {jobDescriptionOptions.map((job) => (
@@ -1873,12 +1856,12 @@ export function ChatOverlay({ transport, workspaceAgent }: ChatOverlayProps): JS
                       {job.title}
                     </option>
                   ))}
-                </select>
+                </FormSelect>
               </div>
               {selectedTemplate?.supportsCandidateCountTarget ?? true ? (
                 <div style={{ display: "grid", gap: "var(--space-1)" }}>
                   <span className="chat-list-item__title">{copy("Candidate target", "候选人数目标")}</span>
-                  <input
+                  <FormInput
                     type="number"
                     min={1}
                     value={autonomousGoalDraft.candidateCountTarget}
@@ -1888,13 +1871,12 @@ export function ChatOverlay({ transport, workspaceAgent }: ChatOverlayProps): JS
                         candidateCountTarget: event.target.value,
                       }))
                     }
-                    style={baseInputStyle()}
                   />
                 </div>
               ) : null}
               <div style={{ display: "grid", gap: "var(--space-1)" }}>
                 <span className="chat-list-item__title">{copy("Goal text", "Goal 文本")}</span>
-                <textarea
+                <FormTextarea
                   value={autonomousGoalDraft.goalText}
                   onChange={(event) =>
                     setAutonomousGoalDraft((current) => ({
@@ -1903,11 +1885,7 @@ export function ChatOverlay({ transport, workspaceAgent }: ChatOverlayProps): JS
                     }))
                   }
                   placeholder={copy("Describe the autonomous recruiting task…", "描述本轮 Autonomous 要完成的招聘任务…")}
-                  style={{
-                    ...baseInputStyle(),
-                    minHeight: 116,
-                    resize: "vertical",
-                  }}
+                  className="chat-overlay-form-textarea--medium"
                 />
               </div>
               <div style={{ display: "flex", gap: "var(--space-2)", flexWrap: "wrap" }}>
@@ -2173,7 +2151,7 @@ export function ChatOverlay({ transport, workspaceAgent }: ChatOverlayProps): JS
               {approval.notes ? <div className="chat-list-item__meta">{copy("Notes", "备注")} · {approval.notes}</div> : null}
               {pending ? (
                 <div style={{ display: "grid", gap: "var(--space-2)" }}>
-                  <textarea
+                  <FormTextarea
                     value={approvalNotes[approval.id] ?? ""}
                     onChange={(event) =>
                       setApprovalNotes((current) => ({
@@ -2182,11 +2160,6 @@ export function ChatOverlay({ transport, workspaceAgent }: ChatOverlayProps): JS
                       }))
                     }
                     placeholder={copy("Optional reviewer note for reject path…", "给拒绝动作填写可选备注…")}
-                    style={{
-                      ...baseInputStyle(),
-                      minHeight: 88,
-                      resize: "vertical",
-                    }}
                   />
                   <div style={{ display: "flex", gap: "var(--space-2)", flexWrap: "wrap" }}>
                     <button
@@ -2244,7 +2217,7 @@ export function ChatOverlay({ transport, workspaceAgent }: ChatOverlayProps): JS
                   color: "var(--chat-text-secondary)",
                 }}
               >
-                <input
+                <FormCheckbox
                   type="checkbox"
                   checked={configDraft.desktopApprovalsOnly}
                   onChange={(event) =>
@@ -2273,7 +2246,7 @@ export function ChatOverlay({ transport, workspaceAgent }: ChatOverlayProps): JS
                   color: "var(--chat-text-secondary)",
                 }}
               >
-                <input
+                <FormCheckbox
                   type="checkbox"
                   checked={configDraft.autonomyEnabled}
                   onChange={(event) =>
@@ -2302,7 +2275,7 @@ export function ChatOverlay({ transport, workspaceAgent }: ChatOverlayProps): JS
                   color: "var(--chat-text-secondary)",
                 }}
               >
-                <input
+                <FormCheckbox
                   type="checkbox"
                   checked={configDraft.skillHealthAutonomyEnabled}
                   onChange={(event) =>
@@ -2322,7 +2295,7 @@ export function ChatOverlay({ transport, workspaceAgent }: ChatOverlayProps): JS
 
             <div style={{ display: "grid", gap: "var(--space-1)" }}>
               <span className="chat-list-item__title">{copy("Health check interval (seconds)", "巡检间隔（秒）")}</span>
-              <input
+              <FormInput
                 type="number"
                 min={1}
                 value={configDraft.skillHealthAutonomyIntervalSeconds}
@@ -2336,7 +2309,6 @@ export function ChatOverlay({ transport, workspaceAgent }: ChatOverlayProps): JS
                       : current,
                   )
                 }
-                style={baseInputStyle()}
               />
             </div>
 
@@ -2369,7 +2341,7 @@ export function ChatOverlay({ transport, workspaceAgent }: ChatOverlayProps): JS
           <div style={{ display: "grid", gap: "var(--space-3)" }}>
             <div style={{ display: "grid", gap: "var(--space-1)" }}>
               <span className="chat-list-item__title">{copy("System prompt", "System Prompt")}</span>
-              <textarea
+              <FormTextarea
                 value={agentConfigDrafts[activeAgent].systemPrompt}
                 onChange={(event) =>
                   setAgentConfigDrafts((current) => ({
@@ -2380,18 +2352,14 @@ export function ChatOverlay({ transport, workspaceAgent }: ChatOverlayProps): JS
                     },
                   }))
                 }
-                style={{
-                  ...baseInputStyle(),
-                  minHeight: 160,
-                  resize: "vertical",
-                }}
+                className="chat-overlay-form-textarea--large"
               />
             </div>
 
             {activeAgent === "autonomous" ? (
               <div style={{ display: "grid", gap: "var(--space-1)" }}>
                 <span className="chat-list-item__title">{copy("Goal template", "任务描述模板")}</span>
-                <textarea
+                <FormTextarea
                   value={agentConfigDrafts[activeAgent].goalTemplate}
                   onChange={(event) =>
                     setAgentConfigDrafts((current) => ({
@@ -2406,18 +2374,14 @@ export function ChatOverlay({ transport, workspaceAgent }: ChatOverlayProps): JS
                     "Describe the long-running recruiting mission for autonomous execution…",
                     "填写 Autonomous 持续执行的真实招聘任务描述…",
                   )}
-                  style={{
-                    ...baseInputStyle(),
-                    minHeight: 196,
-                    resize: "vertical",
-                  }}
+                  className="chat-overlay-form-textarea--xlarge"
                 />
               </div>
             ) : null}
 
             <div style={{ display: "grid", gap: "var(--space-1)" }}>
               <span className="chat-list-item__title">{copy("Scoring rubric", "评分 Rubric")}</span>
-              <textarea
+              <FormTextarea
                 value={agentConfigDrafts[activeAgent].scoringRubric}
                 onChange={(event) =>
                   setAgentConfigDrafts((current) => ({
@@ -2429,11 +2393,7 @@ export function ChatOverlay({ transport, workspaceAgent }: ChatOverlayProps): JS
                   }))
                 }
                 placeholder={copy("Paste the scoring rubric used by this agent…", "填写当前 Agent 使用的评分 Rubric…")}
-                style={{
-                  ...baseInputStyle(),
-                  minHeight: 136,
-                  resize: "vertical",
-                }}
+                className="chat-overlay-form-textarea--medium"
               />
             </div>
           </div>

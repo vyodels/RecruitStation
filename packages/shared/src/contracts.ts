@@ -42,6 +42,49 @@ export type ApplicationRecord = {
   aiDecision?: "pass" | "reject" | "review";
 };
 
+export type JobDescriptionSummaryRecord = {
+  jobDescriptionId?: string | null;
+  title: string;
+  companyName?: string | null;
+  department?: string | null;
+  location?: string | null;
+  employmentType?: string | null;
+  headcount?: number | null;
+  salaryMin?: number | null;
+  salaryMax?: number | null;
+  compensationText?: string | null;
+  experienceRequirement?: string | null;
+  educationRequirement?: string | null;
+  summary?: string | null;
+  description?: string | null;
+  requirements?: string | null;
+  benefitTags: string[];
+  detailMetadata: Record<string, unknown>;
+  status?: string | null;
+  source?: string | null;
+  createdAt?: string | number | null;
+  updatedAt?: string | number | null;
+};
+
+export type JobDescriptionPageRecord = {
+  items: JobDescriptionSummaryRecord[];
+  total: number;
+  limit: number;
+  offset: number;
+  hasNext: boolean;
+};
+
+export type JobDescriptionPageParams = {
+  limit?: number;
+  offset?: number;
+  status?: string | null;
+  location?: string | null;
+  department?: string | null;
+  owner?: string | null;
+  keyword?: string | null;
+  applicantKeyword?: string | null;
+};
+
 export type PlaybookRecord = {
   id: string;
   name: string;

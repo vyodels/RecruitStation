@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from "react";
 import type { ApplicationTransitionPayload, HumanActionDefinition, RecruitmentStateMachine } from "@recruit-agent/shared";
-import { StatusBadge, ToolbarInput, ToolbarRefreshButton } from "../../components";
+import { FormTextarea, StatusBadge, ToolbarInput, ToolbarRefreshButton } from "../../components";
 import { formatCompactDate } from "../../lib/format";
 import { useI18n } from "../../lib/i18n";
 import { ChatInputArea } from "./ChatInputArea";
@@ -274,7 +274,7 @@ export function CandidateCommunicationPanel({
             {pendingAction ? (
               <div className="candidate-communication-panel__note-box">
                 <strong>{pendingAction.action.label}</strong>
-                <textarea
+                <FormTextarea
                   className="candidate-communication-panel__note-input"
                   rows={3}
                   value={pendingAction.note}
