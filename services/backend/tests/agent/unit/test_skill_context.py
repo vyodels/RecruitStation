@@ -1,0 +1,121 @@
+from __future__ import annotations
+
+from recruit_agent.models.domain import Skill
+from recruit_agent.skills.context import build_skill_context_injections
+
+
+def test_build_skill_context_injections_uses_active_and_trial_skills_only() -> None:
+    active = Skill(
+        skill_id="candidate-summary",
+        name="Candidate summary",
+        status="active",
+        description="Summarize candidate signals.",
+        trigger_hint="Use when candidate conversation needs summarizing.",
+        body={"instructions": "Extract stable candidate signals only."},
+        input_schema={"type": "object"},
+        output_schema={"type": "object"},
+        skill_metadata={"environment_scope": "real_site_verified", "ignored": True},
+    )
+    trial = Skill(
+        skill_id="resume-parser",
+        name="Resume parser",
+        status="trial",
+        body={"summary": "Parse resume facts."},
+    )
+    draft = Skill(
+        skill_id="draft-only",
+        name="Draft only",
+        status="draft",
+        body={"instructions": "Do not inject."},
+    )
+
+    injections = build_skill_context_injections([draft, trial, active])
+
+    assert [item.skill_id for item in injections] == ["candidate-summary", "resume-parser"]
+    payload = injections[0].to_prompt_payload()
+    assert payload["instructions"] == "Extract stable candidate signals only."
+    assert payload["metadata"] == {"environment_scope": "real_site_verified"}
+
+
+def test_build_skill_context_injections_respects_limit() -> None:
+    skills = [
+        Skill(skill_id=f"skill-{index}", name=f"Skill {index}", status="active")
+        for index in range(3)
+    ]
+
+    injections = build_skill_context_injections(skills, limit=2)
+
+    assert [item.skill_id for item in injections] == ["skill-0", "skill-1"]
+
+
+def test_build_skill_context_injections_prioritizes_explicit_skill_ids() -> None:
+    candidate_summary = Skill(
+        skill_id="candidate-summary",
+        name="Candidate summary",
+        status="active",
+    )
+    resume_parser = Skill(
+        skill_id="resume-parser",
+        name="Resume parser",
+        status="trial",
+    )
+    archived = Skill(
+        skill_id="archive-candidate",
+        name="Archive candidate",
+        status="disabled",
+    )
+
+    injections = build_skill_context_injections(
+        [candidate_summary, resume_parser, archived],
+        explicit_skill_ids=["resume-parser", "archive-candidate"],
+    )
+
+    assert [item.skill_id for item in injections] == ["resume-parser", "candidate-summary"]
+
+
+def test_build_skill_context_injections_uses_trigger_relevance_for_selection() -> None:
+    unrelated = Skill(
+        skill_id="calendar-coordination",
+        name="Calendar coordination",
+        status="active",
+        trigger_hint="Use when arranging interview times.",
+    )
+    resume_parser = Skill(
+        skill_id="resume-parser",
+        name="Resume parser",
+        status="active",
+        description="Extract resume facts.",
+        trigger_hint="Use when parsing resume documents.",
+        body={"summary": "Parse work history, education, and candidate signals."},
+        skill_metadata={"trigger_examples": ["Parse a PDF resume into structured facts."]},
+    )
+
+    injections = build_skill_context_injections(
+        [unrelated, resume_parser],
+        query="Need to parse a resume PDF into candidate facts.",
+        limit=1,
+    )
+
+    assert [item.skill_id for item in injections] == ["resume-parser"]
+
+
+def test_build_skill_context_injections_uses_category_relevance_for_ordering() -> None:
+    outreach = Skill(
+        skill_id="outreach-draft",
+        name="Outreach draft",
+        status="active",
+        category="outreach",
+    )
+    screening = Skill(
+        skill_id="screening-score",
+        name="Screening score",
+        status="active",
+        category="screening",
+    )
+
+    injections = build_skill_context_injections(
+        [outreach, screening],
+        category="screening",
+    )
+
+    assert [item.skill_id for item in injections] == ["screening-score", "outreach-draft"]

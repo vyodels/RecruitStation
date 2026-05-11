@@ -42,7 +42,7 @@ def test_assistant_sse_events_use_turn_terminology(tmp_path: Path) -> None:
     body = response.text
     assert response.status_code == 200
     assert "event: turn.started" in body
-    assert "event: round.completed" in body
+    assert "event: provider_completed" in body
     assert "event: turn.completed" in body
     assert "event: tick.started" not in body
     assert "event: tick.completed" not in body

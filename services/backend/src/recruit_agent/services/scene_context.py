@@ -6,8 +6,9 @@ from urllib.parse import urlparse
 
 from sqlalchemy.orm import Session, sessionmaker
 
+from recruit_agent.agent_runtime.engine import InteractionEngine, InteractionEngineConfig
+from recruit_agent.agent_runtime.types import InteractionOutput, LLMMessage
 from recruit_agent.db.base import utcnow
-from recruit_agent.agent_runtime.kernel import AgentKernel
 from recruit_agent.plugins.host import PluginHost
 from recruit_agent.repositories.domain import (
     EnvironmentSnapshotRepository,
@@ -15,8 +16,8 @@ from recruit_agent.repositories.domain import (
     ExecutionPlanRepository,
     TaskSpecRepository,
 )
-from recruit_agent.runtime.limits import RoundLimits
-from recruit_agent.agent_runtime.models import GoalRef, InputEnvelope, Message, Observation, RoundOutcome
+from recruit_agent.runtime.limits import SceneExecutionLimits
+from recruit_agent.agents.outcome import AgentTurnOutcome
 from recruit_agent.agent_runtime.providers import LLMProvider
 from recruit_agent.runtime.result_semantics import (
     extract_execution_status,
@@ -33,22 +34,11 @@ class SceneContextService:
     provider: LLMProvider
     tool_registry: ToolRegistry
     plugin_host: PluginHost
-    limits: RoundLimits = field(default_factory=RoundLimits)
-    default_max_rounds: int | None = None
-    _kernel: AgentKernel = field(init=False, repr=False)
-
-    def __post_init__(self) -> None:
-        self._kernel = AgentKernel(
-            provider=self.provider,
-            tool_registry=self.tool_registry,
-            plugin_host=self.plugin_host,
-            memory_service=None,
-            learning_writer=None,
-            limits=self.limits,
-        )
+    limits: SceneExecutionLimits = field(default_factory=SceneExecutionLimits)
+    default_max_llm_invocations: int | None = None
 
     def delegate(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        request = _normalize_scene_request(arguments, default_max_rounds=self.default_max_rounds)
+        request = _normalize_scene_request(arguments, default_max_llm_invocations=self.default_max_llm_invocations)
         with self.session_factory() as session:
             task_repo = TaskSpecRepository(session)
             plan_repo = ExecutionPlanRepository(session)
@@ -82,7 +72,7 @@ class SceneContextService:
                     "preferred_domains": ["scene"],
                     "compiled_payload": {
                         "instruction": request["instruction"],
-                        "max_rounds": request["max_rounds"],
+                        "max_llm_invocations": request["max_llm_invocations"],
                     },
                 }
             )
@@ -196,8 +186,7 @@ class SceneContextService:
         episode: Any,
         snapshot_ids: list[str],
     ) -> dict[str, Any]:
-        history_messages: list[Message] = []
-        last_outcome = RoundOutcome(status="continue", gate_signal="continue")
+        last_outcome = AgentTurnOutcome(status="continue", gate_signal="continue")
         blockers: list[dict[str, Any]] = []
         browser_semantics = _initial_browser_semantics(request)
         scene_tool_registry = _scene_tool_registry(
@@ -205,103 +194,56 @@ class SceneContextService:
             request=request,
             browser_semantics=browser_semantics,
         )
-        kernel = AgentKernel(
-            provider=self.provider,
-            tool_registry=scene_tool_registry,
-            plugin_host=self.plugin_host,
-            memory_service=None,
-            learning_writer=None,
-            limits=self.limits,
+        max_llm_invocations = int(request["max_llm_invocations"] or self.limits.max_llm_invocations or 8)
+        engine_events: list[dict[str, Any]] = []
+        engine = InteractionEngine(
+            InteractionEngineConfig(
+                conversation_id=episode.id,
+                provider=self.provider,
+                tools=scene_tool_registry.to_agent_runtime_tools(),
+                initial_messages=[
+                    LLMMessage(
+                        role="system",
+                        content=_scene_system_prompt(
+                            request=request,
+                            episode_id=episode.id,
+                            task_spec_id=task_spec.id,
+                            max_llm_invocations=max_llm_invocations,
+                            recent_events=list(episode.observations or [])[-8:],
+                            available_tools=sorted(scene_tool_registry.tools.keys()),
+                            available_mcps=_available_mcp_names(scene_tool_registry),
+                        ),
+                    )
+                ],
+                max_llm_invocations=max_llm_invocations,
+            )
         )
-
-        round_seq = 0
-        while True:
-            if request["max_rounds"] is not None and round_seq >= int(request["max_rounds"]):
-                blockers = blockers or [
-                    {
-                        "kind": "budget_exhausted",
-                        "message": "scene context reached explicit round budget before producing a terminal result",
-                    }
-                ]
-                break
-
-            round_seq += 1
-            round_events: list[dict[str, Any]] = []
-            observation = Observation(
-                world_snapshot={
-                    "scene_request": {
-                        "instruction": request["instruction"],
-                        "input": _compact_value(request["input"]),
-                        "context": _compact_value(request["context"]),
-                        "output_contract": _compact_value(request["output_contract"]),
-                        "environment_requirements": _compact_value(request["environment_requirements"]),
-                    },
-                    "scene_execution": {
-                        "episode_id": episode.id,
-                        "task_spec_id": task_spec.id,
-                        "round_seq": round_seq,
-                    },
-                },
-                scope_kind="scene_context",
-                scope_ref=episode.id,
-                recent_events=list(episode.observations or [])[-8:],
-                available_tools=sorted(scene_tool_registry.tools.keys()),
-                available_skills=[],
-                available_mcps=_available_mcp_names(scene_tool_registry),
-                hash=f"{episode.id}:{round_seq}",
-                input=InputEnvelope(history_messages=list(history_messages)),
-            )
-            last_outcome = kernel.run_round(
-                goal=GoalRef(
-                    goal_id=episode.id,
-                    scope_kind="scene_context",
-                    scope_ref=episode.id,
-                    title=request["title"],
-                    goal_text=_build_scene_goal_text(request),
-                    constraints={
-                        "goal_kind": "scene_context",
-                        "persist_memory": False,
-                        "success_criteria": dict(request["success_criteria"]),
-                        "output_contract": dict(request["output_contract"]),
-                        "environment_requirements": dict(request["environment_requirements"]),
-                        "approval_policy": dict(request["approval_policy"]),
-                        "preferred_capabilities": list(request["preferred_capabilities"]),
-                        "source_kind": "scene_context",
-                    },
-                ),
-                observation=observation,
-                limits=self.limits,
-                event_sink=lambda event_type, data: _record_scene_event(
-                    round_events=round_events,
-                    browser_semantics=browser_semantics,
-                    event_type=event_type,
-                    data=data,
-                ),
-            )
-            history_messages = list(last_outcome.metadata.get("history_messages") or [])
-            blockers = _collect_blockers(last_outcome, round_events)
-            snapshot_ids.extend(
-                _append_environment_snapshots(
-                    session=session,
-                    task_spec=task_spec,
-                    plan=plan,
-                    episode=episode,
-                    request=request,
-                    round_seq=round_seq,
-                    events=round_events,
-                )
-            )
-            _append_episode_round(
+        last_outcome = _scene_outcome_from_engine(
+            engine=engine,
+            instruction=_build_scene_goal_text(request),
+            engine_events=engine_events,
+            browser_semantics=browser_semantics,
+        )
+        blockers = _collect_blockers(last_outcome, engine_events)
+        snapshot_ids.extend(
+            _append_environment_snapshots(
                 session=session,
+                task_spec=task_spec,
+                plan=plan,
                 episode=episode,
-                round_seq=round_seq,
-                events=round_events,
-                outcome=last_outcome,
-                blockers=blockers,
-                snapshot_count=len(snapshot_ids),
+                request=request,
+                events=engine_events,
             )
-            if not _should_continue(last_outcome):
-                break
+        )
+        _append_episode_engine_events(
+            session=session,
+            episode=episode,
+            engine_output_count=int((last_outcome.metadata or {}).get("engine_output_count") or 0),
+            events=engine_events,
+            outcome=last_outcome,
+            blockers=blockers,
+            snapshot_count=len(snapshot_ids),
+        )
 
         return self._finalize_success(
             session=session,
@@ -320,7 +262,7 @@ class SceneContextService:
         task_spec: Any,
         plan: Any,
         episode: Any,
-        outcome: RoundOutcome,
+        outcome: AgentTurnOutcome,
         blockers: list[dict[str, Any]],
         snapshot_ids: list[str],
     ) -> dict[str, Any]:
@@ -329,7 +271,7 @@ class SceneContextService:
         stored_status = _stored_status(public_status)
         summary = _public_summary(outcome, blockers)
         metrics = {
-            "round_count": int((episode.metrics or {}).get("round_count") or 0),
+            "engine_output_count": int((episode.metrics or {}).get("engine_output_count") or 0),
             "tool_call_count": int((episode.metrics or {}).get("tool_call_count") or 0),
             "tool_result_count": int((episode.metrics or {}).get("tool_result_count") or 0),
             "environment_snapshot_count": len(snapshot_ids),
@@ -383,7 +325,7 @@ class SceneContextService:
         episode.last_error = message
         episode.result_summary = message
         episode.metrics = {
-            "round_count": int((episode.metrics or {}).get("round_count") or 0),
+            "engine_output_count": int((episode.metrics or {}).get("engine_output_count") or 0),
             "tool_call_count": int((episode.metrics or {}).get("tool_call_count") or 0),
             "tool_result_count": int((episode.metrics or {}).get("tool_result_count") or 0),
             "environment_snapshot_count": len(snapshot_ids),
@@ -423,7 +365,7 @@ def _normalize_optional_positive_int(value: Any, *, default: int | None = None) 
     return parsed
 
 
-def _normalize_scene_request(arguments: dict[str, Any], *, default_max_rounds: int | None) -> dict[str, Any]:
+def _normalize_scene_request(arguments: dict[str, Any], *, default_max_llm_invocations: int | None) -> dict[str, Any]:
     instruction = str(arguments.get("instruction") or "").strip()
     if not instruction:
         raise ValueError("delegate_scene_context requires instruction")
@@ -483,7 +425,10 @@ def _normalize_scene_request(arguments: dict[str, Any], *, default_max_rounds: i
         context["artifact_expectations"] = artifact_expectations
         environment_requirements["artifact_expectations"] = artifact_expectations
         output_contract["artifact_expectations"] = artifact_expectations
-    max_rounds = _normalize_optional_positive_int(arguments.get("max_rounds"), default=default_max_rounds)
+    max_llm_invocations = _normalize_optional_positive_int(
+        arguments.get("max_llm_invocations"),
+        default=default_max_llm_invocations,
+    )
     requested_by = str(arguments.get("requested_by") or context.get("requested_by") or "").strip() or None
     approval_policy.setdefault("requires_confirmation", bool(approval_policy.get("requires_confirmation")))
     return {
@@ -502,7 +447,7 @@ def _normalize_scene_request(arguments: dict[str, Any], *, default_max_rounds: i
         "target_regions": target_regions,
         "action_plan": action_plan,
         "artifact_expectations": artifact_expectations,
-        "max_rounds": max_rounds,
+        "max_llm_invocations": max_llm_invocations,
         "requested_by": requested_by,
     }
 
@@ -574,13 +519,13 @@ def _build_checkpoints(request: dict[str, Any]) -> list[dict[str, Any]]:
     return checkpoints
 
 
-def _append_episode_round(
+def _append_episode_engine_events(
     *,
     session: Session,
     episode: Any,
-    round_seq: int,
+    engine_output_count: int,
     events: list[dict[str, Any]],
-    outcome: RoundOutcome,
+    outcome: AgentTurnOutcome,
     blockers: list[dict[str, Any]],
     snapshot_count: int,
 ) -> None:
@@ -590,7 +535,7 @@ def _append_episode_round(
         event_type = str(event.get("type") or "")
         payload = _as_dict(event.get("payload"))
         entry = {
-            "round_seq": round_seq,
+            "engine_output_seq": event.get("engine_output_seq"),
             "type": event_type,
             "recorded_at": event.get("recorded_at"),
             "payload": payload,
@@ -605,7 +550,7 @@ def _append_episode_round(
     episode.actions = action_entries
     episode.result_summary = outcome.final_output or _public_summary(outcome, blockers)
     episode.metrics = {
-        "round_count": max(round_seq, int((episode.metrics or {}).get("round_count") or 0)),
+        "engine_output_count": max(engine_output_count, int((episode.metrics or {}).get("engine_output_count") or 0)),
         "tool_call_count": len(action_entries),
         "tool_result_count": sum(1 for item in observation_entries if item.get("type") == "tool_result"),
         "environment_snapshot_count": snapshot_count,
@@ -622,7 +567,6 @@ def _append_environment_snapshots(
     plan: Any,
     episode: Any,
     request: dict[str, Any],
-    round_seq: int,
     events: list[dict[str, Any]],
 ) -> list[str]:
     snapshot_repo = EnvironmentSnapshotRepository(session)
@@ -658,7 +602,7 @@ def _append_environment_snapshots(
                     "observed_entities": _list_of_dicts(candidate.get("observed_entities")),
                     "action_hints": _list_of_dicts(candidate.get("action_hints")),
                     "runtime_metadata": {
-                        "round_seq": round_seq,
+                        "engine_output_seq": event.get("engine_output_seq"),
                         "tool_name": tool_name,
                         "environment_descriptor": _compact_value(_environment_descriptor(candidate)),
                         "raw": _compact_value(candidate.get("runtime_metadata") or candidate),
@@ -669,27 +613,140 @@ def _append_environment_snapshots(
     return snapshot_ids
 
 
-def _record_scene_event(
+def _scene_system_prompt(
     *,
-    round_events: list[dict[str, Any]],
+    request: dict[str, Any],
+    episode_id: str,
+    task_spec_id: str,
+    max_llm_invocations: int,
+    recent_events: list[dict[str, Any]],
+    available_tools: list[str],
+    available_mcps: list[str],
+) -> str:
+    context = {
+        "scene_request": {
+            "instruction": request["instruction"],
+            "input": _compact_value(request["input"]),
+            "context": _compact_value(request["context"]),
+            "output_contract": _compact_value(request["output_contract"]),
+            "environment_requirements": _compact_value(request["environment_requirements"]),
+        },
+        "scene_execution": {
+            "episode_id": episode_id,
+            "task_spec_id": task_spec_id,
+            "max_llm_invocations": max_llm_invocations,
+            "recent_events": recent_events,
+            "available_tools": available_tools,
+            "available_mcps": available_mcps,
+        },
+    }
+    return "\n".join(
+        [
+            "You are executing an isolated scene context for Recruit Agent.",
+            "Use only scene tools and return a business-level summary. Avoid DOM, tab, click path, or raw environment details unless they are required blocker evidence.",
+            f"Context: {_compact_value(context)}",
+        ]
+    )
+
+
+def _scene_outcome_from_engine(
+    *,
+    engine: InteractionEngine,
+    instruction: str,
+    engine_events: list[dict[str, Any]],
     browser_semantics: dict[str, Any],
-    event_type: str,
-    data: dict[str, Any],
-) -> None:
-    if event_type == "tool_result":
-        payload = _as_dict(data)
-        _remember_browser_semantics(
-            browser_semantics,
-            tool_name=str(payload.get("tool_name") or ""),
-            output=payload.get("output"),
-        )
-    round_events.append(
-        {
-            "type": event_type,
-            "payload": _compact_value(data),
+) -> AgentTurnOutcome:
+    final_output = ""
+    status = "complete"
+    gate_signal = "goal_done"
+    result_data: dict[str, Any] | None = None
+    engine_output_count = 0
+    for output in engine.submitMessage(instruction):
+        engine_output_count += 1
+        event = _scene_event_from_output(output)
+        if event is not None:
+            if event["type"] == "tool_result":
+                payload = _as_dict(event.get("payload"))
+                _remember_browser_semantics(
+                    browser_semantics,
+                    tool_name=str(payload.get("tool_name") or ""),
+                    output=payload.get("output"),
+                )
+            engine_events.append(event)
+        if output.type == "assistant_message_completed":
+            final_output = str(output.data.get("message") or "")
+            structured = extract_structured_result_payload(final_output)
+            if structured:
+                result_data, _skill_draft = normalize_result_payload(structured)
+        elif output.type == "llm_invocation_completed":
+            provider_result_data = _as_dict(output.data.get("result_data"))
+            if provider_result_data:
+                result_data, _skill_draft = normalize_result_payload(provider_result_data)
+        elif output.type == "permission_requested":
+            status = "wait_human"
+            gate_signal = "wait_human"
+        elif output.type == "turn_failed":
+            status = "error"
+            gate_signal = "escalate"
+        elif output.type == "turn_interrupted":
+            status = "cancelled"
+            gate_signal = "paused"
+    if status == "complete" and not str(final_output or "").strip() and not result_data:
+        status = "escalate"
+        gate_signal = "budget_exhausted"
+    return AgentTurnOutcome(
+        status=status,  # type: ignore[arg-type]
+        gate_signal=gate_signal,  # type: ignore[arg-type]
+        final_output=final_output,
+        result_data=result_data,
+        metadata={"interaction_engine": True, "engine_output_count": engine_output_count},
+    )
+
+
+def _scene_event_from_output(output: InteractionOutput) -> dict[str, Any] | None:
+    data = dict(output.data or {})
+    event_type = output.type
+    if event_type == "tool_event" and data.get("kind") in {"tool_call_started", "tool_use_completed"}:
+        return {
+            "type": "tool_call",
+            "engine_output_seq": output.seq,
+            "payload": _compact_value(
+                {
+                    "tool_name": data.get("tool_name") or data.get("name"),
+                    "arguments": dict(data.get("input") or {}),
+                    "tool_call_id": data.get("tool_call_id"),
+                    "tool_use_id": data.get("tool_use_id") or data.get("id"),
+                }
+            ),
             "recorded_at": utcnow().isoformat(),
         }
-    )
+    if event_type == "tool_event" and data.get("kind") == "tool_result_ready":
+        return {
+            "type": "tool_result",
+            "engine_output_seq": output.seq,
+            "payload": _compact_value(
+                {
+                    "tool_name": data.get("tool_name"),
+                    "is_error": bool(data.get("is_error")),
+                    "output": data.get("content"),
+                }
+            ),
+            "recorded_at": utcnow().isoformat(),
+        }
+    if event_type == "permission_requested":
+        return {
+            "type": "tool_blocked",
+            "engine_output_seq": output.seq,
+            "payload": _compact_value(
+                {
+                    "tool_name": data.get("tool_name"),
+                    "reason": data.get("reason") or "pending_confirmation",
+                    "severity": "waiting_human",
+                }
+            ),
+            "recorded_at": utcnow().isoformat(),
+        }
+    return None
 
 
 def _scene_tool_registry(
@@ -1182,7 +1239,7 @@ def _snapshot_candidates(*, tool_name: str, output: Any) -> list[dict[str, Any]]
     ]
 
 
-def _collect_blockers(outcome: RoundOutcome, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _collect_blockers(outcome: AgentTurnOutcome, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     blockers: list[dict[str, Any]] = []
     for event in events:
         event_type = str(event.get("type") or "")
@@ -1211,11 +1268,11 @@ def _collect_blockers(outcome: RoundOutcome, events: list[dict[str, Any]]) -> li
     return blockers
 
 
-def _should_continue(outcome: RoundOutcome) -> bool:
+def _should_continue(outcome: AgentTurnOutcome) -> bool:
     return outcome.status == "continue" and outcome.gate_signal == "continue"
 
 
-def _public_status(outcome: RoundOutcome, blockers: list[dict[str, Any]]) -> str:
+def _public_status(outcome: AgentTurnOutcome, blockers: list[dict[str, Any]]) -> str:
     result_status = _scene_result_status(outcome)
     if result_status in {"completed", "complete", "success", "succeeded"}:
         return "completed"
@@ -1232,7 +1289,7 @@ def _public_status(outcome: RoundOutcome, blockers: list[dict[str, Any]]) -> str
     return "incomplete"
 
 
-def _scene_result_status(outcome: RoundOutcome) -> str:
+def _scene_result_status(outcome: AgentTurnOutcome) -> str:
     result_status = str((outcome.result_data or {}).get("status") or "").strip().lower()
     if result_status:
         return result_status
@@ -1249,7 +1306,7 @@ def _stored_status(public_status: str) -> str:
     }.get(public_status, "interrupted")
 
 
-def _public_summary(outcome: RoundOutcome, blockers: list[dict[str, Any]]) -> str:
+def _public_summary(outcome: AgentTurnOutcome, blockers: list[dict[str, Any]]) -> str:
     final_output = str(outcome.final_output or "").strip()
     if final_output:
         return final_output
@@ -1263,7 +1320,7 @@ def _public_summary(outcome: RoundOutcome, blockers: list[dict[str, Any]]) -> st
     return "scene context finished without a terminal summary"
 
 
-def _scene_result_data(outcome: RoundOutcome) -> dict[str, Any]:
+def _scene_result_data(outcome: AgentTurnOutcome) -> dict[str, Any]:
     if isinstance(outcome.result_data, dict) and outcome.result_data:
         return dict(outcome.result_data)
     structured = extract_structured_result_payload(outcome.final_output)

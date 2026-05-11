@@ -71,17 +71,17 @@ def test_container_build_and_reload_register_enabled_dynamic_mcp_tools(tmp_path,
             }
         )
         assert [tool["name"] for tool in created["tools"]] == ["dynamic_echo"]
-        assert "dynamic_echo" not in container.kernel.tool_registry.tools
+        assert "dynamic_echo" not in container.autonomous_agent.tool_registry.tools
         assert "dynamic_echo" not in container.scene_context_tool_registry.tools
 
         container.reload_settings(container.settings)
 
-        assert container.kernel.tool_registry is container.tool_registry
+        assert container.autonomous_agent.tool_registry is container.tool_registry
         assert "dynamic_echo" in container.tool_registry.tools
-        assert "dynamic_echo" in container.kernel.tool_registry.tools
+        assert "dynamic_echo" in container.autonomous_agent.tool_registry.tools
         assert "dynamic_echo" not in container.scene_context_tool_registry.tools
 
-        executed = container.kernel.tool_registry.execute("dynamic_echo", {"text": "reload path"})
+        executed = container.tool_registry.execute("dynamic_echo", {"text": "reload path"})
         assert executed.is_error is False
         assert executed.output == {
             "tool": "dynamic_echo",
@@ -90,9 +90,9 @@ def test_container_build_and_reload_register_enabled_dynamic_mcp_tools(tmp_path,
         }
 
         rebuilt = AppContainer.build(settings)
-        assert rebuilt.kernel.tool_registry is rebuilt.tool_registry
+        assert rebuilt.autonomous_agent.tool_registry is rebuilt.tool_registry
         assert "dynamic_echo" in rebuilt.tool_registry.tools
-        assert "dynamic_echo" in rebuilt.kernel.tool_registry.tools
+        assert "dynamic_echo" in rebuilt.autonomous_agent.tool_registry.tools
         assert "dynamic_echo" not in rebuilt.scene_context_tool_registry.tools
 
         rebuilt_result = rebuilt.tool_registry.execute("dynamic_echo", {"text": "build path"})
@@ -180,7 +180,7 @@ def test_dynamic_mcp_tool_handler_survives_healthcheck_resync(tmp_path, monkeypa
 
     assert refreshed_tool_id != original_tool_id
 
-    executed = container.kernel.tool_registry.execute("dynamic_echo", {"text": "after healthcheck"})
+    executed = container.tool_registry.execute("dynamic_echo", {"text": "after healthcheck"})
     assert executed.is_error is False
     assert executed.output == {
         "tool": "dynamic_echo",

@@ -5,7 +5,7 @@ Repo: `/Users/vyodels/AgentProjects/recruit-agent`
 
 ## Current State
 
-The agent runtime refactor has been landed as a direct cutover. There is no compatibility layer for the old provider `generate(...)` API, old `recruit_agent.kernel`, or old `runtime.models` / `runtime.providers`.
+The agent runtime refactor has been landed as a direct cutover. There is no compatibility layer for the old provider `generate(...)` API or the pre-refactor runtime model/provider modules.
 
 Core agent logic now lives under:
 
@@ -16,16 +16,15 @@ services/backend/src/recruit_agent/agent_runtime/
 That directory owns:
 
 - `InteractionEngine` / `InteractionEngineConfig`
-- `AgentKernel` and the round pipeline: assemble, sense, deliberate, act, evaluate, guard, memory update
+- canonical LLM/tool turn execution, permission requests, transcript outputs, and provider/tool contracts
 - `LLMRequest`, `LLMResponse`, `LLMStreamEvent`, `LLMProvider`
 - `OpenAIProvider`, `AnthropicProvider`, `ProviderRegistry`, `UnavailableProvider`
-- Core round models such as `GoalRef`, `Observation`, `RoundOutcome`, `ToolCall`, `ToolExecutionResult`
 - Conversation history and transcript primitives
 
-The old paths were removed:
+The old runtime entrypoint and stage-pipeline modules were removed:
 
 ```text
-services/backend/src/recruit_agent/kernel/
+services/backend/src/recruit_agent/agent_runtime/{assemble,sense,deliberate,act,evaluate,guard,update_memory}.py
 services/backend/src/recruit_agent/runtime/models.py
 services/backend/src/recruit_agent/runtime/providers.py
 ```
@@ -105,10 +104,9 @@ Result:
 
 Recommended next review points:
 
-1. Tighten naming: consider whether `AgentKernel` should be renamed now that it lives in `agent_runtime`, or kept as the internal round runner name.
-2. Reduce old domain terminology in tests where possible. Tests still use legacy-shaped fixture responses such as `LLMResponse(content=..., tool_calls=...)`, but those fixtures are test-only.
-3. Decide whether `runtime/__init__.py` should keep re-exporting runtime utilities only, or become private to business adapters.
-4. If adding a real provider smoke test, use configured API credentials and verify one OpenAI Responses stream and one Anthropic Messages stream end to end.
+1. Reduce old domain terminology in tests where possible. Tests still use legacy-shaped fixture responses such as `LLMResponse(content=..., tool_calls=...)`, but those fixtures are test-only.
+2. Decide whether `runtime/__init__.py` should keep re-exporting runtime utilities only, or become private to business adapters.
+3. If adding a real provider smoke test, use configured API credentials and verify one OpenAI Responses stream and one Anthropic Messages stream end to end.
 
 ## Known Non-Issues
 

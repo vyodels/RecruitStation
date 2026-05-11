@@ -42,7 +42,12 @@ class InteractionEngineConfig:
     previous_response_id: str | None = None
     store: bool | None = None
     truncation: str | None = None
-    max_turns: int = 12
+    openai_payload_overrides: dict[str, object] | None = None
+    anthropic_payload_overrides: dict[str, object] | None = None
+    max_llm_invocations: int = 12
+    max_history_messages: int | None = None
+    compaction_summary_max_chars: int = 2000
+    initial_seq: int = 1
 
 
 @dataclass(slots=True)
@@ -61,6 +66,8 @@ class InteractionEngine:
         self.history = ConversationHistory(messages)
         if state is not None:
             self._seq = count(state.next_seq)
+        elif self.config.initial_seq > 1:
+            self._seq = count(self.config.initial_seq)
 
     def submitMessage(self, input: str | list[dict[str, object]]) -> Iterator[InteractionOutput]:
         if self.active_turn_id is not None:
@@ -90,10 +97,13 @@ class InteractionEngine:
             conversation_id=self.config.conversation_id,
             tools=self.config.tools,
         )
-        for invocation_index in range(self.config.max_turns):
+        for invocation_index in range(self.config.max_llm_invocations):
             if self._interrupted:
                 yield self._output("turn_interrupted", turn_id, {"reason": "interrupted"})
                 return
+            compaction = self._compact_history_if_needed()
+            if compaction is not None:
+                yield self._output("runtime_event", turn_id, {"kind": "context_compacted", **compaction})
             invocation_id = f"llm_{uuid4().hex}"
             request = LLMRequest(
                 id=f"req_{uuid4().hex}",
@@ -116,6 +126,12 @@ class InteractionEngine:
                 previous_response_id=self.config.previous_response_id,
                 store=self.config.store,
                 truncation=self.config.truncation,
+                openai_payload_overrides=dict(self.config.openai_payload_overrides)
+                if self.config.openai_payload_overrides is not None
+                else None,
+                anthropic_payload_overrides=dict(self.config.anthropic_payload_overrides)
+                if self.config.anthropic_payload_overrides is not None
+                else None,
             )
             yield self._output("llm_invocation_started", turn_id, {"invocation_id": invocation_id, "index": invocation_index})
             result = self.config.provider.invoke(request)
@@ -144,6 +160,7 @@ class InteractionEngine:
                         "completion_tokens": response.usage.completion_tokens,
                         "total_tokens": response.usage.total_tokens,
                     },
+                    "result_data": dict(response.result_data or {}),
                 },
             )
             if not response.tool_uses:
@@ -204,7 +221,33 @@ class InteractionEngine:
                         "content": result.content,
                     },
                 )
-        yield self._output("turn_failed", turn_id, {"error": "max_turns_exhausted"})
+        yield self._output("turn_failed", turn_id, {"error": "max_llm_invocations_exhausted"})
+
+    def _compact_history_if_needed(self) -> dict[str, object] | None:
+        max_messages = self.config.max_history_messages
+        if max_messages is None:
+            return None
+        before_count = len(self.history.messages)
+        compacted = self.history.compact(
+            max_messages=max_messages,
+            summary_max_chars=self.config.compaction_summary_max_chars,
+        )
+        if compacted is None:
+            return None
+        self.transcript.replace_messages(self.config.conversation_id, compacted)
+        summary = next(
+            (
+                message
+                for message in compacted
+                if message.role == "system" and message.metadata.get("kind") == "context_compaction_summary"
+            ),
+            None,
+        )
+        return {
+            "messages_before": before_count,
+            "messages_after": len(compacted),
+            "summary": summary.content if summary is not None else "",
+        }
 
     def _requires_permission(self, registry: ToolRegistry, call: ToolCall) -> bool:
         try:

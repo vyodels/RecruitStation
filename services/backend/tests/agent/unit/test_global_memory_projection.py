@@ -8,7 +8,6 @@ from sqlalchemy.orm import Session
 
 from recruit_agent.core.settings import AppSettings
 from recruit_agent.db.session import create_engine_from_settings, create_session_factory, initialize_database
-from recruit_agent.agent_runtime.update_memory import update_memory
 from recruit_agent.memory.global_memory_projection import (
     GLOBAL_MEMORY_PROJECTION_SIGNATURE,
     GLOBAL_MEMORY_SCHEMA_VERSION,
@@ -16,17 +15,7 @@ from recruit_agent.memory.global_memory_projection import (
     project_agent_global_memory,
 )
 from recruit_agent.models.domain import AgentGlobalMemory, AgentRun, AgentSession, GoalSpec, RecruitAgentProfile
-from recruit_agent.agent_runtime.models import Deliberation
 from recruit_agent.services.recruit_agent import ensure_global_memory
-
-
-class CaptureMemoryService:
-    def __init__(self) -> None:
-        self.calls: list[dict[str, object]] = []
-
-    def write(self, **kwargs: object) -> dict[str, object]:
-        self.calls.append(dict(kwargs))
-        return dict(kwargs)
 
 
 def _make_session(tmp_path: Path) -> Session:
@@ -37,40 +26,6 @@ def _make_session(tmp_path: Path) -> Session:
     engine = create_engine_from_settings(settings)
     initialize_database(engine)
     return create_session_factory(engine)()
-
-
-def test_update_memory_does_not_project_round_summary_into_global_scope() -> None:
-    memory_service = CaptureMemoryService()
-    deliberation = Deliberation(
-        final_content=json.dumps(
-            {
-                "status": "blocked",
-                "evidence": [
-                    "当前浏览器仅有 1 个标签页：CLI Proxy API Management Center",
-                    "活动页 URL: http://127.0.0.1:8317/management.html#/auth-files",
-                ],
-                "next_step": "请先在浏览器中打开并切换到招聘平台的职位列表页。",
-            },
-            ensure_ascii=False,
-        ),
-        tool_results=[],
-    )
-
-    updates = update_memory(
-        deliberation,
-        memory_service,
-        round_status="blocked",
-        scope_kind="global",
-        scope_ref="workspace:shared",
-        agent_profile_id="agent-1",
-        source_kind="autonomous",
-        goal_kind="sync_jd_incremental",
-        goal_title="同步 JD（增量）",
-    )
-
-    assert updates == []
-    assert memory_service.calls == []
-
 
 def test_project_global_memory_only_keeps_long_term_knowledge_fields() -> None:
     projected = project_agent_global_memory(

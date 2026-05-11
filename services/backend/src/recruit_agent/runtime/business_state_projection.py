@@ -16,12 +16,12 @@ def project_runtime_business_state(
     content: dict[str, Any] | None = None,
     goal_kind: str | None = None,
     goal_title: str | None = None,
-    round_status: str | None = None,
+    run_status: str | None = None,
 ) -> dict[str, Any]:
     structured = _extract_structured_payload(final_content=final_content, content=content)
     action_kind = _normalize_action_key(goal_kind or structured.get("goal_kind") or structured.get("run_type") or "")
     action_label = _resolve_action_label(structured=structured, goal_title=goal_title, action_kind=action_kind)
-    status = _normalize_status(structured.get("status") or round_status or "unknown")
+    status = _normalize_status(structured.get("status") or run_status or "unknown")
     created = _coerce_int(structured.get("created"))
     updated = _coerce_int(structured.get("updated"))
     skipped = _coerce_int(structured.get("skipped"))

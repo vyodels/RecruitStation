@@ -20,7 +20,7 @@
 - [x] `browser-json-socket` 预置模板改走通用 stdio preset 通路，不再依赖 browser-only 分支。
 - [x] 新增 `virtualhid-json-socket` 预置模板，并按 MCP `tools/list` 动态发现 `hid_*` 工具。
 - [x] runtime 不再对 tool history 写死压缩；原始工具结果直接进入模型历史。
-- [x] `LLMResponse -> Deliberation -> RoundOutcome` 全链保留 `result_data` 与 `skill_draft`。
+- [x] `InteractionEngine` provider / tool output 全链保留通用 `result_data`；`skill_draft` 仅作为产品学习 / 审批 artifact，不再作为 runtime 输出字段。
 - [x] `delegate_scene_context` / `SceneContextService` 支持 `browser_target`、`computer_target`、`target_regions`、`action_plan`、`artifact_expectations`。
 - [x] scene execution contract 明确 `coordinate_policy = delegate_to_hid`，不再让主 Agent 自算最终屏幕绝对坐标。
 - [x] prompt、guide、API 测试、runtime-bridge 测试已对齐当前 browser / VirtualHID 契约。
@@ -84,11 +84,9 @@
 
 ## 5. 相关文档关系
 
-- 规范真相：[`docs/specs/2026-04-20-autonomous-agent-runtime-constraints.md`](../../specs/2026-04-20-autonomous-agent-runtime-constraints.md)
-- 智能边界：[`docs/specs/2026-04-20-agent-intelligence-boundary-and-capability-evolution.md`](../../specs/2026-04-20-agent-intelligence-boundary-and-capability-evolution.md)
-- 已完成的 scene context 主链收口：[`docs/plan/completed/2026-04-20-autonomous-scene-context-delegation-plan.md`](../completed/2026-04-20-autonomous-scene-context-delegation-plan.md)
+- Agent runtime / product 边界：[`docs/specs/2026-05-11-agent-runtime-product-boundary-spec.md`](../../specs/2026-05-11-agent-runtime-product-boundary-spec.md)
+- 招聘业务能力 / 数据边界：[`docs/specs/2026-05-11-recruiting-business-capability-data-spec.md`](../../specs/2026-05-11-recruiting-business-capability-data-spec.md)
 - 当前 browser / HID 操作口径：[`docs/guides/agent-operator-guide_cn.md`](../../guides/agent-operator-guide_cn.md)
-- 当前实现状态参考：[`docs/reference/recruit-agent-web-tooling-notes.md`](../../reference/recruit-agent-web-tooling-notes.md)
 
 ## 6. 当前结论
 

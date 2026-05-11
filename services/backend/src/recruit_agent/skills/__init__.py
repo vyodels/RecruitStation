@@ -1,1 +1,1 @@
-"""Skill registry and sandbox."""
+"""Skill registry and context injection helpers."""

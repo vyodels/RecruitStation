@@ -10,7 +10,7 @@ Use it for:
 Do not use it for:
 - long-term canonical truth (`docs/specs/`)
 - implementation tracking (`docs/plan/`)
-- historical implementation notes (`docs/reference/`)
+- historical implementation notes (`docs/archive/`)
 
 ## Current index
 - [`agent-operator-guide_cn.md`](./agent-operator-guide_cn.md) — current browser-mcp + VirtualHID usage guide for Agent-side browser/computer execution

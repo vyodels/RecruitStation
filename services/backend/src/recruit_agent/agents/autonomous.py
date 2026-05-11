@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from hashlib import sha1
 import json
-import time
 from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from recruit_agent.agent_runtime.engine import InteractionEngine, InteractionEngineConfig
+from recruit_agent.agent_runtime.types import InteractionOutput, LLMMessage, LLMProvider, ToolUse
 from recruit_agent.db.base import utcnow
-from recruit_agent.agent_runtime.kernel import AgentKernel
+from recruit_agent.evolution.learning_writer import LearningWriter
 from recruit_agent.memory.service import MemoryService
 from recruit_agent.models.domain import (
     AgentRun,
@@ -26,8 +28,12 @@ from recruit_agent.models.domain import (
     Skill,
 )
 from recruit_agent.runtime.limits import TurnLimits
-from recruit_agent.agent_runtime.models import GoalRef, InputEnvelope, Message, Observation, RoundOutcome, ToolCall
+from recruit_agent.agents.outcome import AgentTurnOutcome
+from recruit_agent.plugins.host import PluginHost
+from recruit_agent.runtime.result_semantics import extract_execution_status, extract_structured_result_payload
 from recruit_agent.runtime.target_contracts import derive_browser_target
+from recruit_agent.runtime.tools import ToolRegistry
+from recruit_agent.skills.context import build_skill_context_injections
 
 AUTONOMOUS_OPEN_RUN_STATUSES: tuple[str, ...] = (
     "queued",
@@ -44,10 +50,13 @@ AUTONOMOUS_OPEN_RUN_STATUSES: tuple[str, ...] = (
 @dataclass(slots=True)
 class AutonomousAgent:
     session_factory: sessionmaker[Session]
-    kernel: AgentKernel
+    provider: LLMProvider
+    tool_registry: ToolRegistry
+    plugin_host: PluginHost
+    learning_writer: LearningWriter | None = None
     turn_limits: TurnLimits = field(default_factory=TurnLimits)
 
-    def run_turn_from_envelope(self, envelope: dict[str, Any]) -> RoundOutcome:
+    def run_turn_from_envelope(self, envelope: dict[str, Any]) -> AgentTurnOutcome:
         with self.session_factory() as session:
             run = self._resolve_run(session, envelope)
             run.status = "running"
@@ -138,129 +147,190 @@ class AutonomousAgent:
             else:
                 scope_ref = str(envelope.get("scope_ref") or resolved_person_id or run.person_id or run.job_description_id or run.id)
 
-            goal = GoalRef(
-                goal_id=run.run_id or run.id,
-                scope_kind=scope_kind,
-                scope_ref=scope_ref,
-                title=str(getattr(goal_spec, "title", None) or run.run_type or "Autonomous execution").strip() or None,
-                goal_text=str(
-                    (run.context_manifest or {}).get("goal")
-                    or getattr(goal_spec, "goal_text", None)
-                    or run.run_type
-                    or "Autonomous execution"
-                ),
-                constraints=goal_constraints,
+            memory_scope_kind = str(goal_constraints.get("memory_scope_kind") or scope_kind or "global").strip() or "global"
+            memory_scope_ref = str(goal_constraints.get("memory_scope_ref") or scope_ref or agent_profile_id or run.id)
+            if memory_scope_kind == "global" and agent_profile_id:
+                memory_scope_ref = str(goal_constraints.get("memory_scope_ref") or goal_constraints.get("global_scope_ref") or agent_profile_id)
+            memory_entries = _read_memory_entries(
+                memory_service,
+                scope_kind=memory_scope_kind,
+                scope_ref=memory_scope_ref,
+                agent_profile_id=agent_profile_id,
             )
+            goal_text = str(
+                (run.context_manifest or {}).get("goal")
+                or getattr(goal_spec, "goal_text", None)
+                or run.run_type
+                or "Autonomous execution"
+            )
+            goal_title = str(getattr(goal_spec, "title", None) or run.run_type or "Autonomous execution").strip() or None
             active_turn_limits = _resolve_turn_limits(self.turn_limits, goal_spec)
 
-            round_history: list[Message] = []
-            current_seed_tool_calls = [
-                ToolCall.from_payload(payload)
-                for payload in list(envelope.get("seed_tool_calls") or [])
-                if isinstance(payload, dict)
-            ]
-            round_seq = 0
-            started_at = time.monotonic()
-            last_outcome = RoundOutcome(status="continue", gate_signal="continue")
+            last_outcome = AgentTurnOutcome(status="continue", gate_signal="continue")
+            runtime_event_seq = 0
+            engine_output_count = 0
             try:
-                while True:
-                    if (
-                        active_turn_limits.max_rounds_per_turn is not None
-                        and round_seq >= active_turn_limits.max_rounds_per_turn
-                    ):
-                        last_outcome = RoundOutcome(
-                            status="continue",
-                            gate_signal="budget_exhausted",
-                            final_output=last_outcome.final_output,
-                        )
-                        break
-                    if (
-                        active_turn_limits.turn_timeout_seconds is not None
-                        and time.monotonic() - started_at >= active_turn_limits.turn_timeout_seconds
-                    ):
-                        last_outcome = RoundOutcome(
-                            status="continue",
-                            gate_signal="budget_exhausted",
-                            final_output=last_outcome.final_output,
-                        )
-                        break
-
-                    round_seq += 1
+                initial_messages = [
+                    LLMMessage(
+                        role="system",
+                        content=_autonomous_system_prompt(
+                            title=goal_title,
+                            goal_text=goal_text,
+                            scope_kind=scope_kind,
+                            scope_ref=scope_ref,
+                            constraints=goal_constraints,
+                            world_snapshot=dict(envelope.get("world_snapshot") or {}),
+                            recent_events=memory_service.fetch_recent_events(run_id=run.id, limit=8),
+                            memory_entries=memory_entries,
+                            available_tools=sorted(self.tool_registry.tools.keys()),
+                            skill_contexts=self._skill_contexts(
+                                session,
+                                query=goal_text,
+                                task_text=json.dumps(
+                                    {
+                                        "goal": goal_text,
+                                        "constraints": goal_constraints,
+                                        "world_snapshot": dict(envelope.get("world_snapshot") or {}),
+                                    },
+                                    ensure_ascii=False,
+                                    default=str,
+                                ),
+                                category=str(getattr(goal_spec, "goal_kind", None) or run.run_type or ""),
+                                explicit_skill_ids=_explicit_skill_ids(goal_constraints, envelope),
+                            ),
+                            available_mcps=self._available_mcp_names(session),
+                        ),
+                    )
+                ]
+                approved_tool_calls = _approved_tool_calls_from_envelope(envelope, run=run)
+                for payload in approved_tool_calls:
+                    runtime_event_seq += 1
+                    call = _tool_use_from_permission_payload(payload)
+                    approved_arguments = {**dict(call.input or {}), "approved": True, "approved_by_operator": True}
                     _append_runtime_event(
                         session,
                         run=run,
                         goal=goal_spec,
                         turn_id=turn.turn_id,
-                        seq=round_seq,
-                        event_type="round.started",
-                        message="round started",
-                        payload={"round_seq": round_seq},
-                    )
-                    session.commit()
-
-                    observation = Observation(
-                        world_snapshot=dict(envelope.get("world_snapshot") or {}),
-                        scope_kind=goal.scope_kind,
-                        scope_ref=goal.scope_ref,
-                        recent_events=memory_service.fetch_recent_events(run_id=run.id, limit=8),
-                        available_tools=sorted(self.kernel.tool_registry.tools.keys()),
-                        available_skills=self._available_skill_names(session),
-                        available_mcps=self._available_mcp_names(session),
-                        hash=str(envelope.get("observation_hash") or turn.turn_id),
-                        input=InputEnvelope(
-                            history_messages=list(round_history),
-                            seed_tool_calls=list(current_seed_tool_calls),
-                        ),
-                    )
-                    last_outcome = self.kernel.run_round(
-                        goal=goal,
-                        observation=observation,
-                        limits=self.kernel.limits,
-                        memory_service=memory_service,
-                        learning_writer=self.kernel.learning_writer,
-                        event_sink=lambda event_type, data: _record_kernel_event(
-                            session,
-                            run=run,
-                            goal=goal_spec,
-                            turn_id=turn.turn_id,
-                            seq=round_seq,
-                            event_type=event_type,
-                            data=data,
-                        ),
-                    )
-                    round_history = list(last_outcome.metadata.get("history_messages") or [])
-                    current_seed_tool_calls = []
-                    _append_runtime_event(
-                        session,
-                        run=run,
-                        goal=goal_spec,
-                        turn_id=turn.turn_id,
-                        seq=round_seq,
-                        event_type="round.completed",
-                        message=last_outcome.final_output or last_outcome.status,
+                        seq=runtime_event_seq,
+                        event_type="tool.call",
+                        message=f"calling approved tool {call.name}",
                         payload={
-                            "round_seq": round_seq,
-                            "status": last_outcome.status,
-                            "gate_signal": last_outcome.gate_signal,
-                            "tool_calls": [call.to_provider_payload() for call in last_outcome.tool_calls],
-                            "tool_results": [
-                                {
-                                    "tool_name": result.tool_name,
-                                    "is_error": result.is_error,
-                                    "output": result.output,
-                                }
-                                for result in last_outcome.tool_results
-                            ],
+                            "tool_name": call.name,
+                            "arguments": approved_arguments,
+                            "tool_use_id": call.id,
+                            "approved": True,
                         },
                     )
+                    result = self.tool_registry.execute(call.name, approved_arguments)
+                    _append_runtime_event(
+                        session,
+                        run=run,
+                        goal=goal_spec,
+                        turn_id=turn.turn_id,
+                        seq=runtime_event_seq + 1,
+                        event_type="tool.result",
+                        message=f"approved tool {result.tool_name} returned",
+                        payload={
+                            "tool_name": result.tool_name,
+                            "is_error": bool(result.is_error),
+                            "output": result.output,
+                            "approved": True,
+                        },
+                    )
+                    runtime_event_seq += 1
+                    initial_messages.append(LLMMessage(role="assistant", content="", tool_uses=[call]))
+                    initial_messages.append(
+                        LLMMessage(
+                            role="tool",
+                            name=call.name,
+                            tool_use_id=call.id,
+                            content=_json_text(result.output),
+                            metadata={"is_error": result.is_error, "approved": True},
+                        )
+                    )
+                if approved_tool_calls:
                     session.commit()
-                    if last_outcome.status == "cancelled" or last_outcome.gate_signal not in {None, "continue"}:
-                        break
+                engine = InteractionEngine(
+                    InteractionEngineConfig(
+                        conversation_id=run.session_id or run.id,
+                        provider=self.provider,
+                        tools=self.tool_registry.to_agent_runtime_tools(),
+                        initial_messages=initial_messages,
+                        max_llm_invocations=active_turn_limits.max_llm_invocations or 12,
+                        initial_seq=runtime_event_seq + 1,
+                    )
+                )
+                tool_calls: list[dict[str, Any]] = []
+                tool_results: list[dict[str, Any]] = []
+                final_output = ""
+                gate_signal = "goal_done"
+                status = "complete"
+                turn_input = _autonomous_turn_input(
+                    goal_text=goal_text,
+                    scope_kind=scope_kind,
+                    scope_ref=scope_ref,
+                    world_snapshot=dict(envelope.get("world_snapshot") or {}),
+                    memory_entries=memory_entries,
+                    constraints=goal_constraints,
+                )
+                for output in engine.submitMessage(turn_input):
+                    runtime_event_seq = max(runtime_event_seq, int(output.seq or runtime_event_seq))
+                    engine_output_count += 1
+                    _record_engine_output(session, run=run, goal=goal_spec, turn_id=turn.turn_id, output=output)
+                    if output.type == "assistant_message_completed":
+                        final_output = str(output.data.get("message") or "")
+                        structured = extract_structured_result_payload(final_output)
+                        execution_status = extract_execution_status(structured)
+                        if execution_status in {"wait_human", "waiting_human", "approval_required"}:
+                            gate_signal = "wait_human"
+                            status = "wait_human"
+                        elif execution_status in {"blocked", "blocked_environment", "failed", "fail", "error", "escalate"}:
+                            gate_signal = "escalate"
+                            status = "escalate"
+                        elif execution_status in {"completed", "complete", "success", "done"}:
+                            gate_signal = "goal_done"
+                            status = "complete"
+                    elif output.type == "tool_event":
+                        data = dict(output.data)
+                        if data.get("kind") in {"tool_call_started", "tool_use_completed"}:
+                            tool_calls.append(data)
+                        elif data.get("kind") == "tool_result_ready":
+                            tool_results.append(
+                                {
+                                    "tool_name": data.get("tool_name"),
+                                    "is_error": data.get("is_error", False),
+                                    "output": data.get("content"),
+                                }
+                            )
+                    elif output.type == "permission_requested":
+                        gate_signal = "wait_human"
+                        status = "wait_human"
+                        tool_calls = [_permission_payload(dict(output.data))]
+                    elif output.type == "turn_failed":
+                        gate_signal = "escalate"
+                        status = "escalate"
+                    elif output.type == "turn_interrupted":
+                        gate_signal = "paused"
+                        status = "cancelled"
+                last_outcome = AgentTurnOutcome(
+                    status=status,  # type: ignore[arg-type]
+                    gate_signal=gate_signal,  # type: ignore[arg-type]
+                    final_output=final_output,
+                    tool_calls=[],
+                    tool_results=[],
+                    metadata={
+                        "tool_calls": tool_calls,
+                        "pending_tool_calls": tool_calls if status == "wait_human" else [],
+                        "tool_results": tool_results,
+                        "interaction_engine": True,
+                    },
+                )
             except Exception as exc:
                 turn.status = "failed"
                 turn.phase = "evaluate"
                 turn.outcome_kind = "error"
-                turn.turn_metadata = {"error": str(exc), "round_count": round_seq}
+                turn.turn_metadata = {"error": str(exc), "engine_output_count": engine_output_count}
                 run.turns_count = int(run.turns_count or 0) + 1
                 run.status = "failed"
                 run.finished_at = utcnow()
@@ -289,7 +359,7 @@ class AutonomousAgent:
             turn.turn_metadata = {
                 "final_output": last_outcome.final_output,
                 "gate_signal": last_outcome.gate_signal,
-                "round_count": round_seq,
+                "engine_output_count": engine_output_count,
             }
             run.turns_count = int(run.turns_count or 0) + 1
             run.status = _run_status_from_outcome(last_outcome)
@@ -310,6 +380,16 @@ class AutonomousAgent:
                 )
             else:
                 _resolve_wait_human_records(session, run=run)
+            if run.status == "completed" and str(last_outcome.final_output or "").strip():
+                _write_turn_memory(
+                    memory_service,
+                    scope_kind=memory_scope_kind,
+                    scope_ref=memory_scope_ref,
+                    agent_profile_id=agent_profile_id,
+                    run=run,
+                    turn=turn,
+                    final_output=str(last_outcome.final_output or ""),
+                )
 
             _append_runtime_event(
                 session,
@@ -329,7 +409,7 @@ class AutonomousAgent:
                 goal=goal_spec,
                 turn=turn,
                 outcome=last_outcome,
-                round_count=round_seq,
+                engine_output_count=engine_output_count,
                 agent_profile_id=agent_profile_id,
             )
             return last_outcome
@@ -396,9 +476,27 @@ class AutonomousAgent:
         stmt = select(func.max(AgentTurnRecord.seq)).where(AgentTurnRecord.run_pk == run_pk)
         return int(session.scalar(stmt) or 0) + 1
 
-    def _available_skill_names(self, session: Session) -> list[str]:
-        stmt = select(Skill.name).where(Skill.status.in_(("trial", "active"))).order_by(Skill.name.asc())
-        return [str(name) for name in session.scalars(stmt).all()]
+    def _skill_contexts(
+        self,
+        session: Session,
+        *,
+        query: str | None = None,
+        task_text: str | None = None,
+        category: str | None = None,
+        explicit_skill_ids: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        stmt = select(Skill).where(Skill.status.in_(("trial", "active"))).order_by(Skill.name.asc(), Skill.skill_id.asc())
+        skills = list(session.scalars(stmt).all())
+        return [
+            item.to_prompt_payload()
+            for item in build_skill_context_injections(
+                skills,
+                query=query,
+                task_text=task_text,
+                category=category,
+                explicit_skill_ids=explicit_skill_ids,
+            )
+        ]
 
     def _available_mcp_names(self, session: Session) -> list[str]:
         stmt = select(McpServer.name).order_by(McpServer.name.asc())
@@ -411,13 +509,13 @@ class AutonomousAgent:
         run: AgentRun,
         goal: GoalSpec | None,
         turn: AgentTurnRecord,
-        outcome: RoundOutcome,
-        round_count: int,
+        outcome: AgentTurnOutcome,
+        engine_output_count: int,
         agent_profile_id: str | None,
     ) -> None:
         if run.status != "completed":
             return
-        if self.kernel.learning_writer is None:
+        if self.learning_writer is None:
             return
 
         from recruit_agent.services.evolution import build_skill_distill_review_payload, distill_skill_contract_from_run
@@ -431,12 +529,12 @@ class AutonomousAgent:
             run_id=str(run.run_id or run.id),
             run_type=run.run_type,
             goal_kind=None if goal is None else goal.goal_kind,
-            round_count=round_count,
+            engine_output_count=engine_output_count,
             final_output=outcome.final_output,
             tool_activity=tool_activity,
             event_outline=_summarize_turn_events(turn_events),
         )
-        seq = max(int(round_count or 0), 1) + 1
+        seq = max(int(engine_output_count or 0), 1) + 1
         _append_runtime_event(
             session,
             run=run,
@@ -450,10 +548,10 @@ class AutonomousAgent:
         session.commit()
         try:
             draft_contract, response = distill_skill_contract_from_run(
-                provider=self.kernel.provider,
+                provider=self.provider,
                 review_payload=review_payload,
             )
-            recorded = self.kernel.learning_writer.record_skill_draft(
+            recorded = self.learning_writer.record_skill_draft(
                 draft_contract=draft_contract,
                 tags=_skill_distill_tags(run=run, goal=goal),
                 trial_metrics={"runs": 1, "successes": 1},
@@ -507,7 +605,7 @@ class AutonomousAgent:
         return list(session.scalars(stmt).all())
 
 
-def _run_status_from_outcome(outcome: RoundOutcome) -> str:
+def _run_status_from_outcome(outcome: AgentTurnOutcome) -> str:
     if outcome.status == "complete" or outcome.gate_signal == "goal_done":
         return "completed"
     if outcome.status == "wait_human" or outcome.gate_signal == "wait_human":
@@ -523,7 +621,7 @@ def _run_status_from_outcome(outcome: RoundOutcome) -> str:
     return "running"
 
 
-def _turn_status_from_outcome(outcome: RoundOutcome) -> str:
+def _turn_status_from_outcome(outcome: AgentTurnOutcome) -> str:
     if outcome.status == "complete" or outcome.gate_signal == "goal_done":
         return "completed"
     if outcome.status == "wait_human" or outcome.gate_signal == "wait_human":
@@ -539,7 +637,7 @@ def _turn_status_from_outcome(outcome: RoundOutcome) -> str:
     return "running"
 
 
-def _terminal_event_type(outcome: RoundOutcome) -> str:
+def _terminal_event_type(outcome: AgentTurnOutcome) -> str:
     if outcome.status == "wait_human" or outcome.gate_signal == "wait_human":
         return "turn.waiting_human"
     if outcome.status == "cancelled" or outcome.gate_signal == "paused":
@@ -551,7 +649,7 @@ def _terminal_event_type(outcome: RoundOutcome) -> str:
     return "turn.completed"
 
 
-def _is_waiting_human(outcome: RoundOutcome) -> bool:
+def _is_waiting_human(outcome: AgentTurnOutcome) -> bool:
     return outcome.status == "wait_human" or outcome.gate_signal == "wait_human"
 
 
@@ -564,9 +662,15 @@ def _resolve_turn_limits(defaults: TurnLimits, goal_spec: GoalSpec | None) -> Tu
         return defaults
 
     resolved: dict[str, int | None] = {}
-    unlimited_fields = {"max_rounds_per_turn", "turn_timeout_seconds", "token_budget"}
-    for field_name in ("max_rounds_per_turn", "turn_timeout_seconds", "token_budget", "cooldown_seconds"):
-        raw_value = overrides.get(field_name)
+    field_aliases = {
+        "max_llm_invocations": ("max_llm_invocations",),
+        "turn_timeout_seconds": ("turn_timeout_seconds",),
+        "token_budget": ("token_budget",),
+        "cooldown_seconds": ("cooldown_seconds",),
+    }
+    unlimited_fields = {"max_llm_invocations", "turn_timeout_seconds", "token_budget"}
+    for field_name, aliases in field_aliases.items():
+        raw_value = next((overrides.get(alias) for alias in aliases if overrides.get(alias) is not None), None)
         if raw_value is None:
             continue
         if isinstance(raw_value, str) and raw_value.strip().lower() in {"", "none", "null", "unlimited", "disabled"}:
@@ -588,6 +692,219 @@ def _resolve_turn_limits(defaults: TurnLimits, goal_spec: GoalSpec | None) -> Tu
     return replace(defaults, **resolved)
 
 
+def _autonomous_system_prompt(
+    *,
+    title: str | None,
+    goal_text: str,
+    scope_kind: str,
+    scope_ref: str,
+    constraints: dict[str, Any],
+    world_snapshot: dict[str, Any],
+    recent_events: list[dict[str, Any]],
+    memory_entries: list[dict[str, Any]],
+    available_tools: list[str],
+    skill_contexts: list[dict[str, Any]],
+    available_mcps: list[str],
+) -> str:
+    payload = {
+        "title": title,
+        "scope": {"kind": scope_kind, "ref": scope_ref},
+        "constraints": constraints,
+        "world_snapshot": world_snapshot,
+        "recent_events": recent_events,
+        "memory_entries": memory_entries,
+        "available_tools": available_tools,
+        "skill_contexts": skill_contexts,
+        "available_mcps": available_mcps,
+    }
+    return "\n".join(
+        [
+            "You are the Autonomous agent for Recruit Agent.",
+            "Use the available tools to advance the goal. Keep externally visible history business-level.",
+            f"Goal: {goal_text}",
+            f"Context: {json.dumps(payload, ensure_ascii=False, default=str)}",
+        ]
+    )
+
+
+def _autonomous_turn_input(
+    *,
+    goal_text: str,
+    scope_kind: str,
+    scope_ref: str,
+    world_snapshot: dict[str, Any],
+    memory_entries: list[dict[str, Any]],
+    constraints: dict[str, Any],
+) -> str:
+    return json.dumps(
+        {
+            "goal": goal_text,
+            "scope": {"kind": scope_kind, "ref": scope_ref},
+            "world_snapshot": world_snapshot,
+            "memory_entries": memory_entries,
+            "constraints": constraints,
+        },
+        ensure_ascii=False,
+        default=str,
+    )
+
+
+def _read_memory_entries(
+    memory_service: MemoryService,
+    *,
+    scope_kind: str,
+    scope_ref: str,
+    agent_profile_id: str | None,
+) -> list[dict[str, Any]]:
+    try:
+        return memory_service.read(
+            scope_kind=scope_kind,
+            scope_ref=scope_ref,
+            agent_profile_id=agent_profile_id,
+            limit=12,
+        )
+    except Exception:
+        return []
+
+
+def _write_turn_memory(
+    memory_service: MemoryService,
+    *,
+    scope_kind: str,
+    scope_ref: str,
+    agent_profile_id: str | None,
+    run: AgentRun,
+    turn: AgentTurnRecord,
+    final_output: str,
+) -> None:
+    if agent_profile_id is None:
+        return
+    try:
+        memory_service.write(
+            scope_kind=scope_kind,
+            scope_ref=scope_ref,
+            agent_profile_id=agent_profile_id,
+            memory_item_id=f"run:{run.id}:turn:{turn.turn_id}:final",
+            kind="turn_summary",
+            index_name=str(run.run_type or "autonomous_turn"),
+            index_description="Autonomous turn final output",
+            summary=final_output,
+            content={"final_output": final_output, "run_id": run.run_id, "turn_id": turn.turn_id},
+            confidence=0.7,
+            trust_level="agent_observed",
+            evidence_refs=[{"run_id": run.id, "turn_id": turn.turn_id}],
+        )
+        for index, patch in enumerate(_stable_memory_patches(final_output)):
+            try:
+                memory_service.write(
+                    scope_kind=scope_kind,
+                    scope_ref=scope_ref,
+                    agent_profile_id=agent_profile_id,
+                    memory_item_id=_stable_memory_item_id(run=run, turn=turn, index=index, patch=patch),
+                    kind=str(patch.get("kind") or "stable_fact"),
+                    index_name=str(patch.get("index_name") or patch.get("name") or f"stable_fact_{index + 1}"),
+                    index_description=str(patch.get("index_description") or patch.get("description") or patch.get("summary") or ""),
+                    summary=str(patch.get("summary") or patch.get("fact") or patch.get("content") or ""),
+                    content=dict(patch.get("content") if isinstance(patch.get("content"), dict) else {"fact": patch.get("fact") or patch.get("summary")}),
+                    confidence=_coerce_confidence(patch.get("confidence"), default=0.6),
+                    trust_level=str(patch.get("trust_level") or "agent_observed"),
+                    evidence_refs=list(patch.get("evidence_refs") or [{"run_id": run.id, "turn_id": turn.turn_id}]),
+                )
+            except Exception:
+                continue
+    except Exception:
+        return
+
+
+def _stable_memory_patches(final_output: str) -> list[dict[str, Any]]:
+    payload = _json_object_from_text(final_output)
+    if not payload:
+        return []
+    raw_patches = payload.get("memory_patch") or payload.get("memory_patches") or payload.get("stable_facts")
+    if isinstance(raw_patches, dict):
+        raw_patches = raw_patches.get("items") or raw_patches.get("facts") or [raw_patches]
+    patches: list[dict[str, Any]] = []
+    for item in raw_patches if isinstance(raw_patches, list) else []:
+        if isinstance(item, dict):
+            patches.append(dict(item))
+        elif isinstance(item, str) and item.strip():
+            patches.append({"summary": item.strip(), "content": {"fact": item.strip()}})
+    return [patch for patch in patches if str(patch.get("summary") or patch.get("fact") or patch.get("content") or "").strip()]
+
+
+def _json_object_from_text(text: str) -> dict[str, Any] | None:
+    candidate = str(text or "").strip()
+    if candidate.startswith("```"):
+        lines = candidate.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].startswith("```"):
+            lines = lines[:-1]
+        candidate = "\n".join(lines).strip()
+    if not candidate.startswith("{"):
+        return None
+    try:
+        payload = json.loads(candidate)
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _stable_memory_item_id(*, run: AgentRun, turn: AgentTurnRecord, index: int, patch: dict[str, Any]) -> str:
+    digest = sha1(json.dumps(patch, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:12]
+    return f"mem:{run.id[:8]}:{turn.turn_id[:8]}:{index}:{digest}"
+
+
+def _coerce_confidence(value: Any, *, default: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(0.0, min(parsed, 1.0))
+
+
+def _permission_payload(data: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(data.get("tool_use_id") or data.get("tool_call_id") or ""),
+        "type": "function",
+        "function": {
+            "name": str(data.get("tool_name") or ""),
+            "arguments": json.dumps(dict(data.get("input") or {}), ensure_ascii=False),
+        },
+    }
+
+
+def _approved_tool_calls_from_envelope(envelope: dict[str, Any], *, run: AgentRun) -> list[dict[str, Any]]:
+    candidates = envelope.get("approved_tool_calls")
+    if not isinstance(candidates, list):
+        candidates = (run.wakeup_state or {}).get("approved_tool_calls")
+    if not isinstance(candidates, list):
+        candidates = (run.wakeup_state or {}).get("pending_tool_calls")
+    return [dict(item) for item in candidates or [] if isinstance(item, dict)]
+
+
+def _tool_use_from_permission_payload(payload: dict[str, Any]) -> ToolUse:
+    function = payload.get("function") if isinstance(payload.get("function"), dict) else {}
+    arguments = function.get("arguments", {})
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments or "{}")
+        except json.JSONDecodeError:
+            arguments = {"_raw": arguments}
+    return ToolUse(
+        id=str(payload.get("id") or payload.get("tool_use_id") or payload.get("tool_call_id") or ""),
+        name=str(function.get("name") or payload.get("name") or payload.get("tool_name") or ""),
+        input=dict(arguments or payload.get("input") or {}),
+        raw=dict(payload),
+    )
+
+
+def _json_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+
+
 def _skill_distill_tags(*, run: AgentRun, goal: GoalSpec | None) -> list[str]:
     tags = ["autonomous", "skill_distill"]
     goal_kind = str((goal.goal_kind if goal is not None else run.run_type) or "").strip()
@@ -597,6 +914,23 @@ def _skill_distill_tags(*, run: AgentRun, goal: GoalSpec | None) -> list[str]:
     if environment_scope in {"mock_only", "simulated"}:
         tags.append(environment_scope)
     return tags
+
+
+def _explicit_skill_ids(*sources: Any) -> list[str]:
+    ids: list[str] = []
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for key in ("explicit_skill_ids", "skill_ids", "skills"):
+            value = source.get(key)
+            items = value if isinstance(value, list) else [value]
+            for item in items:
+                if isinstance(item, dict):
+                    item = item.get("skill_id") or item.get("id") or item.get("name")
+                text = str(item or "").strip()
+                if text and text not in ids:
+                    ids.append(text)
+    return ids
 
 
 def _skill_environment_scope(*, run: AgentRun, goal: GoalSpec | None) -> str:
@@ -657,7 +991,7 @@ def _summarize_turn_tool_activity(events: list[AgentRuntimeEvent]) -> list[dict[
 def _summarize_turn_events(events: list[AgentRuntimeEvent]) -> list[dict[str, Any]]:
     outline: list[dict[str, Any]] = []
     for event in events:
-        if event.event_type in {"provider.started", "provider.completed", "round.started", "round.completed"}:
+        if event.event_type in {"provider.started", "provider.completed", "tool.call", "tool.result", "tool.blocked"}:
             outline.append(
                 {
                     "event_type": event.event_type,
@@ -677,17 +1011,15 @@ def _compact_event_payload(value: Any) -> str | None:
     return text[:320] if text else None
 
 
-def _record_kernel_event(
+def _record_engine_output(
     session: Session,
     *,
     run: AgentRun,
     goal: GoalSpec | None,
     turn_id: str,
-    seq: int,
-    event_type: str,
-    data: dict[str, Any],
+    output: InteractionOutput,
 ) -> None:
-    mapped = _map_kernel_event(event_type, data)
+    mapped = _map_engine_output(output)
     if mapped is None:
         return
     normalized_event_type, message, payload = mapped
@@ -696,7 +1028,7 @@ def _record_kernel_event(
         run=run,
         goal=goal,
         turn_id=turn_id,
-        seq=seq,
+        seq=output.seq,
         event_type=normalized_event_type,
         message=message,
         payload=payload,
@@ -704,18 +1036,18 @@ def _record_kernel_event(
     session.commit()
 
 
-def _map_kernel_event(event_type: str, data: dict[str, Any]) -> tuple[str, str, dict[str, Any]] | None:
-    normalized = event_type.strip().lower()
-    if normalized == "provider_started":
+def _map_engine_output(output: InteractionOutput) -> tuple[str, str, dict[str, Any]] | None:
+    data = dict(output.data or {})
+    if output.type == "llm_invocation_started":
         return (
             "provider.started",
             "calling model",
             {
-                "message_count": int(data.get("message_count") or 0),
-                "tool_count": int(data.get("tool_count") or 0),
+                "invocation_id": data.get("invocation_id"),
+                "index": data.get("index"),
             },
         )
-    if normalized == "provider_completed":
+    if output.type == "llm_invocation_completed":
         return (
             "provider.completed",
             "model completed",
@@ -725,20 +1057,19 @@ def _map_kernel_event(event_type: str, data: dict[str, Any]) -> tuple[str, str, 
                 "has_content": bool(data.get("has_content")),
             },
         )
-    if normalized == "provider_failed":
-        return ("provider.failed", str(data.get("error") or "provider failed"), {"error": data.get("error")})
-    if normalized == "tool_call":
-        tool_name = str(data.get("name") or "unknown")
+    if output.type == "tool_event" and data.get("kind") in {"tool_call_started", "tool_use_completed"}:
+        tool_name = str(data.get("tool_name") or data.get("name") or "unknown")
         return (
             "tool.call",
             f"calling tool {tool_name}",
             {
                 "tool_name": tool_name,
-                "arguments": dict(data.get("arguments") or {}),
-                "tool_call_id": data.get("id"),
+                "arguments": dict(data.get("input") or {}),
+                "tool_call_id": data.get("tool_call_id"),
+                "tool_use_id": data.get("tool_use_id") or data.get("id"),
             },
         )
-    if normalized == "tool_result":
+    if output.type == "tool_event" and data.get("kind") == "tool_result_ready":
         tool_name = str(data.get("tool_name") or "unknown")
         return (
             "tool.result",
@@ -746,20 +1077,22 @@ def _map_kernel_event(event_type: str, data: dict[str, Any]) -> tuple[str, str, 
             {
                 "tool_name": tool_name,
                 "is_error": bool(data.get("is_error")),
-                "output": data.get("output"),
+                "output": data.get("content"),
             },
         )
-    if normalized == "tool_blocked":
+    if output.type == "permission_requested":
         tool_name = str(data.get("tool_name") or "unknown")
         return (
             "tool.blocked",
             f"tool {tool_name} blocked",
             {
                 "tool_name": tool_name,
-                "reason": data.get("reason"),
-                "severity": data.get("severity"),
+                "reason": data.get("reason") or "pending_confirmation",
+                "severity": "waiting_human",
             },
         )
+    if output.type == "turn_failed":
+        return ("turn.failed", str(data.get("error") or "turn failed"), {"error": data.get("error")})
     return None
 
 
@@ -957,7 +1290,7 @@ def _materialize_wait_human_records(
     run: AgentRun,
     turn: AgentTurnRecord,
     envelope: dict[str, Any],
-    outcome: RoundOutcome,
+    outcome: AgentTurnOutcome,
 ) -> None:
     pending_tool_calls = [
         payload
@@ -1130,7 +1463,7 @@ def _build_resume_envelope(
     if isinstance(envelope.get("world_snapshot"), dict):
         payload["world_snapshot"] = dict(envelope.get("world_snapshot") or {})
     if pending_tool_calls:
-        payload["seed_tool_calls"] = pending_tool_calls
+        payload["approved_tool_calls"] = pending_tool_calls
     metadata = dict(envelope.get("metadata") or {}) if isinstance(envelope.get("metadata"), dict) else {}
     if application_id:
         metadata["application_id"] = application_id

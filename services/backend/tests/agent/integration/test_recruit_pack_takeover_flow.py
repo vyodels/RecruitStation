@@ -12,7 +12,7 @@ from recruit_agent.models.domain import Candidate, CandidateApplication, JobDesc
 from recruit_agent.plugins.host import PluginHost
 from recruit_agent.plugins.loader import install_manifest
 from recruit_agent.plugins.recruit.manifest import RecruitPluginManifest
-from recruit_agent.agent_runtime.models import Observation
+from recruit_agent.runtime.models import Observation
 from recruit_agent.services.application_window import make_application_window
 
 
@@ -73,7 +73,6 @@ def test_recruit_pack_takeover_flow_exposes_tools_observation_and_router(tmp_pat
             scope_ref=primary_application.candidate_application_id,
             recent_events=[],
             available_tools=[],
-            available_skills=[],
             available_mcps=[],
             hash="obs-1",
         )
@@ -97,7 +96,6 @@ def test_recruit_pack_takeover_flow_exposes_tools_observation_and_router(tmp_pat
                 scope_ref=secondary_application.candidate_application_id,
                 recent_events=[],
                 available_tools=[],
-                available_skills=[],
                 available_mcps=[],
                 hash="obs-2",
             ),

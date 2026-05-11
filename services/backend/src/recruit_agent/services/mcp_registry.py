@@ -40,6 +40,7 @@ MCP_STDIO_REQUEST_TIMEOUT_SECONDS = 8.0
 MCP_TRANSIENT_RETRY_DELAY_SECONDS = 0.35
 BROWSER_LOCATE_DOWNLOAD_MAX_WAIT_MS = 5_000
 VIRTUALHID_SOCKET_PRESET_KEY = "virtualhid-json-socket"
+MCP_RESOURCE_TOOL_NAMES = {"list_mcp_resources", "read_mcp_resource"}
 _VIRTUALHID_MCP_SERVER_ENV = "VIRTUALHID_MCP_SERVER"
 _VIRTUALHID_MCP_COMMAND_ENV = "VIRTUALHID_MCP_COMMAND"
 _KNOWN_STDIO_COMMAND_RESOLVERS = {"browser_mcp_server", "virtualhid_mcp_server"}
@@ -445,6 +446,26 @@ def _mcp_list_tools(server: McpServer) -> list[dict[str, Any]]:
             break
         cursor = next_cursor
     return tools
+
+
+def _mcp_list_resources(server: McpServer) -> list[dict[str, Any]]:
+    resources: list[dict[str, Any]] = []
+    cursor: str | None = None
+    while True:
+        params = {"cursor": cursor} if cursor else {}
+        result = _mcp_session_request(server, "resources/list", params)
+        raw_resources = result.get("resources")
+        if isinstance(raw_resources, list):
+            resources.extend(item for item in raw_resources if isinstance(item, dict))
+        next_cursor = result.get("nextCursor")
+        if not isinstance(next_cursor, str) or not next_cursor.strip():
+            break
+        cursor = next_cursor
+    return resources
+
+
+def _mcp_read_resource(server: McpServer, uri: str) -> dict[str, Any]:
+    return _mcp_session_request(server, "resources/read", {"uri": uri})
 
 
 def _mcp_call_tool(server: McpServer, tool_name: str, arguments: dict[str, Any]) -> Any:
@@ -869,12 +890,18 @@ class McpRegistryService:
         with self.session_factory() as session:
             server_repo = McpServerRepository(session)
             tool_repo = McpToolRepository(session)
+            has_standard_mcp_server = False
             for server in server_repo.enabled():
                 server = self._refresh_server_from_preset(session, server)
                 if server.protocol == STANDARD_MCP_PROTOCOL:
+                    has_standard_mcp_server = True
                     self._best_effort_sync_tools(session, server, tool_repo=tool_repo, replace_existing=True)
                 for item in tool_repo.by_server(server.id, enabled_only=True):
+                    if item.name in MCP_RESOURCE_TOOL_NAMES:
+                        continue
                     tools.register(self._to_tool_definition(server, item))
+            if has_standard_mcp_server:
+                self._register_resource_tools(tools)
 
     def reconcile_servers(self) -> None:
         with self.session_factory() as session:
@@ -993,6 +1020,132 @@ class McpRegistryService:
             handler=_handler,
             metadata=metadata,
         )
+
+    def _register_resource_tools(self, tools: ToolRegistry) -> None:
+        if not tools.has("list_mcp_resources"):
+            tools.register(
+                ToolDefinition(
+                    name="list_mcp_resources",
+                    description="List resources exposed by enabled standard MCP JSON-RPC servers.",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "server_key": {
+                                "type": "string",
+                                "description": "Optional MCP server key. When omitted, resources from all enabled standard MCP servers are listed.",
+                            },
+                            "server_id": {
+                                "type": "string",
+                                "description": "Optional MCP server id. Use when server_key is unavailable.",
+                            },
+                        },
+                        "additionalProperties": False,
+                    },
+                    handler=self._handle_list_mcp_resources,
+                    metadata={
+                        "capabilities": ["mcp", "resource"],
+                        "external_tool": True,
+                        "real_environment": True,
+                        "mcp_protocol": STANDARD_MCP_PROTOCOL,
+                        "mcp_resource_tool": True,
+                    },
+                )
+            )
+        if not tools.has("read_mcp_resource"):
+            tools.register(
+                ToolDefinition(
+                    name="read_mcp_resource",
+                    description="Read a resource from an enabled standard MCP JSON-RPC server.",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "server_key": {
+                                "type": "string",
+                                "description": "MCP server key returned by list_mcp_resources. Optional when only one enabled standard MCP server exists.",
+                            },
+                            "server_id": {
+                                "type": "string",
+                                "description": "MCP server id returned by list_mcp_resources. Optional when only one enabled standard MCP server exists.",
+                            },
+                            "uri": {"type": "string", "description": "Resource URI to read."},
+                        },
+                        "required": ["uri"],
+                        "additionalProperties": False,
+                    },
+                    handler=self._handle_read_mcp_resource,
+                    metadata={
+                        "capabilities": ["mcp", "resource"],
+                        "external_tool": True,
+                        "real_environment": True,
+                        "mcp_protocol": STANDARD_MCP_PROTOCOL,
+                        "mcp_resource_tool": True,
+                    },
+                )
+            )
+
+    def _handle_list_mcp_resources(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        server_key = str(arguments.get("server_key") or "").strip()
+        server_id = str(arguments.get("server_id") or "").strip()
+        with self.session_factory() as session:
+            servers = self._select_enabled_standard_servers(session, server_key=server_key, server_id=server_id)
+            return {
+                "servers": [
+                    {
+                        "server_id": server.id,
+                        "server_key": server.server_key,
+                        "name": server.name,
+                        "resources": _mcp_list_resources(server),
+                    }
+                    for server in servers
+                ]
+            }
+
+    def _handle_read_mcp_resource(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        uri = str(arguments.get("uri") or "").strip()
+        if not uri:
+            raise McpBridgeError("read_mcp_resource requires uri")
+        server_key = str(arguments.get("server_key") or "").strip()
+        server_id = str(arguments.get("server_id") or "").strip()
+        with self.session_factory() as session:
+            server = self._resolve_enabled_standard_server(session, server_key=server_key, server_id=server_id)
+            return {
+                "server_id": server.id,
+                "server_key": server.server_key,
+                "name": server.name,
+                "uri": uri,
+                "resource": _mcp_read_resource(server, uri),
+            }
+
+    def _select_enabled_standard_servers(self, session: Session, *, server_key: str, server_id: str) -> list[McpServer]:
+        if server_key or server_id:
+            return [self._resolve_enabled_standard_server(session, server_key=server_key, server_id=server_id)]
+        repo = McpServerRepository(session)
+        servers: list[McpServer] = []
+        for server in repo.enabled():
+            server = self._refresh_server_from_preset(session, server)
+            if server.protocol == STANDARD_MCP_PROTOCOL:
+                servers.append(server)
+        return servers
+
+    def _resolve_enabled_standard_server(self, session: Session, *, server_key: str, server_id: str) -> McpServer:
+        repo = McpServerRepository(session)
+        if server_id:
+            server = repo.get(server_id)
+        elif server_key:
+            server = repo.by_key(server_key)
+        else:
+            servers = self._select_enabled_standard_servers(session, server_key="", server_id="")
+            if len(servers) == 1:
+                return servers[0]
+            if not servers:
+                raise McpBridgeError("No enabled standard MCP JSON-RPC servers are available")
+            raise McpBridgeError("read_mcp_resource requires server_key or server_id when multiple MCP servers are enabled")
+        if server is None:
+            raise McpBridgeError("MCP server not found")
+        server = self._refresh_server_from_preset(session, server)
+        if not server.enabled or server.protocol != STANDARD_MCP_PROTOCOL:
+            raise McpBridgeError("MCP server is unavailable or does not use standard MCP JSON-RPC")
+        return server
 
     def _serialize_server(self, session: Session, server_id: str) -> McpServer:
         server = McpServerRepository(session).get(server_id)

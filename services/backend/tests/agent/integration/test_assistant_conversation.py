@@ -44,7 +44,7 @@ def test_assistant_conversation_flow_and_cancel_endpoint(tmp_path: Path) -> None
         assert "event: turn.started" in body
         assert "event: llm_delta" in body
         assert "event: llm_final" in body
-        assert "event: round.completed" in body
+        assert "event: provider_completed" in body
         assert "event: turn.completed" in body
 
         listed = client.get("/api/assistant/conversations", params={"user_id": "user-1"}).json()

@@ -1535,8 +1535,6 @@ def _event_message_status(event_type: str) -> str:
     normalized = event_type.strip().lower()
     if normalized in {
         "turn.started",
-        "round.started",
-        "round.completed",
         "provider.started",
         "provider.completed",
         "tool.call",
@@ -1830,7 +1828,7 @@ def _run_summary(run: AgentRun) -> str | None:
         content=dict(run.runtime_metadata or {}),
         goal_kind=str(run.run_type or "").strip() or None,
         goal_title=_run_title(run),
-        round_status=str(run.status or "").strip() or None,
+        run_status=str(run.status or "").strip() or None,
     )
     summary = str(projected.get("summary") or "").strip()
     return summary or None
@@ -1841,7 +1839,7 @@ def _goal_summary(goal: GoalSpec) -> str | None:
         content=dict(goal.goal_metadata or {}),
         goal_kind=str(goal.goal_kind or "").strip() or None,
         goal_title=str(goal.title or "").strip() or None,
-        round_status=str(goal.status or "").strip() or None,
+        run_status=str(goal.status or "").strip() or None,
     )
     summary = str(projected.get("summary") or "").strip()
     return summary or None

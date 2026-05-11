@@ -10,7 +10,7 @@ from recruit_agent.models.domain import McpServer
 from recruit_agent.server import create_app
 from recruit_agent.services.browser_mcp_bridge import BROWSER_SOCKET_PRESET_KEY
 from recruit_agent.services.container import AppContainer
-from recruit_agent.services.mcp_registry import VIRTUALHID_SOCKET_PRESET_KEY
+from recruit_agent.services.mcp_registry import STANDARD_MCP_PROTOCOL, VIRTUALHID_SOCKET_PRESET_KEY
 
 
 def _settings(tmp_path: Path, name: str) -> AppSettings:
@@ -298,7 +298,7 @@ def test_container_build_registers_enabled_browser_mcp_tools(tmp_path: Path, mon
     assert "browser_wait_for_url" in reloaded.scene_context_tool_registry.tools
     assert "read_memory" not in reloaded.scene_context_tool_registry.tools
     assert "record_learning" not in reloaded.scene_context_tool_registry.tools
-    assert "invoke_skill" not in reloaded.scene_context_tool_registry.tools
+    assert all(tool.resource_target_kind != "skill" for tool in reloaded.scene_context_tool_registry.tools.values())
     assert "delegate_scene_context" not in reloaded.scene_context_tool_registry.tools
     tool = reloaded.scene_context_tool_registry.tools["browser_get_active_tab"]
     assert tool.metadata["external_tool"] is True
@@ -464,3 +464,139 @@ def test_container_build_registers_enabled_virtualhid_mcp_tools(tmp_path: Path, 
         metadata = dict(server.server_metadata or {})
         assert metadata["stdio_command"] == ["node", "/virtual/VirtualHID/mcp/server.mjs"]
         assert metadata["stdio_env"]["VIRTUALHID_SOCKET"] == upstream
+
+
+def test_mcp_resource_access_registers_fixed_ordinary_tools(tmp_path: Path, monkeypatch) -> None:
+    runtime_requests: list[tuple[str, str, dict[str, object]]] = []
+
+    def fake_mcp_session_request(server, method: str, params: dict[str, object] | None = None, *, timeout_seconds: float = 8.0) -> dict[str, object]:
+        runtime_requests.append((server.server_key, method, dict(params or {})))
+        if method == "tools/list":
+            return {
+                "tools": [
+                    {
+                        "name": "list_mcp_resources",
+                        "description": "Remote collision",
+                        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+                    },
+                    {
+                        "name": "remote_search",
+                        "description": "Remote search",
+                        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+                    }
+                ]
+            }
+        if method == "resources/list" and not params:
+            return {
+                "resources": [
+                    {
+                        "uri": "file:///candidate-profile.md",
+                        "name": "candidate_profile",
+                        "mimeType": "text/markdown",
+                    }
+                ],
+                "nextCursor": "page-2",
+            }
+        if method == "resources/list":
+            return {
+                "resources": [
+                    {
+                        "uri": "file:///job-description.md",
+                        "name": "job_description",
+                        "mimeType": "text/markdown",
+                    }
+                ]
+            }
+        if method == "resources/read":
+            return {
+                "contents": [
+                    {
+                        "uri": params["uri"] if params else "",
+                        "mimeType": "text/markdown",
+                        "text": "Candidate profile",
+                    }
+                ]
+            }
+        return {}
+
+    monkeypatch.setattr(
+        "recruit_agent.services.mcp_registry._mcp_session_request",
+        fake_mcp_session_request,
+    )
+
+    settings = _settings(tmp_path, "mcp-resources.db")
+    container = AppContainer.build(settings)
+    with container.session_factory() as session:
+        session.add(
+            McpServer(
+                server_key="docs",
+                name="Docs MCP",
+                transport_kind="unix_socket",
+                protocol=STANDARD_MCP_PROTOCOL,
+                endpoint=str(tmp_path / "docs.sock"),
+                enabled=True,
+            )
+        )
+        session.commit()
+
+    reloaded = AppContainer.build(settings)
+    assert "remote_search" in reloaded.tool_registry.tools
+    assert "list_mcp_resources" in reloaded.tool_registry.tools
+    assert "read_mcp_resource" in reloaded.tool_registry.tools
+    assert "list_mcp_resources" not in reloaded.scene_context_tool_registry.tools
+    assert "read_mcp_resource" not in reloaded.scene_context_tool_registry.tools
+    assert "candidate_profile" not in reloaded.tool_registry.tools
+    assert "job_description" not in reloaded.tool_registry.tools
+
+    resource_tool = reloaded.tool_registry.tools["list_mcp_resources"]
+    assert resource_tool.resource_target_kind is None
+    assert resource_tool.metadata["mcp_resource_tool"] is True
+    assert set(resource_tool.metadata["capabilities"]) == {"mcp", "resource"}
+
+    runtime_tools = {tool.name: tool for tool in reloaded.tool_registry.to_agent_runtime_tools()}
+    assert "list_mcp_resources" in runtime_tools
+    assert "read_mcp_resource" in runtime_tools
+
+    listed = reloaded.tool_registry.execute("list_mcp_resources", {"server_key": "docs"})
+    assert listed.is_error is False
+    assert listed.output == {
+        "servers": [
+            {
+                "server_id": listed.output["servers"][0]["server_id"],
+                "server_key": "docs",
+                "name": "Docs MCP",
+                "resources": [
+                    {
+                        "uri": "file:///candidate-profile.md",
+                        "name": "candidate_profile",
+                        "mimeType": "text/markdown",
+                    },
+                    {
+                        "uri": "file:///job-description.md",
+                        "name": "job_description",
+                        "mimeType": "text/markdown",
+                    },
+                ],
+            }
+        ]
+    }
+
+    read = reloaded.tool_registry.execute(
+        "read_mcp_resource",
+        {"server_key": "docs", "uri": "file:///candidate-profile.md"},
+    )
+    assert read.is_error is False
+    assert read.output["server_key"] == "docs"
+    assert read.output["resource"] == {
+        "contents": [
+            {
+                "uri": "file:///candidate-profile.md",
+                "mimeType": "text/markdown",
+                "text": "Candidate profile",
+            }
+        ]
+    }
+
+    assert ("docs", "resources/list", {}) in runtime_requests
+    assert ("docs", "resources/list", {"cursor": "page-2"}) in runtime_requests
+    assert ("docs", "resources/read", {"uri": "file:///candidate-profile.md"}) in runtime_requests

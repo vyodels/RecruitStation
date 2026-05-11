@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import asdict
 import json
 
-from recruit_agent.runtime.limits import RoundLimits, TurnLimits
-from recruit_agent.agent_runtime.models import CancellationToken, FairnessState, InputEnvelope, Observation, ToolExecutionResult
+from recruit_agent.runtime.limits import SceneExecutionLimits, TurnLimits
+from recruit_agent.runtime.models import CancellationToken, FairnessState, InputEnvelope, Observation, ToolExecutionResult
 
 
 def test_observation_stays_generic() -> None:
@@ -14,7 +14,6 @@ def test_observation_stays_generic() -> None:
         scope_kind="candidate",
         recent_events=[{"event_type": "candidate.updated"}],
         available_tools=["read_memory"],
-        available_skills=["site_navigation"],
         available_mcps=["browser"],
         hash="obs-1",
         input=InputEnvelope(input_message="hello"),
@@ -26,10 +25,9 @@ def test_observation_stays_generic() -> None:
         "scope_kind": "candidate",
         "recent_events": [{"event_type": "candidate.updated"}],
         "available_tools": ["read_memory"],
-        "available_skills": ["site_navigation"],
         "available_mcps": ["browser"],
         "hash": "obs-1",
-        "input": {"history_messages": [], "input_message": "hello", "seed_tool_calls": []},
+        "input": {"history_messages": [], "input_message": "hello"},
     }
 
 
@@ -53,14 +51,14 @@ def test_cancellation_token_records_reason() -> None:
     assert token.reason == "operator_requested"
 
 
-def test_runtime_limits_split_between_round_and_turn() -> None:
-    round_limits = RoundLimits()
+def test_runtime_limits_split_between_scene_execution_and_turn() -> None:
+    scene_limits = SceneExecutionLimits()
     turn_limits = TurnLimits()
 
-    assert round_limits.token_budget is None
-    assert round_limits.max_tool_roundtrips > 0
-    assert round_limits.max_wakeup_delay_seconds >= round_limits.min_wakeup_delay_seconds
-    assert turn_limits.max_rounds_per_turn is None
+    assert scene_limits.token_budget is None
+    assert scene_limits.max_llm_invocations > 0
+    assert scene_limits.max_wakeup_delay_seconds >= scene_limits.min_wakeup_delay_seconds
+    assert turn_limits.max_llm_invocations is None
     assert turn_limits.turn_timeout_seconds is None
     assert turn_limits.token_budget is None
 

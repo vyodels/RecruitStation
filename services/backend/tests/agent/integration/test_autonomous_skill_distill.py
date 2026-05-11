@@ -7,10 +7,9 @@ from sqlalchemy import select
 
 from recruit_agent.agents.autonomous import AutonomousAgent
 from recruit_agent.evolution.learning_writer import LearningWriter
-from recruit_agent.agent_runtime.kernel import AgentKernel
 from recruit_agent.models.domain import AgentRun, AgentRuntimeEvent, AgentSession, EvolutionArtifact, GoalSpec, RecruitAgentProfile, Skill
 from recruit_agent.plugins.host import PluginHost
-from recruit_agent.agent_runtime.models import LLMResponse, ToolCall
+from recruit_agent.runtime.models import LLMResponse, ToolCall
 from agent_runtime.fixtures import ScriptedProvider
 from recruit_agent.runtime.tools import ToolRegistry, register_core_tools
 
@@ -52,10 +51,11 @@ def _setup_run(tmp_path: Path):
         return session_factory, profile.id, run.id
 
 
-def _build_kernel(provider: ScriptedProvider, session_factory):
+def _build_agent(provider: ScriptedProvider, session_factory):
     tools = ToolRegistry()
     register_core_tools(tools)
-    return AgentKernel(
+    return AutonomousAgent(
+        session_factory=session_factory,
         provider=provider,
         tool_registry=tools,
         plugin_host=PluginHost(),
@@ -101,8 +101,7 @@ def test_autonomous_completed_run_distills_trial_skill_from_llm_response(tmp_pat
             LLMResponse(content=json.dumps(skill_contract, ensure_ascii=False)),
         ],
     )
-    kernel = _build_kernel(provider, session_factory)
-    agent = AutonomousAgent(session_factory=session_factory, kernel=kernel)
+    agent = _build_agent(provider, session_factory)
 
     outcome = agent.run_turn_from_envelope({"run_pk": run_pk, "scope_kind": "global", "scope_ref": "workspace:shared"})
 
@@ -143,8 +142,7 @@ def test_autonomous_skill_distill_failure_does_not_fail_run(tmp_path: Path) -> N
             LLMResponse(content="完成候选人发现并记录结果。"),
         ],
     )
-    kernel = _build_kernel(provider, session_factory)
-    agent = AutonomousAgent(session_factory=session_factory, kernel=kernel)
+    agent = _build_agent(provider, session_factory)
 
     outcome = agent.run_turn_from_envelope({"run_pk": run_pk, "scope_kind": "global", "scope_ref": "workspace:shared"})
 
@@ -170,8 +168,7 @@ def test_autonomous_blocked_final_payload_marks_run_blocked(tmp_path: Path) -> N
         provider_name="scripted",
         responses=[LLMResponse(content='{"status":"blocked","next_step":"等待可继续执行条件满足。"}')],
     )
-    kernel = _build_kernel(provider, session_factory)
-    agent = AutonomousAgent(session_factory=session_factory, kernel=kernel)
+    agent = _build_agent(provider, session_factory)
 
     outcome = agent.run_turn_from_envelope({"run_pk": run_pk, "scope_kind": "global", "scope_ref": "workspace:shared"})
 

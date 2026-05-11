@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 from recruit_agent.runtime.tools import ToolDefinition, ToolRegistry, build_delegate_scene_context_tool, is_scene_context_tool, register_core_tools
-from recruit_agent.agent_runtime.models import CancellationToken
+from recruit_agent.runtime.models import CancellationToken
+from recruit_agent.core.settings import AppSettings
+from recruit_agent.db.session import create_engine_from_settings, create_session_factory, initialize_database
+from recruit_agent.memory.service import MemoryService
+from recruit_agent.models.domain import Candidate, RecruitAgentProfile
+from recruit_agent.services.container import _build_read_memory_handler, _build_record_learning_handler
 
 
 async def _run_async(tool_registry: ToolRegistry, tool_name: str, arguments: dict[str, object], token: CancellationToken | None = None):
@@ -82,22 +88,62 @@ def test_toolbus_sync_execute_works_inside_running_event_loop() -> None:
     assert result.output == {"echo": {"value": 1}}
 
 
-def test_register_core_tools_supports_custom_invoke_skill_handler() -> None:
+def test_register_core_tools_do_not_expose_skill_execution_tool() -> None:
     registry = ToolRegistry()
-    register_core_tools(
-        registry,
-        invoke_skill_handler=lambda arguments: {
-            "skill_id": arguments.get("skill_id"),
-            "executor_mode": "python_inline",
-            "result": {"status": "completed"},
-        },
+    register_core_tools(registry)
+
+    assert "read_memory" in registry.tools
+    assert all(tool.resource_target_kind != "skill" for tool in registry.tools.values())
+    assert all(tool.metadata.get("resource_target_kind") != "skill" for tool in registry.to_agent_runtime_tools())
+
+
+def test_core_read_memory_tool_uses_memory_service(tmp_path: Path) -> None:
+    settings = AppSettings(
+        data_dir=str(tmp_path / "data"),
+        database_url=f"sqlite:///{tmp_path / 'memory-tool.db'}",
+    )
+    engine = create_engine_from_settings(settings)
+    initialize_database(engine)
+    session_factory = create_session_factory(engine)
+    with session_factory() as session:
+        profile = RecruitAgentProfile(agent_key="primary", name="Primary", is_primary=True)
+        candidate = Candidate(name="Alice")
+        session.add_all([profile, candidate])
+        session.commit()
+        MemoryService(session).write(
+            scope_kind="candidate",
+            scope_ref=candidate.id,
+            agent_profile_id=profile.id,
+            memory_item_id="alice-status",
+            kind="candidate_fact",
+            index_name="status",
+            index_description="Alice replied",
+            summary="Alice replied",
+            content={"status": "replied"},
+        )
+        candidate_id = candidate.id
+
+    output = _build_read_memory_handler(session_factory)({"scope_kind": "candidate", "scope_ref": candidate_id})
+
+    assert output["count"] == 1
+    assert output["entries"][0]["memory_item_id"] == "alice-status"
+
+
+def test_core_record_learning_tool_queues_learning(tmp_path: Path) -> None:
+    settings = AppSettings(
+        data_dir=str(tmp_path / "data"),
+        database_url=f"sqlite:///{tmp_path / 'learning-tool.db'}",
+    )
+    engine = create_engine_from_settings(settings)
+    initialize_database(engine)
+    session_factory = create_session_factory(engine)
+
+    output = _build_record_learning_handler(session_factory)(
+        {"kind": "prompt_lesson", "payload": {"content": "Prefer verified candidate facts.", "tags": ["memory"]}}
     )
 
-    result = asyncio.run(_run_async(registry, "invoke_skill", {"skill_id": "demo", "input": {}}))
-
-    assert result.is_error is False
-    assert result.output["skill_id"] == "demo"
-    assert result.output["executor_mode"] == "python_inline"
+    assert output["queued"] is True
+    assert output["learning_id"]
 
 
 def test_scene_context_tool_detection_covers_computer_capabilities() -> None:

@@ -7,7 +7,6 @@ from sqlalchemy.orm import Session
 from recruit_agent.agents.autonomous import AutonomousAgent
 from recruit_agent.core.settings import AppSettings
 from recruit_agent.db.session import create_engine_from_settings, create_session_factory, initialize_database
-from recruit_agent.agent_runtime.kernel import AgentKernel
 from recruit_agent.models.domain import AgentRun, AgentSession, Candidate, RecruitAgentProfile
 from recruit_agent.plugins.host import PluginHost
 from recruit_agent.runtime.tools import ToolRegistry, register_core_tools
@@ -41,8 +40,12 @@ def test_functional_closure_memory_service_is_in_autonomous_loop(tmp_path: Path)
 
         tools = ToolRegistry()
         register_core_tools(tools)
-        kernel = AgentKernel(provider=ContinuityProvider(), tool_registry=tools, plugin_host=PluginHost())
-        agent = AutonomousAgent(session_factory=create_session_factory(session.get_bind()), kernel=kernel)
+        agent = AutonomousAgent(
+            session_factory=create_session_factory(session.get_bind()),
+            provider=ContinuityProvider(),
+            tool_registry=tools,
+            plugin_host=PluginHost(),
+        )
         agent.run_turn_from_envelope({"run_pk": run.id, "scope_kind": "candidate", "scope_ref": candidate.candidate_person_id})
         outcome = agent.run_turn_from_envelope({"run_pk": run.id, "scope_kind": "candidate", "scope_ref": candidate.candidate_person_id})
         assert outcome.final_output == "continued"

@@ -5,20 +5,18 @@ from dataclasses import dataclass, field
 import json
 from queue import Queue
 from threading import Thread
-import time
 from typing import Any, cast
 
 from sqlalchemy.orm import Session, sessionmaker
 
-from recruit_agent.agent_runtime.adapters import tools_from_legacy
 from recruit_agent.agent_runtime.engine import InteractionEngine, InteractionEngineConfig
-from recruit_agent.agent_runtime.types import InteractionOutput, LLMMessage
+from recruit_agent.agent_runtime.types import InteractionOutput, LLMMessage, LLMProvider, ToolUse
 from recruit_agent.assistant.conversation import ConversationService
 from recruit_agent.assistant.session_store import AssistantSessionStore
-from recruit_agent.agent_runtime.kernel import AgentKernel
-from recruit_agent.memory.service import MemoryService
 from recruit_agent.runtime.limits import TurnLimits
-from recruit_agent.agent_runtime.models import CancellationToken, GoalRef, GuardVerdict, InputEnvelope, Message, Observation, RoundOutcome, ToolCall
+from recruit_agent.runtime.models import CancellationToken
+from recruit_agent.plugins.host import PluginHost
+from recruit_agent.runtime.tools import ToolRegistry
 
 
 @dataclass(slots=True)
@@ -32,17 +30,18 @@ class ActiveTurn:
 
 @dataclass(slots=True)
 class AssistantAgent:
-    kernel: AgentKernel
+    provider: LLMProvider
+    tool_registry: ToolRegistry
+    plugin_host: PluginHost
     session_factory: sessionmaker[Session]
     session_store: AssistantSessionStore
     turn_limits: TurnLimits = field(default_factory=TurnLimits)
+    max_history_messages: int | None = None
     active_turns: dict[str, ActiveTurn] = field(default_factory=dict)
     conversations: ConversationService = field(init=False)
-    _assistant_guard_registered: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.conversations = ConversationService(self.session_store)
-        self._register_assistant_guard()
 
     def create_conversation(self, *, user_id: str, title: str | None = None) -> Any:
         return self.conversations.create(user_id=user_id, title=title)
@@ -82,7 +81,7 @@ class AssistantAgent:
         event_queue: Queue[tuple[str, dict[str, Any]] | None] = Queue()
         worker = Thread(
             target=self._execute_turn,
-            args=(conversation_id, conversation.id, user_turn.turn_id, assistant_turn.turn_id, message, None, token, event_queue),
+            args=(conversation_id, conversation.id, user_turn.turn_id, assistant_turn.turn_id, message, token, event_queue),
             daemon=True,
         )
         self.active_turns[conversation_id] = ActiveTurn(
@@ -112,50 +111,39 @@ class AssistantAgent:
         if conversation is None:
             raise KeyError(f"unknown conversation: {conversation_id}")
 
-        recovery_turn = self.session_store.append_turn(
-            conversation_id,
-            role="assistant",
-            content={},
-            status="running",
-            turn_metadata={"recovery_of_turn_id": pending_turn.turn_id},
-        )
-        tool_calls = [ToolCall.from_payload(payload) for payload in list(pending_turn.tool_calls or [])]
         token = CancellationToken()
         events: list[tuple[str, dict[str, Any]]] = []
-        outcome = self._run_shared_kernel_turn_loop(
+        result = self._run_confirmed_tool_turn(
             conversation_id=conversation_id,
-            conversation_pk=conversation.id,
-            message=None,
             cancel_token=token,
             event_sink=lambda event, data: events.append((event, data)),
-            seed_tool_calls=tool_calls,
+            pending_tool_calls=list(pending_turn.tool_calls or []),
         )
-        tool_results = [_serialize_tool_result(item) for item in outcome.tool_results]
-        status = _assistant_status(outcome)
+        status = result["status"]
         self.session_store.update_turn(
-            recovery_turn.turn_id,
-            content={"text": outcome.final_output or ""},
-            tool_calls=list(outcome.metadata.get("pending_tool_calls") or []),
-            tool_results=tool_results,
+            pending_turn.turn_id,
+            content={"text": result["final_output"] or ""},
+            tool_calls=list(pending_turn.tool_calls or []),
+            tool_results=list(result["tool_results"]),
             status=status,
             cancel_reason=token.reason if status == "cancelled" else None,
-            turn_metadata={"recovery_of_turn_id": pending_turn.turn_id, "events": [event for event, _data in events]},
+            turn_metadata={"confirmed": True, "events": [event for event, _data in events]},
         )
         self.session_store.append_jsonl(
             conversation,
             {
                 "role": "assistant",
-                "content": outcome.final_output,
-                "turn_id": recovery_turn.turn_id,
-                "recovery_of_turn_id": pending_turn.turn_id,
+                "content": result["final_output"],
+                "turn_id": pending_turn.turn_id,
+                "confirmed": True,
             },
         )
         return {
             "conversation_id": conversation_id,
             "confirmed": True,
-            "recovery_turn_id": recovery_turn.turn_id,
+            "turn_id": pending_turn.turn_id,
             "status": status,
-            "final_output": outcome.final_output,
+            "final_output": result["final_output"],
         }
 
     def cancel_turn(self, conversation_id: str) -> dict[str, Any]:
@@ -188,7 +176,6 @@ class AssistantAgent:
         user_turn_id: str,
         assistant_turn_id: str,
         message: str | None,
-        seed_tool_calls: list[ToolCall] | None,
         token: CancellationToken,
         event_queue: Queue[tuple[str, dict[str, Any]] | None],
     ) -> None:
@@ -200,10 +187,11 @@ class AssistantAgent:
             engine = InteractionEngine(
                 InteractionEngineConfig(
                     conversation_id=conversation_id,
-                    provider=cast(Any, self.kernel.provider),
-                    tools=tools_from_legacy(self.kernel.tool_registry),
+                    provider=cast(Any, self.provider),
+                    tools=self.tool_registry.to_agent_runtime_tools(),
                     initial_messages=self._runtime_history_messages(conversation_id, exclude_turn_id=user_turn_id),
-                    max_turns=self.turn_limits.max_rounds_per_turn or 12,
+                    max_llm_invocations=self.turn_limits.max_llm_invocations or 12,
+                    max_history_messages=self.max_history_messages,
                 )
             )
             final_output = ""
@@ -279,122 +267,70 @@ class AssistantAgent:
             self.active_turns.pop(conversation_id, None)
             event_queue.put(None)
 
-    def _run_shared_kernel_turn_loop(
+    def _run_confirmed_tool_turn(
         self,
         *,
         conversation_id: str,
-        conversation_pk: str,
-        message: str | None,
         cancel_token: CancellationToken,
         event_sink: Any,
-        seed_tool_calls: list[ToolCall] | None = None,
-        exclude_turn_id: str | None = None,
-    ) -> RoundOutcome:
+        pending_tool_calls: list[dict[str, Any]],
+    ) -> dict[str, Any]:
         conversation = self.session_store.get_session(conversation_id)
         if conversation is None:
             raise KeyError(f"unknown conversation: {conversation_id}")
-        with self.session_factory() as session:
-            memory_service = MemoryService(session)
-            goal = GoalRef(
-                goal_id=conversation_id,
-                scope_kind="conversation",
-                scope_ref=conversation_id,
-                goal_text="Respond to the user's request using the shared kernel.",
-                constraints={
-                    "conversation_pk": conversation_pk,
-                    "memory_scope_kind": "global",
-                    "memory_scope_ref": conversation.user_id,
-                    "agent_profile_id": "assistant",
-                    "source_kind": "assistant",
-                    "persist_memory": False,
-                },
+        initial_messages = self._runtime_history_messages(conversation_id, exclude_turn_id=None)
+        tool_results: list[dict[str, Any]] = []
+        for payload in pending_tool_calls:
+            call = _pending_tool_use(payload)
+            event_sink("tool_call", {"tool_name": call.name, "tool_use_id": call.id, "input": dict(call.input)})
+            result = self.tool_registry.execute(call.name, dict(call.input or {}), cancel_token=cancel_token)
+            tool_results.append(
+                {
+                    "tool_name": result.tool_name,
+                    "output": result.output,
+                    "is_error": result.is_error,
+                    "arguments": dict(result.arguments or {}),
+                    "metadata": dict(result.metadata or {}),
+                }
             )
-            history_messages = self._history_messages(conversation, exclude_turn_id=exclude_turn_id)
-            current_input = message
-            current_seed_tool_calls = list(seed_tool_calls or [])
-            round_seq = 0
-            started_at = time.monotonic()
-            last_outcome = RoundOutcome(status="continue", gate_signal="continue")
-
-            while True:
-                if cancel_token.is_cancelled():
-                    last_outcome = RoundOutcome(status="cancelled", gate_signal="paused")
-                    break
-                if self.turn_limits.max_rounds_per_turn is not None and round_seq >= self.turn_limits.max_rounds_per_turn:
-                    last_outcome = RoundOutcome(
-                        status="continue",
-                        gate_signal="budget_exhausted",
-                        final_output=last_outcome.final_output,
-                    )
-                    break
-                if (
-                    self.turn_limits.turn_timeout_seconds is not None
-                    and time.monotonic() - started_at >= self.turn_limits.turn_timeout_seconds
-                ):
-                    last_outcome = RoundOutcome(
-                        status="continue",
-                        gate_signal="budget_exhausted",
-                        final_output=last_outcome.final_output,
-                    )
-                    break
-
-                round_seq += 1
-                observation = Observation(
-                    world_snapshot={
-                        "conversation_id": conversation_id,
-                        "assistant_id": conversation.assistant_id,
-                        "context_summary": memory_service.fetch_session_summary(conversation_pk),
-                        "assistant_confirmation_enabled": True,
-                    },
-                    scope_kind="conversation",
-                    scope_ref=conversation_id,
-                    recent_events=memory_service.fetch_recent_events(conversation_id=conversation_id, limit=8),
-                    available_tools=sorted(self.kernel.tool_registry.tools.keys()),
-                    available_skills=[],
-                    available_mcps=[],
-                    hash=conversation_id,
-                    input=InputEnvelope(
-                        history_messages=list(history_messages),
-                        input_message=current_input,
-                        seed_tool_calls=list(current_seed_tool_calls),
-                    ),
+            event_sink("tool_result", tool_results[-1])
+            initial_messages.append(LLMMessage(role="assistant", content="", tool_uses=[call]))
+            initial_messages.append(
+                LLMMessage(
+                    role="tool",
+                    name=call.name,
+                    tool_use_id=call.id,
+                    content=_json_text(result.output),
+                    metadata={"is_error": result.is_error},
                 )
-                last_outcome = self.kernel.run_round(
-                    goal=goal,
-                    observation=observation,
-                    limits=self.kernel.limits,
-                    memory_service=memory_service,
-                    learning_writer=self.kernel.learning_writer,
-                    cancel_token=cancel_token,
-                    event_sink=event_sink,
-                )
-                history_messages = list(last_outcome.metadata.get("history_messages") or [])
-                current_input = None
-                current_seed_tool_calls = []
-                event_sink(
-                    "round.completed",
-                    {
-                        "round_seq": round_seq,
-                        "status": last_outcome.status,
-                        "gate_signal": last_outcome.gate_signal,
-                    },
-                )
-                if last_outcome.final_output:
-                    event_sink("llm_final", {"content": last_outcome.final_output, "round_seq": round_seq})
-                if last_outcome.status == "cancelled" or last_outcome.gate_signal not in {None, "continue"}:
-                    break
-            return last_outcome
+            )
 
-    def _history_messages(self, conversation: Any, *, exclude_turn_id: str | None) -> list[Message]:
-        messages: list[Message] = []
-        for item in self.session_store.load_history(conversation):
-            role = str(item.get("role") or "").strip()
-            if role not in {"user", "assistant", "tool"}:
-                continue
-            if exclude_turn_id is not None and item.get("turn_id") == exclude_turn_id:
-                continue
-            messages.append(Message(role=cast(Any, role), content=str(item.get("content") or "")))
-        return messages
+        engine = InteractionEngine(
+            InteractionEngineConfig(
+                conversation_id=conversation_id,
+                provider=cast(Any, self.provider),
+                tools=self.tool_registry.to_agent_runtime_tools(),
+                initial_messages=initial_messages,
+                max_llm_invocations=self.turn_limits.max_llm_invocations or 12,
+                max_history_messages=self.max_history_messages,
+            )
+        )
+        final_output = ""
+        status = "completed"
+        for output in engine.submitMessage(""):
+            if cancel_token.is_cancelled():
+                engine.interrupt()
+            for event, payload in _assistant_events_from_output(output):
+                event_sink(event, payload)
+            if output.type == "assistant_message_completed":
+                final_output = str(output.data.get("message") or "")
+            elif output.type == "permission_requested":
+                status = "waiting_human"
+            elif output.type == "turn_interrupted":
+                status = "cancelled"
+            elif output.type == "turn_failed":
+                status = "failed"
+        return {"status": status, "final_output": final_output, "tool_results": tool_results}
 
     def _runtime_history_messages(self, conversation_id: str, *, exclude_turn_id: str | None) -> list[LLMMessage]:
         conversation = self.session_store.get_session(conversation_id)
@@ -409,49 +345,6 @@ class AssistantAgent:
                 continue
             messages.append(LLMMessage(role=cast(Any, role), content=str(item.get("content") or "")))
         return messages
-
-    def _register_assistant_guard(self) -> None:
-        if self._assistant_guard_registered:
-            return
-
-        def _assistant_confirmation(tool_name: str, arguments: dict[str, Any], observation: Observation) -> GuardVerdict:
-            if observation.scope_kind != "conversation":
-                return GuardVerdict(allowed=True)
-            if not bool(observation.world_snapshot.get("assistant_confirmation_enabled")):
-                return GuardVerdict(allowed=True)
-            tool = self.kernel.tool_registry.tools.get(tool_name)
-            if tool is None:
-                return GuardVerdict(allowed=True)
-            if bool(tool.metadata.get("requires_confirmation")) or tool.external_target or bool(arguments.get("requires_confirmation")):
-                return GuardVerdict(allowed=False, reason="pending_confirmation", severity="waiting_human")
-            return GuardVerdict(allowed=True)
-
-        self.kernel.plugin_host.register_guard_check("assistant_confirmation", _assistant_confirmation)
-        self._assistant_guard_registered = True
-
-
-def _assistant_status(outcome: RoundOutcome) -> str:
-    if outcome.status == "cancelled" or outcome.gate_signal == "paused":
-        return "cancelled"
-    if outcome.status == "wait_human" or outcome.gate_signal == "wait_human":
-        return "waiting_human"
-    if outcome.status == "complete" or outcome.gate_signal == "goal_done":
-        return "completed"
-    if outcome.status == "escalate" or outcome.gate_signal == "escalate":
-        return "failed"
-    if outcome.gate_signal == "budget_exhausted":
-        return "failed"
-    return "completed"
-
-
-def _serialize_tool_result(result: Any) -> dict[str, Any]:
-    return {
-        "tool_name": result.tool_name,
-        "output": result.output,
-        "is_error": result.is_error,
-        "arguments": dict(result.arguments or {}),
-        "metadata": dict(result.metadata or {}),
-    }
 
 
 def _assistant_events_from_output(output: InteractionOutput) -> list[tuple[str, dict[str, Any]]]:
@@ -474,7 +367,7 @@ def _assistant_events_from_output(output: InteractionOutput) -> list[tuple[str, 
     if output.type == "llm_invocation_started":
         return [("provider_started", base)]
     if output.type == "llm_invocation_completed":
-        return [("provider_completed", base), ("round.completed", {"round_seq": base.get("index", output.seq), "status": "complete", "gate_signal": "goal_done"})]
+        return [("provider_completed", base)]
     if output.type == "tool_event":
         kind = str(base.get("kind") or "tool_event")
         if kind == "tool_call_started":
@@ -502,3 +395,25 @@ def _permission_tool_call_payload(data: dict[str, Any]) -> dict[str, Any]:
             "arguments": json.dumps(dict(data.get("input") or {}), ensure_ascii=False),
         },
     }
+
+
+def _pending_tool_use(payload: dict[str, Any]) -> ToolUse:
+    function = payload.get("function") if isinstance(payload.get("function"), dict) else {}
+    arguments = function.get("arguments", {})
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments or "{}")
+        except json.JSONDecodeError:
+            arguments = {"_raw": arguments}
+    return ToolUse(
+        id=str(payload.get("id") or payload.get("tool_use_id") or payload.get("tool_call_id") or ""),
+        name=str(function.get("name") or payload.get("name") or payload.get("tool_name") or ""),
+        input=dict(arguments or payload.get("input") or {}),
+        raw=dict(payload),
+    )
+
+
+def _json_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)

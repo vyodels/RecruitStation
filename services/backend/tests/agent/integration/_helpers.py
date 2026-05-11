@@ -10,7 +10,6 @@ from recruit_agent.agents.assistant import AssistantAgent
 from recruit_agent.api.routers.assistant import build_router as build_assistant_router
 from recruit_agent.core.settings import AppSettings
 from recruit_agent.db.session import create_engine_from_settings, create_session_factory, initialize_database
-from recruit_agent.agent_runtime.kernel import AgentKernel
 from recruit_agent.plugins.host import PluginHost
 from recruit_agent.agent_runtime.providers import LLMProvider
 from recruit_agent.runtime.tools import ToolRegistry, register_core_tools
@@ -42,13 +41,14 @@ def build_assistant_client(
     registry = tools or ToolRegistry()
     if not registry.tools:
         register_core_tools(registry)
-    kernel = AgentKernel(
+    store = AssistantSessionStore(session_factory=session_factory, base_dir=tmp_path / "assistant-jsonl")
+    agent = AssistantAgent(
         provider=provider,
         tool_registry=registry,
         plugin_host=plugin_host or PluginHost(),
+        session_factory=session_factory,
+        session_store=store,
     )
-    store = AssistantSessionStore(session_factory=session_factory, base_dir=tmp_path / "assistant-jsonl")
-    agent = AssistantAgent(kernel=kernel, session_factory=session_factory, session_store=store)
     app = FastAPI()
     app.include_router(build_assistant_router(agent))
     return TestClient(app), agent, session_factory

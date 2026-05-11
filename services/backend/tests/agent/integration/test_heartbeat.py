@@ -8,11 +8,10 @@ from recruit_agent.agents.autonomous import AutonomousAgent
 from recruit_agent.agents.heartbeat import Heartbeat
 from recruit_agent.core.settings import AppSettings
 from recruit_agent.db.session import create_engine_from_settings, create_session_factory, initialize_database
-from recruit_agent.agent_runtime.kernel import AgentKernel
 from recruit_agent.models.domain import AgentGlobalState, AgentRun, AgentSession, Candidate, RecruitAgentProfile
 from recruit_agent.plugins.host import PluginHost
 from recruit_agent.repositories.domain import TaskQueueRepository
-from recruit_agent.agent_runtime.models import LLMResponse
+from recruit_agent.runtime.models import LLMResponse
 from agent_runtime.fixtures import ScriptedProvider
 from recruit_agent.runtime.tools import ToolRegistry, register_core_tools
 
@@ -64,8 +63,12 @@ def test_heartbeat_claims_task_and_runs_autonomous_turn(tmp_path: Path) -> None:
         provider = ScriptedProvider(provider_name="scripted", responses=[LLMResponse(content="completed")])
         tools = ToolRegistry()
         register_core_tools(tools)
-        kernel = AgentKernel(provider=provider, tool_registry=tools, plugin_host=PluginHost())
-        agent = AutonomousAgent(session_factory=create_session_factory(session.get_bind()), kernel=kernel)
+        agent = AutonomousAgent(
+            session_factory=create_session_factory(session.get_bind()),
+            provider=provider,
+            tool_registry=tools,
+            plugin_host=PluginHost(),
+        )
         heartbeat = Heartbeat(session_factory=create_session_factory(session.get_bind()), autonomous_agent=agent)
 
         result = heartbeat.run_once()
@@ -87,8 +90,12 @@ def test_heartbeat_honors_global_pause(tmp_path: Path) -> None:
         provider = ScriptedProvider(provider_name="scripted", responses=[LLMResponse(content="completed")])
         tools = ToolRegistry()
         register_core_tools(tools)
-        kernel = AgentKernel(provider=provider, tool_registry=tools, plugin_host=PluginHost())
-        agent = AutonomousAgent(session_factory=create_session_factory(session.get_bind()), kernel=kernel)
+        agent = AutonomousAgent(
+            session_factory=create_session_factory(session.get_bind()),
+            provider=provider,
+            tool_registry=tools,
+            plugin_host=PluginHost(),
+        )
         heartbeat = Heartbeat(session_factory=create_session_factory(session.get_bind()), autonomous_agent=agent)
 
         result = heartbeat.run_once()

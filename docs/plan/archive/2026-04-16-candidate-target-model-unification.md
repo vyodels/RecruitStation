@@ -2,7 +2,7 @@
 
 > Status: archived
 > Supersedes: -
-> Superseded by: docs/plan/completed/2026-04-17-canonical-entity-naming-and-schema-plan.md
+> Superseded by: docs/plan/archive/2026-04-17-canonical-entity-naming-and-schema-plan.md
 > Distilled into: docs/specs/2026-04-20-candidate-target-data-model-spec.md
 > Last reviewed against code: 2026-04-20
 > Historical source path: docs/superpowers/plans/2026-04-16-candidate-target-model-unification.md

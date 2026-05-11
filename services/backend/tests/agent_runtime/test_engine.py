@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 
 from recruit_agent.agent_runtime.engine import InteractionEngine, InteractionEngineConfig
 from recruit_agent.agent_runtime.tools import FunctionToolHandler
+from recruit_agent.agent_runtime.transcript import InMemoryTranscript
 from recruit_agent.agent_runtime.types import LLMInvocationResult, LLMMessage, LLMRequest, LLMResponse, TokenUsage, ToolDefinition, ToolSchema, ToolUse
 
 
@@ -110,6 +111,8 @@ def test_engine_passes_llm_request_options_to_provider() -> None:
             previous_response_id="resp-prev",
             store=False,
             truncation="auto",
+            openai_payload_overrides={"service_tier": "flex"},
+            anthropic_payload_overrides={"metadata": {"source": "engine-test"}},
         )
     )
 
@@ -129,3 +132,87 @@ def test_engine_passes_llm_request_options_to_provider() -> None:
     assert request.previous_response_id == "resp-prev"
     assert request.store is False
     assert request.truncation == "auto"
+    assert request.openai_payload_overrides == {"service_tier": "flex"}
+    assert request.anthropic_payload_overrides == {"metadata": {"source": "engine-test"}}
+
+
+def test_engine_compacts_model_visible_history_before_request() -> None:
+    provider = FixtureLLMProvider(
+        responses=[
+            LLMResponse(
+                id="resp-1",
+                request_id="",
+                invocation_id="",
+                assistant_message=LLMMessage(role="assistant", content="done"),
+            )
+        ]
+    )
+    initial_messages = [
+        LLMMessage(role="user", content="old user one"),
+        LLMMessage(role="assistant", content="old assistant one"),
+        LLMMessage(role="user", content="old user two"),
+        LLMMessage(role="assistant", content="old assistant two"),
+        LLMMessage(role="user", content="recent user"),
+        LLMMessage(role="assistant", content="recent assistant"),
+    ]
+    engine = InteractionEngine(
+        InteractionEngineConfig(
+            conversation_id="conv-compact",
+            provider=provider,
+            initial_messages=initial_messages,
+            max_history_messages=4,
+        )
+    )
+
+    outputs = list(engine.submitMessage("current user"))
+
+    request_messages = provider.captured_requests[0].messages
+    assert len(request_messages) == 4
+    assert request_messages[0].role == "system"
+    assert request_messages[0].metadata["kind"] == "context_compaction_summary"
+    assert "old user one" in str(request_messages[0].content)
+    assert [message.content for message in request_messages[1:]] == ["recent user", "recent assistant", "current user"]
+    assert any(
+        output.type == "runtime_event"
+        and output.data["kind"] == "context_compacted"
+        and output.data["messages_before"] == 7
+        and output.data["messages_after"] == 4
+        for output in outputs
+    )
+
+
+def test_engine_compaction_replaces_transcript_materialized_history() -> None:
+    provider = FixtureLLMProvider(
+        responses=[
+            LLMResponse(
+                id="resp-1",
+                request_id="",
+                invocation_id="",
+                assistant_message=LLMMessage(role="assistant", content="first reply"),
+            )
+        ]
+    )
+    transcript = InMemoryTranscript()
+    engine = InteractionEngine(
+        InteractionEngineConfig(
+            conversation_id="conv-transcript",
+            provider=provider,
+            transcript=transcript,
+            initial_messages=[
+                LLMMessage(role="user", content="old one"),
+                LLMMessage(role="assistant", content="old two"),
+                LLMMessage(role="user", content="old three"),
+                LLMMessage(role="assistant", content="old four"),
+            ],
+            max_history_messages=3,
+        )
+    )
+
+    list(engine.submitMessage("latest"))
+
+    state = transcript.load("conv-transcript")
+    assert state is not None
+    assert state.messages[:-1] == provider.captured_requests[0].messages
+    assert state.messages[0].role == "system"
+    assert state.messages[0].metadata["kind"] == "context_compaction_summary"
+    assert len(state.messages) == 4

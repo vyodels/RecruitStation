@@ -823,11 +823,11 @@ def ensure_global_memory(
             ).strip() or None
             goal_kind: str | None = None
             goal_title: str | None = None
-            round_status: str | None = None
+            run_status: str | None = None
             if run_pk:
                 run = session.get(AgentRun, run_pk)
                 if run is not None:
-                    round_status = str(run.status or "").strip() or None
+                    run_status = str(run.status or "").strip() or None
                     if conversation_pk is None:
                         conversation_pk = str((run.runtime_metadata or {}).get("conversation_id") or "").strip() or None
                     goal_spec = session.get(GoalSpec, run.goal_spec_id) if run.goal_spec_id else None
@@ -840,7 +840,7 @@ def ensure_global_memory(
                 raw_content=dict(memory.raw_content or {}),
                 goal_kind=goal_kind,
                 goal_title=goal_title,
-                round_status=round_status,
+                run_status=run_status,
                 source_kind=str((memory.memory_metadata or {}).get("source_kind") or memory.kind or "autonomous"),
                 run_pk=run_pk,
                 conversation_pk=conversation_pk,

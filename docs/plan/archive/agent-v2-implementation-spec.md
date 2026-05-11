@@ -2,7 +2,7 @@
 
 > Status: archived
 > Supersedes: docs/plan/archive/autonomous-agent-improvement-plan.md
-> Superseded by: docs/plan/completed/2026-04-19-agent-v2-direct-cutover-plan.md
+> Superseded by: docs/plan/archive/2026-04-19-agent-v2-direct-cutover-plan.md
 > Distilled into: partial: docs/specs/2026-04-20-autonomous-agent-runtime-constraints.md
 > Last reviewed against code: 2026-04-20
 > Legacy path retained: docs/agent-v2-implementation-spec.md

@@ -7,7 +7,7 @@ from typing import Any, Callable, cast
 
 from fastapi import APIRouter
 
-from recruit_agent.agent_runtime.models import GuardVerdict, Observation
+from recruit_agent.runtime.models import GuardVerdict, Observation
 from recruit_agent.runtime.tools import ToolDefinition, ToolRegistry, run_awaitable_blocking
 
 
@@ -49,7 +49,6 @@ class PluginHost:
             "scope_kind": observation.scope_kind,
             "recent_events": list(observation.recent_events),
             "available_tools": list(observation.available_tools),
-            "available_skills": list(observation.available_skills),
             "available_mcps": list(observation.available_mcps),
             "hash": observation.hash,
             "input": observation.input,

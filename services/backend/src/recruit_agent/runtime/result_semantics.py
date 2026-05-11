@@ -93,7 +93,7 @@ def normalize_result_payload(payload: Mapping[str, Any] | None) -> tuple[dict[st
     return result_data, dict(skill_draft)
 
 
-def infer_non_success_round_outcome(final_output: str | None) -> tuple[str, str] | None:
+def infer_non_success_turn_outcome(final_output: str | None) -> tuple[str, str] | None:
     payload = extract_structured_result_payload(final_output)
     execution_status = extract_execution_status(payload)
     normalized_status = execution_status.lower() if execution_status else None

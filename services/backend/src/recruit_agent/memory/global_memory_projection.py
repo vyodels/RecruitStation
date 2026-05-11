@@ -123,12 +123,12 @@ def project_agent_global_memory(
     final_content: str | None = None,
     goal_kind: str | None = None,
     goal_title: str | None = None,
-    round_status: str | None = None,
+    run_status: str | None = None,
     source_kind: str | None = None,
     run_pk: str | None = None,
     conversation_pk: str | None = None,
 ) -> dict[str, Any]:
-    del final_content, goal_kind, goal_title, round_status, source_kind, run_pk, conversation_pk
+    del final_content, goal_kind, goal_title, run_status, source_kind, run_pk, conversation_pk
     seed = empty_agent_global_memory_payload()
     projected_content = _normalize_long_term_content(content=content, raw_content=raw_content)
     summary_text = _normalize_summary(summary, projected_content)

@@ -1,33 +1,25 @@
 # docs
 
-Repository documentation is organized into the following groups:
+Repository documentation is intentionally small at the active level.
 
-- [`specs/`](./specs/) — long-term canonical truth
+## Active Directories
+
+- [`specs/`](./specs/) — long-term canonical rules
+- [`design/`](./design/) — current technical design sources
 - [`plan/`](./plan/) — active, completed, and archived implementation plans
 - [`guides/`](./guides/) — current operator-facing and agent-facing usage guides
-- [`reference/`](./reference/) — non-normative background material
-- [`analysis/`](./analysis/) — research and analytical writeups
-- [`draft/`](./draft/) — draft proposals not yet promoted
-- root `docs/*.md` — stable handoff and directly operational docs that still need a root entrypoint
+- [`archive/`](./archive/) — archived research, references, drafts, and handoffs
 
-## Root docs currently kept at top level
-- [`project-handoff.md`](./project-handoff.md) — stable documentation entrypoint
-- [`session-handoff-2026-04-19-ui-recovery.md`](./session-handoff-2026-04-19-ui-recovery.md) — current temporary handoff
-- [`macos-release.md`](./macos-release.md) — operational release instructions
+## Root Documents
 
-## Current structure snapshot
+- [`macos-release.md`](./macos-release.md) — operational macOS release instructions
 
-### Keep at root
-- [`project-handoff.md`](./project-handoff.md)
-- [`session-handoff-2026-04-19-ui-recovery.md`](./session-handoff-2026-04-19-ui-recovery.md)
-- [`macos-release.md`](./macos-release.md)
+## Reading Order
 
-### Primary entrypoints
-- [`specs/README.md`](./specs/README.md)
-- [`plan/README.md`](./plan/README.md)
-- [`guides/README.md`](./guides/README.md)
-- [`reference/README.md`](./reference/README.md)
+1. Repository entry: [`../AGENTS.md`](../AGENTS.md)
+2. Long-term specs: [`specs/README.md`](./specs/README.md)
+3. Runtime design when changing Agent core: [`design/agent-core/00-agent-runtime-technical-design.md`](./design/agent-core/00-agent-runtime-technical-design.md)
+4. Current implementation work: [`plan/active/`](./plan/active/)
+5. Operator guidance: [`guides/README.md`](./guides/README.md)
 
-## Migration note
-Legacy content has been migrated into `docs/specs/`, `docs/plan/`, `docs/guides/`, and `docs/reference/`.
-New entrypoints should prefer `specs/`, `plan/`, `guides/`, and `reference/`.
+Archived documents are historical context only and must not be treated as current rules.

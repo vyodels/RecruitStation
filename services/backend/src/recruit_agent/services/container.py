@@ -21,16 +21,12 @@ from recruit_agent.assistant.session_store import AssistantSessionStore
 from recruit_agent.core.settings import AppSettings, load_settings
 from recruit_agent.db.session import create_engine_from_settings, create_session_factory, initialize_database
 from recruit_agent.evolution.learning_writer import LearningWriter
+from recruit_agent.memory.service import MemoryService
 from recruit_agent.evolution.promotion import PromotionService
 from recruit_agent.evolution.queue import EvolutionQueue
-from recruit_agent.execution_units.browser_worker import run_browser_worker
-from recruit_agent.execution_units.runner import ExecutionUnitRunner
-from recruit_agent.execution_units.store import ExecutionUnitStore
-from recruit_agent.agent_runtime.kernel import AgentKernel
 from recruit_agent.plugins.host import PluginHost
 from recruit_agent.plugins.loader import install_manifest
 from recruit_agent.plugins.recruit.manifest import RecruitPluginManifest
-from recruit_agent.skills.executor import build_invoke_skill_handler
 from recruit_agent.runtime.tools import (
     ToolRegistry,
     build_delegate_scene_context_tool,
@@ -65,14 +61,11 @@ class AppContainer:
     tool_registry: ToolRegistry
     scene_context_tool_registry: ToolRegistry
     plugin_host: PluginHost
-    kernel: AgentKernel
     scene_context_service: SceneContextService
     autonomous_agent: AutonomousAgent
     heartbeat: Heartbeat
     session_store: AssistantSessionStore
     assistant_agent: AssistantAgent
-    execution_unit_store: ExecutionUnitStore
-    execution_unit_runner: ExecutionUnitRunner
     learning_writer: LearningWriter
     evolution_queue: EvolutionQueue
     promotion: PromotionService
@@ -114,25 +107,27 @@ class AppContainer:
             plugin_host=plugin_host,
         )
         _register_delegate_scene_context_tool(tool_registry, scene_context_service=scene_context_service)
-        kernel = AgentKernel(
+        autonomous_agent = AutonomousAgent(
+            session_factory=session_factory,
             provider=provider,
             tool_registry=tool_registry,
             plugin_host=plugin_host,
             learning_writer=learning_writer,
         )
-        autonomous_agent = AutonomousAgent(session_factory=session_factory, kernel=kernel)
         heartbeat = Heartbeat(session_factory=session_factory, autonomous_agent=autonomous_agent)
 
         data_dir = resolved_settings.resolved_data_dir()
         data_dir.mkdir(parents=True, exist_ok=True)
         session_store = AssistantSessionStore(session_factory=session_factory, base_dir=Path(data_dir) / "assistant-jsonl")
-        assistant_agent = AssistantAgent(kernel=kernel, session_factory=session_factory, session_store=session_store)
-
-        execution_unit_store = ExecutionUnitStore()
-        execution_unit_runner = ExecutionUnitRunner(
-            store=execution_unit_store,
-            workers={"browser": run_browser_worker},
+        assistant_agent = AssistantAgent(
+            provider=provider,
+            tool_registry=tool_registry,
+            plugin_host=plugin_host,
+            session_factory=session_factory,
+            session_store=session_store,
+            max_history_messages=resolved_settings.assistant_max_history_messages,
         )
+
         evolution_queue = EvolutionQueue(session_factory)
         promotion = PromotionService(session_factory)
         events = EventStreamService()
@@ -154,14 +149,11 @@ class AppContainer:
             tool_registry=tool_registry,
             scene_context_tool_registry=scene_context_tool_registry,
             plugin_host=plugin_host,
-            kernel=kernel,
             scene_context_service=scene_context_service,
             autonomous_agent=autonomous_agent,
             heartbeat=heartbeat,
             session_store=session_store,
             assistant_agent=assistant_agent,
-            execution_unit_store=execution_unit_store,
-            execution_unit_runner=execution_unit_runner,
             learning_writer=learning_writer,
             evolution_queue=evolution_queue,
             promotion=promotion,
@@ -189,8 +181,11 @@ class AppContainer:
             plugin_host=self.plugin_host,
         )
         _register_delegate_scene_context_tool(self.tool_registry, scene_context_service=self.scene_context_service)
-        self.kernel.provider = self.provider
-        self.kernel.tool_registry = self.tool_registry
+        self.autonomous_agent.provider = self.provider
+        self.autonomous_agent.tool_registry = self.tool_registry
+        self.assistant_agent.provider = self.provider
+        self.assistant_agent.tool_registry = self.tool_registry
+        self.assistant_agent.max_history_messages = settings.assistant_max_history_messages
         self.dashboard.settings = settings
 
         self.flags.flags.clear()
@@ -268,6 +263,82 @@ def _build_sync_service(settings: AppSettings, session_factory: sessionmaker[Ses
     )
 
 
+def _build_read_memory_handler(session_factory: sessionmaker[Session]):
+    def _handler(arguments: dict[str, Any]) -> dict[str, Any]:
+        scope_kind = str(arguments.get("scope_kind") or arguments.get("scopeKind") or "").strip()
+        scope_ref = str(arguments.get("scope_ref") or arguments.get("scopeRef") or "").strip()
+        if not scope_kind or not scope_ref:
+            raise ValueError("read_memory requires scope_kind and scope_ref")
+        agent_profile_id = arguments.get("agent_profile_id") or arguments.get("agentProfileId")
+        limit = _bounded_int(arguments.get("limit"), default=50, minimum=1, maximum=100)
+        query = str(arguments.get("query") or "").strip()
+        with session_factory() as session:
+            service = MemoryService(session)
+            if query:
+                entries = service.search_semantic(
+                    query,
+                    scope_kind=scope_kind,
+                    scope_ref=scope_ref,
+                    agent_profile_id=str(agent_profile_id) if agent_profile_id else None,
+                    limit=limit,
+                )
+            else:
+                entries = service.read(
+                    scope_kind=scope_kind,
+                    scope_ref=scope_ref,
+                    agent_profile_id=str(agent_profile_id) if agent_profile_id else None,
+                    limit=limit,
+                )
+        return {"entries": entries, "count": len(entries), "scope_kind": scope_kind, "scope_ref": scope_ref}
+
+    return _handler
+
+
+def _build_record_learning_handler(session_factory: sessionmaker[Session]):
+    writer = LearningWriter(session_factory)
+
+    def _handler(arguments: dict[str, Any]) -> dict[str, Any]:
+        payload = dict(arguments.get("payload") or {})
+        content = str(arguments.get("content") or payload.get("content") or payload.get("summary") or "").strip()
+        if not content:
+            raise ValueError("record_learning requires content or payload.content")
+        tags = _string_list(arguments.get("tags") or payload.get("tags") or [str(arguments.get("kind") or "learning")])
+        return writer.record_learning(
+            content=content,
+            tags=tags,
+            promote=bool(arguments.get("promote") or payload.get("promote") or False),
+            skill_name=_optional_string(arguments.get("skill_name") or payload.get("skill_name")),
+            trial_metrics=dict(arguments.get("trial_metrics") or payload.get("trial_metrics") or {}),
+            job_description_id=_optional_string(arguments.get("job_description_id") or payload.get("job_description_id")),
+            artifact_kind=_optional_string(arguments.get("artifact_kind") or arguments.get("kind") or payload.get("artifact_kind")),
+        )
+
+    return _handler
+
+
+def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(parsed, maximum))
+
+
+def _string_list(value: Any) -> list[str]:
+    source = value if isinstance(value, list) else [value]
+    items: list[str] = []
+    for item in source:
+        text = str(item or "").strip()
+        if text and text not in items:
+            items.append(text)
+    return items or ["learning"]
+
+
+def _optional_string(value: Any) -> str | None:
+    text = str(value or "").strip()
+    return text or None
+
+
 def _build_runtime_tool_registries(
     *,
     session_factory: sessionmaker[Session],
@@ -277,7 +348,11 @@ def _build_runtime_tool_registries(
     parent_registry = ToolRegistry()
     scene_registry = ToolRegistry()
 
-    register_core_tools(parent_registry, invoke_skill_handler=build_invoke_skill_handler(session_factory))
+    register_core_tools(
+        parent_registry,
+        read_memory_handler=_build_read_memory_handler(session_factory),
+        record_learning_handler=_build_record_learning_handler(session_factory),
+    )
 
     for tool in plugin_host.tool_registry.tools.values():
         if is_approval_tool(tool):

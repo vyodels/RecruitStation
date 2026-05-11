@@ -11,7 +11,6 @@ from recruit_agent.agents.heartbeat import Heartbeat
 from recruit_agent.agent_runtime.types import LLMInvocationResult, LLMMessage, LLMRequest, LLMResponse as RuntimeLLMResponse
 from recruit_agent.core.settings import AppSettings
 from recruit_agent.db.session import create_engine_from_settings, create_session_factory, initialize_database
-from recruit_agent.agent_runtime.kernel import AgentKernel
 from recruit_agent.models.domain import (
     AgentRun,
     AgentRunCheckpoint,
@@ -27,7 +26,7 @@ from recruit_agent.models.domain import (
 )
 from recruit_agent.plugins.host import PluginHost
 from recruit_agent.repositories.domain import TaskQueueRepository
-from recruit_agent.agent_runtime.models import GuardVerdict, LLMResponse, ToolCall
+from recruit_agent.runtime.models import LLMResponse, ToolCall
 from recruit_agent.runtime.tools import ToolRegistry, register_core_tools
 from agent_runtime.fixtures import ScriptedProvider
 from recruit_agent.runtime.tools import ToolDefinition
@@ -126,9 +125,13 @@ def test_heartbeat_persists_running_state_and_progress_events_before_completion(
         provider = BlockingProvider()
         tools = ToolRegistry()
         register_core_tools(tools)
-        kernel = AgentKernel(provider=provider, tool_registry=tools, plugin_host=PluginHost())
         session_factory = create_session_factory(session.get_bind())
-        agent = AutonomousAgent(session_factory=session_factory, kernel=kernel)
+        agent = AutonomousAgent(
+            session_factory=session_factory,
+            provider=provider,
+            tool_registry=tools,
+            plugin_host=PluginHost(),
+        )
         heartbeat = Heartbeat(session_factory=session_factory, autonomous_agent=agent)
 
         result_holder: dict[str, object] = {}
@@ -167,7 +170,6 @@ def test_heartbeat_persists_running_state_and_progress_events_before_completion(
                 ).all()
             ]
             assert "turn.started" in event_types
-            assert "round.started" in event_types
             assert "provider.started" in event_types
 
         provider.release.set()
@@ -251,17 +253,10 @@ def test_wait_human_records_keep_application_subject_when_run_has_application_sc
                 category="plugin",
                 external_target=False,
                 resource_target_kind="application",
+                metadata={"requires_confirmation": True},
             )
         )
         plugin_host = PluginHost()
-        plugin_host.register_guard_check(
-            "test-wait-human-app-scope",
-            lambda tool_name, _arguments, _observation: GuardVerdict(
-                allowed=tool_name != "needs.approval",
-                reason="requires_operator_confirmation",
-                severity="waiting_human",
-            ),
-        )
         provider = ScriptedProvider(
             provider_name="scripted",
             responses=[
@@ -271,8 +266,12 @@ def test_wait_human_records_keep_application_subject_when_run_has_application_sc
                 )
             ],
         )
-        kernel = AgentKernel(provider=provider, tool_registry=tools, plugin_host=plugin_host)
-        agent = AutonomousAgent(session_factory=create_session_factory(session.get_bind()), kernel=kernel)
+        agent = AutonomousAgent(
+            session_factory=create_session_factory(session.get_bind()),
+            provider=provider,
+            tool_registry=tools,
+            plugin_host=plugin_host,
+        )
 
         outcome = agent.run_turn_from_envelope(
             {

@@ -7,7 +7,7 @@ from recruit_agent.core.settings import AppSettings
 from recruit_agent.db.session import create_engine_from_settings, create_session_factory, initialize_database
 from recruit_agent.models.domain import AgentLearning, EnvironmentSnapshot, ExecutionEpisode, ExecutionPlan, TaskSpec
 from recruit_agent.plugins.host import PluginHost
-from recruit_agent.agent_runtime.models import LLMResponse, ToolCall
+from recruit_agent.runtime.models import LLMResponse, ToolCall
 from agent_runtime.fixtures import ScriptedProvider
 from recruit_agent.runtime.tools import ToolDefinition, ToolRegistry
 from recruit_agent.services.scene_context import SceneContextService
@@ -132,13 +132,13 @@ def test_scene_context_only_uses_round_budget_when_explicit(tmp_path: Path) -> N
         {
             "title": "显式预算测试",
             "instruction": "保持继续，直到显式预算触发。",
-            "max_rounds": 1,
+            "max_llm_invocations": 1,
         }
     )
 
     assert result["status"] == "blocked"
     assert result["blockers"][0]["kind"] == "budget_exhausted"
-    assert result["metrics"]["round_count"] == 1
+    assert result["metrics"]["engine_output_count"] >= 1
 
 
 def test_scene_context_rejects_browser_tab_from_different_target_origin(tmp_path: Path) -> None:

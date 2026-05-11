@@ -2,7 +2,7 @@
 
 > Status: archived
 > Supersedes: docs/plan/archive/agent架构设计.md
-> Superseded by: docs/plan/completed/2026-04-19-agent-v2-direct-cutover-plan.md
+> Superseded by: docs/plan/archive/2026-04-19-agent-v2-direct-cutover-plan.md
 > Distilled into: partial: docs/specs/2026-04-20-dual-agent-product-architecture.md
 > Last reviewed against code: 2026-04-20
 > Legacy path retained: docs/agent-v2-design-summary.md

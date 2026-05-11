@@ -10,7 +10,7 @@ from recruit_agent.models.domain import AgentGlobalState, Candidate
 from recruit_agent.plugins.host import PluginHost
 from recruit_agent.plugins.loader import install_manifest
 from recruit_agent.plugins.recruit.manifest import RecruitPluginManifest
-from recruit_agent.agent_runtime.models import InputEnvelope, Observation, ToolCall
+from recruit_agent.runtime.models import InputEnvelope, Observation
 
 
 def _make_session(tmp_path: Path) -> Session:
@@ -39,7 +39,6 @@ def test_recruit_pack_requires_global_pause_before_assistant_external_action(tmp
             scope_ref=candidate.candidate_person_id,
             recent_events=[],
             available_tools=[],
-            available_skills=[],
             available_mcps=[],
             hash="obs-1",
         )
@@ -85,7 +84,6 @@ def test_recruit_pack_requests_human_approval_once_then_allows_seeded_resume(tmp
             scope_ref="workspace:shared",
             recent_events=[],
             available_tools=[],
-            available_skills=[],
             available_mcps=[],
             hash="obs-approval",
             input=InputEnvelope(),
@@ -105,22 +103,13 @@ def test_recruit_pack_requests_human_approval_once_then_allows_seeded_resume(tmp
             scope_ref="workspace:shared",
             recent_events=[],
             available_tools=[],
-            available_skills=[],
             available_mcps=[],
             hash="obs-approval-resume",
-            input=InputEnvelope(
-                seed_tool_calls=[
-                    ToolCall(
-                        id="call-1",
-                        name="request_human_approval",
-                        arguments={"title": "联系候选人索要联系方式", "application_id": "app-1"},
-                    )
-                ]
-            ),
+            input=InputEnvelope(),
         )
         allowed = host.run_guard_checks_sync(
             "request_human_approval",
-            {"title": "联系候选人索要联系方式", "application_id": "app-1"},
+            {"title": "联系候选人索要联系方式", "application_id": "app-1", "approved_by_operator": True},
             resumed_observation,
         )
         assert allowed[0].allowed is True

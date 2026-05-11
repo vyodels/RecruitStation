@@ -88,6 +88,8 @@ def test_provider_options_are_mapped_only_when_supported() -> None:
         previous_response_id="resp-prev",
         store=False,
         truncation="auto",
+        openai_payload_overrides={"service_tier": "flex"},
+        anthropic_payload_overrides={"metadata": {"provider": "request-anthropic"}},
         metadata={"ignored_by_providers": True},
     )
     captured: dict[str, dict[str, object]] = {}
@@ -139,7 +141,7 @@ def test_provider_options_are_mapped_only_when_supported() -> None:
     assert openai_payload["previous_response_id"] == "resp-prev"
     assert openai_payload["store"] is False
     assert openai_payload["truncation"] == "auto"
-    assert openai_payload["service_tier"] == "default"
+    assert openai_payload["service_tier"] == "flex"
     assert "thinking" not in openai_payload
     assert "stop_sequences" not in openai_payload
     assert "metadata" not in openai_payload
@@ -151,7 +153,7 @@ def test_provider_options_are_mapped_only_when_supported() -> None:
     assert anthropic_payload["stop_sequences"] == ["END"]
     assert anthropic_payload["tool_choice"] == {"type": "any"}
     assert anthropic_payload["thinking"] == {"type": "enabled", "budget_tokens": 1024}
-    assert anthropic_payload["metadata"] == {"provider": "anthropic"}
+    assert anthropic_payload["metadata"] == {"provider": "request-anthropic"}
     assert "reasoning" not in anthropic_payload
     assert "text" not in anthropic_payload
     assert "parallel_tool_calls" not in anthropic_payload

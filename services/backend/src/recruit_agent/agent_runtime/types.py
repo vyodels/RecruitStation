@@ -118,6 +118,8 @@ class LLMRequest:
     previous_response_id: str | None = None
     store: bool | None = None
     truncation: str | None = None
+    openai_payload_overrides: dict[str, Any] | None = None
+    anthropic_payload_overrides: dict[str, Any] | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 

@@ -26,15 +26,15 @@ def test_build_skill_distill_review_payload_only_contains_run_evidence() -> None
         run_id="run-1",
         run_type="sync_jd_incremental",
         goal_kind="sync_jd_incremental",
-        round_count=2,
+        engine_output_count=2,
         final_output='{"status":"completed","created":1}',
         tool_activity=[{"tool_name": "list_job_descriptions", "event_type": "tool.result"}],
-        event_outline=[{"event_type": "round.completed", "message": "done"}],
+        event_outline=[{"event_type": "provider.completed", "message": "done"}],
     )
 
     assert payload["run_id"] == "run-1"
     assert payload["goal_kind"] == "sync_jd_incremental"
-    assert payload["round_count"] == 2
+    assert payload["engine_output_count"] == 2
     assert payload["tool_activity"][0]["tool_name"] == "list_job_descriptions"
     assert "goal_text" not in payload
     assert "constraints" not in payload

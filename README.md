@@ -37,24 +37,20 @@ Not the current product focus:
 
 ## Agent Runtime Architecture
 
-The agent runtime is organised in three strict layers. Keeping these boundaries clean is the main discipline of the v2 runtime; do not move responsibilities across layers.
+The agent runtime is organised around `InteractionEngine`. Autonomous and Assistant provide product-specific lifecycle, persistence, and UI/API surfaces; the engine owns the LLM transcript, provider invocation, tool loop, tool result feedback, permission boundary, and runtime outputs.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│  Driver  (AutonomousAgent / AssistantAgent)                          │
+│  Product Agents  (AutonomousAgent / AssistantAgent)                  │
 │  ─────────────────────────────────────────                           │
-│  Owns: turn record, SSE stream, cancel token, fairness budget,       │
-│        human-gate decision, persistence                              │
+│  Own: run/session records, SSE stream, approval materialization,     │
+│       scheduling, business memory, user-visible status               │
 │                                                                      │
 │  ┌── one turn lifecycle ─────────────────────────────────────────┐   │
-│  │   while not gate/cancelled/explicit_safety_budget:            │   │
-│  │      ┌── one round ────────────────────────────────────────┐  │   │
-│  │      │  AgentKernel.run_round(goal, observation, limits)   │  │   │
-│  │      │  Sense → Assemble → Deliberate → Guard               │  │   │
-│  │      │        → Act → UpdateMemory → Evaluate               │  │   │
-│  │      │  → RoundOutcome (with gate_signal hint)              │  │   │
-│  │      └──────────────────────────────────────────────────────┘  │   │
-│  │      Driver decides: continue / stop turn / emit gate        │   │
+│  │  InteractionEngine.submitMessage(input)                       │   │
+│  │    → LLMRequest / LLMResponse                                 │   │
+│  │    → tool call / tool result feedback loop                    │   │
+│  │    → permission_requested / turn_completed / turn_failed      │   │
 │  └──────────────────────────────────────────────────────────────┘   │
 └──────────────────────────────────────────────────────────────────────┘
 ```
@@ -62,57 +58,51 @@ The agent runtime is organised in three strict layers. Keeping these boundaries 
 ### Terminology anchor
 
 - `turn` uses the Codex semantic: one complete LLM-driven cycle from a trigger (user message, scheduler wake, run continuation) until the next point where a human must intervene.
-- `round` is one `model → tool → observe` iteration inside a turn. This is what the Claude Agent SDK documentation calls a "turn"; in this project we call it a `round` to avoid colliding with the outer concept.
+- `InteractionEngine` is the runtime owner; `InteractionOutput` is the outbound stream/envelope emitted while a turn runs. There is no standalone `interaction` runtime primitive.
 - `tick` is **not used** anywhere in this project.
 
 ### Layer responsibilities
 
 | Layer | Knows | Does not know |
 |-------|-------|---------------|
-| `AgentKernel` (mechanism) | provider, tool registry, plugin host, memory service; how to run the 8-node pipeline once | database, HTTP, SSE, scheduler, user identity, conversation/run, turn count, whether it is serving Autonomous or Assistant |
-| `round` (one Kernel call) | one `RoundOutcome` for one `Observation`, including a `gate_signal` hint | whether to continue, whether to persist, how to talk to the human |
-| `turn` (Driver loop) | when to trigger, when to stop, how to persist, how to stream, how to cancel, how to decide the human boundary | Kernel internals, individual node semantics |
+| `InteractionEngine` | provider, transcript, tool schemas, tool execution, permission requests, runtime outputs | database, HTTP, SSE, scheduler, user identity, product-specific run/session status |
+| Product agents | when to trigger, when to stop, how to persist, how to stream, how to cancel, how to surface approval/recovery | provider protocol details and tool feedback loop internals |
 
 ### Ownership of grey-area concerns
 
 | Concern | Owner | Why |
 |---------|-------|-----|
-| Tool execution | `AgentKernel` (Act node) | round-internal mechanism |
-| Tool approval / permission | `AgentKernel` (Guard node) reports `gate_signal`; Driver decides whether to stop | Guard evaluates, Driver handles the human interaction |
-| Memory read / write | `AgentKernel` (Assemble / UpdateMemory nodes, via injected `MemoryService`) | round-internal I/O |
-| Turn record, SSE stream, run record | Driver | Kernel has no lifecycle concept |
-| Cancel coordination | Driver owns cancellation; Kernel, provider, and tool workers observe `cancel_token` at supported checkpoints | cancellation is cooperative and best-effort; already committed side effects are not rolled back |
-| Round-level safety budget (tokens per round if explicitly configured, tool timeout) | Kernel, via `RoundLimits` | round-internal constraint |
-| Turn-level safety budget (`max_rounds_per_turn`, turn timeout, token cap if explicitly configured) | Driver | turn-shell concern; defaults are unlimited so long-running Autonomous tasks stop on terminal outcome, cancellation, human boundary, or explicit safety budget |
-| Scheduler fairness, scope cooldown | Driver (Autonomous only) | cross-turn scheduling, unrelated to Kernel |
-| Human confirmation interaction | Driver | only the Driver knows how to notify a human and wait |
-| Recovery turn after confirm | Driver | a new turn is re-issued by the Driver |
+| Tool execution | `InteractionEngine` through canonical `ToolDefinition` handlers | engine-internal feedback loop |
+| Tool approval / permission | `InteractionEngine` emits `permission_requested`; product agents materialize approvals and resume approved tool calls as transcript state | engine owns the boundary, product agents own the human workflow |
+| Memory read / write | Product agents and runtime tools | memory is business/product state, not engine state |
+| Turn record, SSE stream, run record | Product agents | lifecycle and persistence are product concerns |
+| Cancel coordination | Product agents call `InteractionEngine.interrupt()`; provider and tool workers observe cancellation where supported | cancellation is cooperative and best-effort |
+| Turn-level safety budget | Product agents pass engine budgets explicitly | defaults are chosen by product context |
+| Scheduler fairness, scope cooldown | AutonomousAgent | cross-turn scheduling |
+| Human confirmation flow | Product agents | only the product layer knows how to notify and resume a human-gated flow |
 
 ### One-line summary
 
-- `AgentKernel` is pure mechanism: one call runs the 8-node pipeline exactly once and returns a `RoundOutcome`.
-- `round` is the smallest Kernel execution unit: one call yields one `RoundOutcome`, but cancellation may still surface within the round at provider or tool checkpoints.
-- `turn` is the Driver-owned sequence of rounds that runs until the next human boundary; everything about lifecycle, persistence, cancellation, streaming, and human gating lives here.
-- Cancellation is Driver-led and cooperative: the Driver stops issuing new rounds, while Kernel/provider/tool workers respond at observable points; already committed output and tool side effects are preserved.
-
-Kernel must not know that `turn` exists, and `turn` must not reach into the Kernel's internal nodes. This is the clean boundary.
+- `InteractionEngine` is the single runtime mechanism for LLM/tool turns.
+- Autonomous and Assistant differ in trigger, persistence, memory, approvals, and UI/API expression, not in a separate runtime loop.
 
 ## Current Repository Layout
 
 - `apps/desktop`: Electron + React desktop app with `home / candidates / settings` as top-level sections and an `Agents` ChatOverlay for dual-agent lifecycle work
 - `services/backend`: FastAPI backend, SQLite persistence, agent execution, approvals, sync scaffolding
 - `packages/shared`: shared frontend contracts and mock/demo data
-- `docs`: handoff and release notes
+- `docs`: current specs, runtime design, active plans, guides, release notes, and archived historical material
 
 ## Current Refactor Direction
 
-The codebase still contains legacy execution structures from the earlier architecture phase. They are being retained as implementation machinery, but the product surface is moving to a recruit-agent-first model:
+The Agent runtime refactor has moved to the new architecture:
 
-- blueprint becomes the agent’s internal playbook
-- execution records remain technical artifacts, not the main user-facing object
-- candidate progress, memory, communication, and evolution governance become the primary UI surfaces
+- `agent_runtime/**` is business-agnostic Agent core
+- recruiting business logic lives in product adapters, tools, skills, plugins, prompts, MCP capabilities, and business services
+- `Assistant` and `Autonomous` are product-layer Agent shapes over the shared runtime
+- candidate progress, memory, communication, and evolution governance are product/business surfaces, not runtime concepts
 
-Long-term design truth lives in [`docs/specs/`](./docs/specs/). Active implementation plans now live in `docs/plan/active/`; completed and superseded plans are being collected under `docs/plan/completed/` and `docs/plan/archive/`. Non-normative background material is being collected under `docs/reference/`. Legacy plan/reference paths are kept temporarily during the migration because existing users still rely on them.
+Long-term rules live in [`docs/specs/`](./docs/specs/). Agent runtime design lives in [`docs/design/agent-core/`](./docs/design/agent-core/). Active implementation plans live in [`docs/plan/active/`](./docs/plan/active/). Historical material lives under `docs/archive/` and `docs/plan/archive/`.
 
 ## Development
 
@@ -142,7 +132,7 @@ npm run desktop:typecheck
 
 Runtime terminology and schema note:
 
-- 本次 turn / round 收敛直接改了本地 SQLite 的表名与字段名，不保留兼容层。升级后如果本地数据库来自旧版本，请删除旧的 workspace SQLite 文件后再启动后端，让新模型直接重建。
+- 本次 Agent runtime 术语与表结构收敛直接改了本地 SQLite 的表名与字段名，不保留兼容层。升级后如果本地数据库来自旧版本，请删除旧的 workspace SQLite 文件后再启动后端，让新模型直接重建。
 
 ## Packaging
 

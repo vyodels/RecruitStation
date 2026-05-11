@@ -8,7 +8,7 @@ import inspect
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Protocol, TypeVar
 
-from recruit_agent.agent_runtime.models import CancellationToken, ToolExecutionResult
+from recruit_agent.runtime.models import CancellationToken, ToolExecutionResult
 
 _T = TypeVar("_T")
 
@@ -87,6 +87,52 @@ class ToolRegistry:
         return [
             tool.to_provider_spec()
             for tool in self._select_tools(capabilities=capabilities, preferred_tool_names=preferred_tool_names)
+        ]
+
+    def to_agent_runtime_tools(self) -> list[Any]:
+        from recruit_agent.agent_runtime.types import (
+            ToolCall as AgentRuntimeToolCall,
+            ToolDefinition as AgentRuntimeToolDefinition,
+            ToolResult as AgentRuntimeToolResult,
+            ToolSchema,
+            TurnContext,
+        )
+
+        registry = self
+
+        @dataclass(slots=True)
+        class _Handler:
+            tool: ToolDefinition
+
+            def handle(self, call: AgentRuntimeToolCall, context: TurnContext) -> AgentRuntimeToolResult:
+                result = registry.execute(self.tool.name, dict(call.input or {}), cancel_token=context.abort_signal)
+                return AgentRuntimeToolResult(
+                    tool_call_id=call.id,
+                    tool_use_id=call.tool_use_id,
+                    name=call.name,
+                    content=result.output,
+                    is_error=result.is_error,
+                    metadata=result.metadata,
+                )
+
+        return [
+            AgentRuntimeToolDefinition(
+                name=tool.name,
+                description=tool.description,
+                schema=ToolSchema(
+                    name=tool.name,
+                    description=tool.description,
+                    input_schema=deepcopy(tool.parameters),
+                ),
+                handler=_Handler(tool),
+                metadata={
+                    **deepcopy(tool.metadata),
+                    "category": tool.category,
+                    "external_target": tool.external_target,
+                    "resource_target_kind": tool.resource_target_kind,
+                },
+            )
+            for tool in self.tools.values()
         ]
 
     def capability_tool_names(self, capability: str) -> list[str]:
@@ -210,7 +256,12 @@ class ToolRegistry:
         return [*prioritized, *remaining]
 
 
-def register_core_tools(registry: ToolRegistry, *, invoke_skill_handler: ToolHandler | None = None) -> None:
+def register_core_tools(
+    registry: ToolRegistry,
+    *,
+    read_memory_handler: ToolHandler | None = None,
+    record_learning_handler: ToolHandler | None = None,
+) -> None:
     registry.register(
         ToolDefinition(
             name="read_memory",
@@ -220,7 +271,7 @@ def register_core_tools(registry: ToolRegistry, *, invoke_skill_handler: ToolHan
                 "properties": {"scope_kind": {"type": "string"}, "scope_ref": {"type": "string"}},
                 "additionalProperties": True,
             },
-            handler=lambda arguments: {"accepted": True, "action": "read_memory", "arguments": arguments},
+            handler=read_memory_handler or (lambda arguments: {"accepted": True, "action": "read_memory", "arguments": arguments}),
             category="core",
             external_target=False,
             resource_target_kind="memory",
@@ -235,7 +286,7 @@ def register_core_tools(registry: ToolRegistry, *, invoke_skill_handler: ToolHan
                 "properties": {"kind": {"type": "string"}, "payload": {"type": "object"}},
                 "additionalProperties": True,
             },
-            handler=lambda arguments: {"accepted": True, "action": "record_learning", "arguments": arguments},
+            handler=record_learning_handler or (lambda arguments: {"accepted": True, "action": "record_learning", "arguments": arguments}),
             category="core",
             external_target=False,
             resource_target_kind="memory",
@@ -269,21 +320,6 @@ def register_core_tools(registry: ToolRegistry, *, invoke_skill_handler: ToolHan
             category="core",
             external_target=False,
             resource_target_kind="run",
-        )
-    )
-    registry.register(
-        ToolDefinition(
-            name="invoke_skill",
-            description="Invoke a registered skill by identifier.",
-            parameters={
-                "type": "object",
-                "properties": {"skill_id": {"type": "string"}, "input": {"type": "object"}},
-                "additionalProperties": True,
-            },
-            handler=invoke_skill_handler or (lambda arguments: {"accepted": True, "action": "invoke_skill", "arguments": arguments}),
-            category="skill",
-            external_target=False,
-            resource_target_kind="skill",
         )
     )
 
@@ -369,7 +405,7 @@ def build_delegate_scene_context_tool(
                     "description": "Episode-scoped scene context, including browser/computer targets, candidate landing regions, action intent, and artifact_expectations. Use structured fields, not site-specific hardcoded flow.",
                 },
                 "requested_by": {"type": "string"},
-                "max_rounds": {
+                "max_llm_invocations": {
                     "type": "integer",
                     "minimum": 1,
                     "description": "Optional explicit safety budget for this delegated scene. Only set it when the operator/test request explicitly provides a finite budget; otherwise omit it so the scene runs until terminal outcome, cancellation, or human boundary.",
@@ -412,7 +448,7 @@ def run_awaitable_blocking(factory: Callable[[], Awaitable[_T]]) -> _T:
     except RuntimeError:
         return asyncio.run(factory())
 
-    # Nested scene execution can enter synchronous kernel code while an event
+    # Nested scene execution can enter synchronous runtime code while an event
     # loop is already active. Run the coroutine on an isolated loop instead of
     # calling asyncio.run() recursively in the same thread.
     with ThreadPoolExecutor(max_workers=1) as executor:

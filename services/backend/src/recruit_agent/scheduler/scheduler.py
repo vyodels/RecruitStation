@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from threading import Lock
 from typing import Any, Callable, Iterable
 
-from recruit_agent.agent_runtime.models import AgentResult
+from recruit_agent.runtime.models import AgentResult
 from .queue import InMemoryQueue, TaskEnvelope, TaskQueue
 
 

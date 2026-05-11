@@ -72,6 +72,7 @@ class AppSettings(BaseSettings):
     database_echo: bool = False
     scheduler_lock_timeout_seconds: int = 300
     skill_health_autonomy_interval_seconds: int = 300
+    assistant_max_history_messages: int = 48
     approval_source: str = "desktop_app"
     default_platform: str = "site"
     feature_flags: FeatureFlags = Field(default_factory=FeatureFlags)

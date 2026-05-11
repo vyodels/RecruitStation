@@ -9,7 +9,6 @@ from recruit_agent.agents.autonomous import AutonomousAgent
 from recruit_agent.agent_runtime.types import LLMInvocationResult, LLMMessage, LLMRequest, LLMResponse as RuntimeLLMResponse
 from recruit_agent.core.settings import AppSettings
 from recruit_agent.db.session import create_engine_from_settings, create_session_factory, initialize_database
-from recruit_agent.agent_runtime.kernel import AgentKernel
 from recruit_agent.models.domain import AgentRun, AgentSession, Candidate, RecruitAgentProfile
 from recruit_agent.plugins.host import PluginHost
 from recruit_agent.agent_runtime.providers import LLMProvider
@@ -79,8 +78,12 @@ def test_autonomous_memory_backed_continuity_across_turns(tmp_path: Path) -> Non
         tools = ToolRegistry()
         register_core_tools(tools)
         provider = ContinuityProvider()
-        kernel = AgentKernel(provider=provider, tool_registry=tools, plugin_host=PluginHost())
-        agent = AutonomousAgent(session_factory=create_session_factory(session.get_bind()), kernel=kernel)
+        agent = AutonomousAgent(
+            session_factory=create_session_factory(session.get_bind()),
+            provider=provider,
+            tool_registry=tools,
+            plugin_host=PluginHost(),
+        )
 
         first = agent.run_turn_from_envelope(
             {

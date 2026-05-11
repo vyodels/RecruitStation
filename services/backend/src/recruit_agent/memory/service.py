@@ -86,9 +86,11 @@ class MemoryService:
         confidence: float = 0.5,
         trust_level: str = "unverified",
         evidence_refs: list[Any] | None = None,
-    ) -> dict[str, Any]:
+        ) -> dict[str, Any]:
         model: Any = _memory_model(scope_kind)
         resolved_scope_ref = self._resolve_scope_ref(scope_kind, scope_ref)
+        if scope_kind.strip().lower() == "global" and resolved_scope_ref != agent_profile_id:
+            raise ValueError("global memory scope_ref must match agent_profile_id")
         record: Any = self.session.scalars(select(model).where(model.memory_item_id == memory_item_id)).first()
         if record is None:
             record = model(
@@ -107,6 +109,8 @@ class MemoryService:
             setattr(record, _scope_attr_name(scope_kind), resolved_scope_ref)
             self.session.add(record)
         else:
+            if record.agent_profile_id != agent_profile_id or getattr(record, _scope_attr_name(scope_kind)) != resolved_scope_ref:
+                raise ValueError("memory item already exists in another scope")
             if expected_version is not None and int(record.version or 0) != int(expected_version):
                 raise MemoryVersionConflict(
                     f"memory item {memory_item_id} expected version {expected_version}, got {record.version}"

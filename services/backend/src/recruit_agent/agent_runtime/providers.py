@@ -130,6 +130,7 @@ class OpenAIProvider:
         if request.truncation is not None:
             payload["truncation"] = request.truncation
         payload.update(dict(self.config.extra.get("openai_payload_overrides") or {}))
+        payload.update(dict(request.openai_payload_overrides or {}))
         return payload
 
     def _post(self, url: str, payload: dict[str, Any], headers: dict[str, str]) -> Any:
@@ -194,6 +195,7 @@ class AnthropicProvider:
         if request.thinking is not None:
             payload["thinking"] = dict(request.thinking)
         payload.update(dict(self.config.extra.get("anthropic_payload_overrides") or {}))
+        payload.update(dict(request.anthropic_payload_overrides or {}))
         return payload
 
     def _post(self, url: str, payload: dict[str, Any], headers: dict[str, str]) -> Any:

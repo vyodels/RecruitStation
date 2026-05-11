@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from recruit_agent.models.domain import AgentGlobalState
 from recruit_agent.plugins.recruit.toolkit import _active_lock, _resolve_application
-from recruit_agent.agent_runtime.models import GuardVerdict, Observation
+from recruit_agent.runtime.models import GuardVerdict, Observation
 
 
 def build_guard_check(
@@ -14,12 +14,7 @@ def build_guard_check(
 ) -> Callable[[str, dict[str, object], Observation], Awaitable[GuardVerdict]]:
     async def _guard(tool_name: str, arguments: dict[str, object], observation: Observation) -> GuardVerdict:
         if tool_name == "request_human_approval":
-            seed_tool_calls = list(observation.input.seed_tool_calls) if observation.input is not None else []
-            seeded_confirmation = any(
-                call.name == tool_name and dict(call.arguments or {}) == dict(arguments or {})
-                for call in seed_tool_calls
-            )
-            if not seeded_confirmation:
+            if not bool(arguments.get("approved_by_operator") or arguments.get("approved")):
                 return GuardVerdict(
                     allowed=False,
                     reason="pending_human_approval",

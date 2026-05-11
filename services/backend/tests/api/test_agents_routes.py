@@ -28,7 +28,7 @@ from recruit_agent.models.domain import (
     RecruitAgentProfile,
     Skill,
 )
-from recruit_agent.agent_runtime.models import GuardVerdict, LLMResponse, ToolCall
+from recruit_agent.runtime.models import LLMResponse, ToolCall
 from agent_runtime.fixtures import ScriptedProvider
 from recruit_agent.runtime.tools import ToolDefinition
 from recruit_agent.server import create_app
@@ -368,7 +368,8 @@ def test_autonomous_goal_materializes_run_and_closes_wait_human_loop(tmp_path: P
             ],
         )
         container.provider = provider
-        container.kernel.provider = provider
+        container.autonomous_agent.provider = provider
+        container.assistant_agent.provider = provider
         container.tool_registry.register(
             ToolDefinition(
                 name="needs.approval",
@@ -378,15 +379,8 @@ def test_autonomous_goal_materializes_run_and_closes_wait_human_loop(tmp_path: P
                 category="plugin",
                 external_target=False,
                 resource_target_kind="candidate",
+                metadata={"requires_confirmation": True},
             )
-        )
-        container.plugin_host.register_guard_check(
-            "test_wait_human",
-            lambda tool_name, _arguments, _observation: GuardVerdict(
-                allowed=tool_name != "needs.approval",
-                reason="requires_operator_confirmation",
-                severity="waiting_human",
-            ),
         )
 
         created = client.post(
@@ -463,7 +457,8 @@ def test_autonomy_loop_processes_goal_without_manual_run_once(tmp_path: Path) ->
             responses=[LLMResponse(content="Autonomy loop completed the goal.")],
         )
         container.provider = provider
-        container.kernel.provider = provider
+        container.autonomous_agent.provider = provider
+        container.assistant_agent.provider = provider
 
         created = client.post(
             "/api/agents/autonomous/goals",
@@ -512,7 +507,8 @@ def test_autonomous_goal_with_structured_blocked_result_stays_blocked(tmp_path: 
             ],
         )
         container.provider = provider
-        container.kernel.provider = provider
+        container.autonomous_agent.provider = provider
+        container.assistant_agent.provider = provider
 
         created = client.post(
             "/api/agents/autonomous/goals",
@@ -924,7 +920,8 @@ def test_autonomous_goal_execution_honors_persisted_memory_scope_constraints(tmp
             responses=[LLMResponse(content="Remember this candidate-scoped summary.")],
         )
         container.provider = provider
-        container.kernel.provider = provider
+        container.autonomous_agent.provider = provider
+        container.assistant_agent.provider = provider
 
         session_factory = app.state.session_factory
         with session_factory() as session:
@@ -1101,7 +1098,7 @@ def test_autonomous_conversation_keeps_blocked_status_and_runtime_events(tmp_pat
                 status="failed",
                 phase="evaluate",
                 outcome_kind="continue",
-                turn_metadata={"gate_signal": "budget_exhausted", "round_count": 3},
+                turn_metadata={"gate_signal": "budget_exhausted", "engine_output_count": 3},
             )
             session.add(turn)
             session.flush()
@@ -1161,7 +1158,8 @@ def test_assistant_overlay_message_wrapper_accepts_draft_conversation_ids(tmp_pa
             responses=[LLMResponse(content="Assistant wrapper reply")],
         )
         container.provider = provider
-        container.kernel.provider = provider
+        container.autonomous_agent.provider = provider
+        container.assistant_agent.provider = provider
 
         conversation_id = "draft-assistant-overlay"
         posted = client.post(
