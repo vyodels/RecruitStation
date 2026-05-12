@@ -232,7 +232,7 @@ export interface DesktopApiClient {
   getSettings(): Promise<SettingsSnapshot>;
   getAgentSnapshot(): Promise<AgentSnapshot>;
   listAgentQueue(): Promise<AgentQueueItem[]>;
-  approveItem(id: string): Promise<void>;
+  approveItem(id: string, reason?: string): Promise<void>;
   rejectItem(id: string, reason?: string): Promise<void>;
   updateSettings(settings: Partial<SettingsSnapshot>): Promise<SettingsSnapshot>;
   runAgentOnce(): Promise<AgentRunResult>;
@@ -1031,17 +1031,47 @@ function buildAssistantConversationSummary(snapshot: AgentSnapshot): AgentConver
   };
 }
 
+function classifyTraceTimelineEvent(trace: ExecutionTraceRecord): string {
+  const traceKind = trace.traceKind.toLowerCase();
+  const title = trace.title.toLowerCase();
+  const status = trace.status.toLowerCase();
+  const source = `${traceKind} ${title} ${status}`;
+
+  if (/approval|confirm|permission|human|waiting_human/.test(source)) {
+    return "confirmation";
+  }
+  if (/tool[_\s-]?use|tool[_\s-]?call|mcp|browser|hid|command|web_search|call/.test(source)) {
+    return "tool_call";
+  }
+  if (/reasoning|thinking|thought|plan/.test(source)) {
+    return "thinking";
+  }
+  if (/result|completed|execution|file_change|output/.test(source)) {
+    return "execution_result";
+  }
+  if (/failed|cancelled|interrupted/.test(source)) {
+    return "execution_result";
+  }
+  if (/status|queued|started|running|blocked/.test(source)) {
+    return "thinking";
+  }
+  return "execution_result";
+}
+
 function traceToConversationMessage(trace: ExecutionTraceRecord, conversationId: string): AgentConversationMessage {
+  const eventKind = classifyTraceTimelineEvent(trace);
+
   return {
     id: trace.id,
     conversationId,
     role: "assistant",
-    kind: /tool/i.test(trace.traceKind) ? "tool_result" : "message",
+    kind: eventKind === "tool_call" ? "tool_use" : eventKind === "execution_result" ? "tool_result" : "message",
     content: trace.summary || trace.title,
     createdAt: trace.startedAt || trace.createdAt,
     status: "sent",
     title: trace.title,
     metadata: {
+      eventKind,
       lane: trace.lane,
       status: trace.status,
       traceKind: trace.traceKind,
@@ -3307,10 +3337,10 @@ function createFetchClient(baseUrl: string): DesktopApiClient {
     getSettings: async () => normalizeSettings(await requestJson<unknown>(baseUrl, "/api/settings")),
     getAgentSnapshot: async () => deriveSnapshotFromDashboard(await createFetchClient(baseUrl).getDashboardSummary()),
     listAgentQueue: async () => asArray(await requestJson<unknown>(baseUrl, "/api/agents/queue")).map(normalizeAgentQueueItem),
-    approveItem: async (id) => {
+    approveItem: async (id, reason) => {
       await requestJson<unknown>(baseUrl, `/api/approvals/${id}/approve`, {
         method: "POST",
-        body: JSON.stringify({ reviewer: "desktop-user" }),
+        body: JSON.stringify({ reviewer: "desktop-user", reason }),
       });
     },
     rejectItem: async (id, reason) => {
@@ -3489,6 +3519,7 @@ function createFetchClient(baseUrl: string): DesktopApiClient {
                   status: "sent" as const,
                   title: goal.title,
                   metadata: {
+                    eventKind: goal.status === "waiting_human" ? "confirmation" : goal.status === "completed" ? "execution_result" : "thinking",
                     status: goal.status,
                   },
                 },

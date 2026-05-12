@@ -672,7 +672,32 @@ def _serialize_profile(profile: RecruitAgentProfile) -> dict[str, Any]:
 
 
 def _serialize_run(run: AgentRun) -> dict[str, Any]:
-    payload = RuntimeControlledRunRead.model_validate(run).model_dump(by_alias=True)
+    payload = RuntimeControlledRunRead.model_validate(
+        {
+            "id": run.id,
+            "session_id": run.session_id,
+            "execution_episode_id": run.execution_episode_id,
+            "goal_spec_id": run.goal_spec_id,
+            "person_id": run.person_id,
+            "application_id": run.application_id,
+            "job_description_id": run.job_description_id,
+            "platform": run.platform,
+            "lane": run.lane,
+            "run_type": run.run_type,
+            "status": run.status,
+            "priority": run.priority,
+            "queue_task_id": run.queue_task_id,
+            "checkpoint_status": run.checkpoint_status,
+            "context_manifest": dict(run.context_manifest or {}),
+            "runtime_metadata": dict(run.runtime_metadata or {}),
+            "started_at": _serialize_unix_timestamp(run.started_at),
+            "finished_at": _serialize_unix_timestamp(run.finished_at),
+            "blocked_reason": run.blocked_reason,
+            "last_error": run.last_error,
+            "created_at": _serialize_unix_timestamp(run.created_at) or 0,
+            "updated_at": _serialize_unix_timestamp(run.updated_at) or 0,
+        }
+    ).model_dump(by_alias=True)
     payload["run_id"] = run.run_id
     payload["runId"] = run.run_id
     payload["agent_kind"] = run.agent_kind
@@ -695,7 +720,22 @@ def _serialize_run(run: AgentRun) -> dict[str, Any]:
 
 
 def _serialize_approval(approval: ApprovalItem) -> dict[str, Any]:
-    payload = ApprovalRead.model_validate(approval).model_dump(by_alias=True)
+    payload = ApprovalRead.model_validate(
+        {
+            "id": approval.id,
+            "target_type": approval.target_type,
+            "target_id": approval.target_id,
+            "title": approval.title,
+            "status": approval.status,
+            "requested_by": approval.requested_by,
+            "reviewed_by": approval.reviewed_by,
+            "reviewed_at": _serialize_unix_timestamp(approval.reviewed_at),
+            "payload": dict(approval.payload or {}),
+            "notes": approval.notes,
+            "created_at": _serialize_unix_timestamp(approval.created_at) or 0,
+            "updated_at": _serialize_unix_timestamp(approval.updated_at) or 0,
+        }
+    ).model_dump(by_alias=True)
     payload["source_kind"] = approval.source_kind
     payload["run_pk"] = approval.run_pk
     payload["turn_pk"] = approval.turn_pk
@@ -1276,6 +1316,7 @@ def _assistant_conversation_message(conversation_id: str, turn: ConversationTurn
         kind = "tool_result"
     if turn.status in {"waiting_human", "failed", "cancelled"} and turn.role != "user":
         kind = "status"
+    event_kind = _assistant_turn_event_kind(turn)
     return {
         "id": turn.turn_id,
         "conversation_id": conversation_id,
@@ -1287,6 +1328,8 @@ def _assistant_conversation_message(conversation_id: str, turn: ConversationTurn
         "createdAt": _serialize_timestamp(turn.created_at),
         "status": turn.status,
         "metadata": {
+            "eventKind": event_kind,
+            "itemType": "conversation_turn",
             "turn_id": turn.turn_id,
             "seq": turn.seq,
             "tool_calls": list(turn.tool_calls or []),
@@ -1317,6 +1360,20 @@ def _assistant_turn_text(turn: ConversationTurn) -> str:
         if isinstance(first, dict):
             return f"Assistant requested tool {first.get('name') or first.get('tool_name') or 'call'}."
     return "Assistant message recorded."
+
+
+def _assistant_turn_event_kind(turn: ConversationTurn) -> str:
+    if turn.status == "waiting_human":
+        return "confirmation"
+    if turn.status in {"failed", "cancelled"}:
+        return "execution_result"
+    if turn.role == "user":
+        return "human"
+    if turn.tool_calls:
+        return "tool_call"
+    if turn.tool_results:
+        return "execution_result"
+    return "thinking"
 
 
 def _assistant_run_from_conversation(conversation: dict[str, Any]) -> dict[str, Any]:
@@ -1411,6 +1468,8 @@ def _autonomous_goal_message(conversation_id: str, goal: GoalSpec) -> dict[str, 
         "createdAt": created_at,
         "status": _workspace_status(goal.status),
         "metadata": {
+            "eventKind": _goal_event_kind(goal.status),
+            "itemType": "automation_goal",
             "message_type": "goal",
             "goal_id": goal.id,
             "goal_kind": goal.goal_kind,
@@ -1435,6 +1494,8 @@ def _autonomous_run_message(conversation_id: str, run: AgentRun, goal: GoalSpec 
         "createdAt": created_at,
         "status": run.status,
         "metadata": {
+            "eventKind": _autonomous_run_event_kind(run),
+            "itemType": "agent_run",
             "message_type": "run",
             "run_id": run.run_id,
             "goal_id": None if goal is None else goal.id,
@@ -1447,6 +1508,7 @@ def _autonomous_run_message(conversation_id: str, run: AgentRun, goal: GoalSpec 
 def _autonomous_turn_message(conversation_id: str, run: AgentRun, turn: AgentTurnRecord) -> dict[str, Any]:
     final_output = str((turn.turn_metadata or {}).get("final_output") or "").strip()
     created_at = _serialize_timestamp(turn.created_at)
+    event_kind = _autonomous_turn_event_kind(turn, final_output=final_output)
     return {
         "id": turn.turn_id,
         "conversation_id": conversation_id,
@@ -1458,6 +1520,8 @@ def _autonomous_turn_message(conversation_id: str, run: AgentRun, turn: AgentTur
         "createdAt": created_at,
         "status": turn.status,
         "metadata": {
+            "eventKind": event_kind,
+            "itemType": "agent_turn",
             "message_type": "turn",
             "turn_id": turn.turn_id,
             "run_id": run.run_id,
@@ -1473,6 +1537,7 @@ def _autonomous_turn_message(conversation_id: str, run: AgentRun, turn: AgentTur
 def _autonomous_event_message(conversation_id: str, event: dict[str, Any]) -> dict[str, Any]:
     created_at = event.get("occurredAt") or event.get("occurred_at")
     event_type = str(event.get("event_type") or event.get("eventType") or "")
+    payload = dict(event.get("payload") or {})
     return {
         "id": str(event.get("id") or uuid4().hex),
         "conversation_id": conversation_id,
@@ -1484,9 +1549,11 @@ def _autonomous_event_message(conversation_id: str, event: dict[str, Any]) -> di
         "createdAt": created_at,
         "status": _event_message_status(event_type),
         "metadata": {
+            "eventKind": _runtime_event_kind(event_type, payload),
+            "itemType": event_type,
             "message_type": "event",
             "event_type": event_type,
-            "payload": dict(event.get("payload") or {}),
+            "payload": payload,
         },
     }
 
@@ -1502,6 +1569,54 @@ def _autonomous_run_status_text(run: AgentRun) -> str:
     if status in {"failed", "cancelled", "interrupted"}:
         return f"Autonomous goal {status}."
     return f"Autonomous goal status: {run.status}."
+
+
+def _autonomous_run_event_kind(run: AgentRun) -> str:
+    status = run.status.strip().lower()
+    if status == "waiting_human":
+        return "confirmation"
+    if status in {"completed", "failed", "cancelled", "interrupted"}:
+        return "execution_result"
+    return "thinking"
+
+
+def _autonomous_turn_event_kind(turn: AgentTurnRecord, *, final_output: str) -> str:
+    status = turn.status.strip().lower()
+    if status == "waiting_human":
+        return "confirmation"
+    if status in {"failed", "cancelled", "interrupted"}:
+        return "execution_result"
+    if final_output or status == "completed":
+        return "execution_result"
+    return "thinking"
+
+
+def _runtime_event_kind(event_type: str, payload: dict[str, Any]) -> str:
+    normalized = event_type.strip().lower()
+    payload_kind = str(payload.get("kind") or "").strip().lower()
+    source = f"{normalized} {payload_kind}"
+    if "permission" in source or "waiting_human" in source or "blocked" in source:
+        return "confirmation"
+    if payload_kind in {"tool_call_started", "tool_use_completed"}:
+        return "tool_call"
+    if payload_kind in {"tool_result_ready", "tool_error"}:
+        return "execution_result"
+    if "tool_call" in source or "tool_use" in source or "command_execution" in source or "web_search" in source:
+        return "tool_call"
+    if "tool_result" in source or "turn_completed" in source:
+        return "execution_result"
+    if "llm_invocation" in source or "reasoning" in source or "thinking" in source:
+        return "thinking"
+    return "thinking"
+
+
+def _goal_event_kind(status: str) -> str:
+    normalized = status.strip().lower()
+    if normalized == "waiting_human":
+        return "confirmation"
+    if normalized in {"completed", "failed", "cancelled", "interrupted"}:
+        return "execution_result"
+    return "thinking"
 
 
 def _autonomous_turn_text(turn: AgentTurnRecord) -> str:
@@ -1574,6 +1689,12 @@ def _timestamp_sort_value(value: Any) -> float:
         return 0.0
 
 
+def _serialize_unix_timestamp(value: Any) -> int | None:
+    if value is None:
+        return None
+    return int(_timestamp_sort_value(value))
+
+
 def _serialize_autonomous_primary_conversation_record(
     session: Session,
     *,
@@ -1602,6 +1723,16 @@ def _serialize_autonomous_primary_conversation_record(
         ).all()
     )
     recent_runs.reverse()
+    run_ids = [run.id for run in recent_runs]
+    turns_by_run_id: dict[str, list[AgentTurnRecord]] = {run_id: [] for run_id in run_ids}
+    if run_ids:
+        turns = session.scalars(
+            select(AgentTurnRecord)
+            .where(AgentTurnRecord.run_pk.in_(run_ids))
+            .order_by(AgentTurnRecord.created_at.asc(), AgentTurnRecord.seq.asc(), AgentTurnRecord.id.asc())
+        ).all()
+        for turn in turns:
+            turns_by_run_id.setdefault(turn.run_pk, []).append(turn)
     goal_ids = [run.goal_spec_id for run in recent_runs if run.goal_spec_id]
     goals = (
         session.scalars(select(GoalSpec).where(GoalSpec.id.in_(goal_ids))).all()
@@ -1628,13 +1759,21 @@ def _serialize_autonomous_primary_conversation_record(
         ).first()
 
     messages: list[dict[str, Any]] = []
-    seen_goal_ids: set[str] = set()
     for run in recent_runs:
         goal = None if not run.goal_spec_id else goal_by_id.get(run.goal_spec_id)
-        if goal is not None and goal.id not in seen_goal_ids:
-            messages.append(_autonomous_goal_message(AUTONOMOUS_PRIMARY_CONVERSATION_ID, goal))
-            seen_goal_ids.add(goal.id)
-        messages.append(_autonomous_run_message(AUTONOMOUS_PRIMARY_CONVERSATION_ID, run, goal))
+        run_message = _autonomous_run_message(AUTONOMOUS_PRIMARY_CONVERSATION_ID, run, goal)
+        messages.append(run_message)
+        for turn in turns_by_run_id.get(run.id, []):
+            turn_message = _autonomous_turn_message(AUTONOMOUS_PRIMARY_CONVERSATION_ID, run, turn)
+            turn_content = str(turn_message.get("content") or "").strip()
+            if not turn_content or turn_content == str(run_message.get("content") or "").strip():
+                continue
+            turn_status = str(turn.status or "").strip().lower()
+            has_final_output = bool(str((turn.turn_metadata or {}).get("final_output") or "").strip())
+            if has_final_output or turn_status in {"waiting_human", "failed", "cancelled", "interrupted"}:
+                messages.append(turn_message)
+    if not messages and latest_goal is not None:
+        messages.append(_autonomous_goal_message(AUTONOMOUS_PRIMARY_CONVERSATION_ID, latest_goal))
 
     return {
         "conversation": _autonomous_primary_conversation_summary(
@@ -1771,7 +1910,29 @@ def _list_workspace_tools(container: AppContainer) -> list[dict[str, Any]]:
         seen_names.add(tool.name)
 
     for server in container.mcp_registry.list_servers():
-        payload = McpServerRead.model_validate(server).model_dump(by_alias=True)
+        server_payload = dict(server) if isinstance(server, dict) else {
+            "id": getattr(server, "id", ""),
+            "server_key": getattr(server, "server_key", ""),
+            "name": getattr(server, "name", ""),
+            "transport_kind": getattr(server, "transport_kind", "unix_socket"),
+            "protocol": getattr(server, "protocol", "mcp_jsonrpc"),
+            "endpoint": getattr(server, "endpoint", ""),
+            "enabled": getattr(server, "enabled", True),
+            "preset_key": getattr(server, "preset_key", None),
+            "auth_config": dict(getattr(server, "auth_config", {}) or {}),
+            "server_metadata": dict(getattr(server, "server_metadata", {}) or {}),
+            "health_status": getattr(server, "health_status", "unknown"),
+            "health_error": getattr(server, "health_error", None),
+            "last_health_at": getattr(server, "last_health_at", None),
+            "tools": list(getattr(server, "tools", []) or []),
+            "created_at": getattr(server, "created_at", None),
+            "updated_at": getattr(server, "updated_at", None),
+        }
+        server_payload["last_health_at"] = _serialize_unix_timestamp(server_payload.get("last_health_at"))
+        server_payload["created_at"] = _serialize_unix_timestamp(server_payload.get("created_at")) or 0
+        server_payload["updated_at"] = _serialize_unix_timestamp(server_payload.get("updated_at")) or 0
+        server_payload["tools"] = [_normalize_mcp_tool_payload(tool) for tool in list(server_payload.get("tools") or [])]
+        payload = McpServerRead.model_validate(server_payload).model_dump(by_alias=True)
         if not bool(payload.get("enabled")):
             continue
         server_tools = list(payload.get("tools") or [])
@@ -1812,6 +1973,26 @@ def _list_workspace_tools(container: AppContainer) -> list[dict[str, Any]]:
             )
             seen_names.add(tool_name)
     return tools
+
+
+def _normalize_mcp_tool_payload(tool: Any) -> dict[str, Any]:
+    payload = dict(tool) if isinstance(tool, dict) else {
+        "id": getattr(tool, "id", ""),
+        "server_id": getattr(tool, "server_id", ""),
+        "name": getattr(tool, "name", ""),
+        "description": getattr(tool, "description", ""),
+        "parameters": dict(getattr(tool, "parameters", {}) or {}),
+        "capabilities": list(getattr(tool, "capabilities", []) or []),
+        "enabled": getattr(tool, "enabled", True),
+        "risk_level": getattr(tool, "risk_level", "medium"),
+        "remote_name": getattr(tool, "remote_name", None),
+        "tool_metadata": dict(getattr(tool, "tool_metadata", {}) or {}),
+        "created_at": getattr(tool, "created_at", None),
+        "updated_at": getattr(tool, "updated_at", None),
+    }
+    payload["created_at"] = _serialize_unix_timestamp(payload.get("created_at")) or 0
+    payload["updated_at"] = _serialize_unix_timestamp(payload.get("updated_at")) or 0
+    return payload
 
 
 def _run_title(run: AgentRun) -> str:

@@ -31,7 +31,7 @@ export function ChatComposer({
   return (
     <div className="chat-composer">
       <div className="chat-composer__chips">
-        <span className="chat-chip">{agentKind === "assistant" ? copy("Assistant", "Assistant") : copy("Autonomous", "Autonomous")}</span>
+        <span className="chat-chip">{agentKind === "assistant" ? copy("Assistant", "Assistant") : copy("Automation", "Automation")}</span>
         {modelLabel ? <span className="chat-chip">{modelLabel}</span> : null}
         {contextLabel ? <span className="chat-chip">{contextLabel}</span> : null}
       </div>
@@ -45,7 +45,7 @@ export function ChatComposer({
           placeholder={
             agentKind === "assistant"
               ? copy("Ask Assistant to inspect or summarize the workspace…", "让 Assistant 帮你分析或总结当前工作区…")
-              : copy("Describe the next autonomous session…", "输入本轮 Autonomous 会话要处理的任务…")
+              : copy("Describe the next automation task…", "输入本轮自动化任务要处理的事项…")
           }
           value={value}
           onChange={(event) => onChange(event.target.value)}

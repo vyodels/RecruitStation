@@ -10,6 +10,7 @@ export type WorkspaceTab =
   | "applicationFunnel"
   | "applicationFollowUp"
   | "jdManagement"
+  | "agents"
   | "settings";
 
 export type ProviderKind = "openai-compatible" | "anthropic";

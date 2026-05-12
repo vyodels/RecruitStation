@@ -9,7 +9,6 @@ interface SidebarProps {
   counts: Partial<Record<WorkspaceTab, number>>;
   expanded?: boolean;
   onExpandedChange?(expanded: boolean): void;
-  agentsOpen?: boolean;
   agentStatus?: AgentSnapshot["status"];
   agentCount?: number;
   onOpenAgents(): void;
@@ -104,7 +103,6 @@ export function Sidebar({
   counts,
   expanded = false,
   onExpandedChange,
-  agentsOpen = false,
   agentStatus = "idle",
   agentCount = 0,
   onOpenAgents,
@@ -153,9 +151,9 @@ export function Sidebar({
         <button
           type="button"
           className="workspace-sidebar__item workspace-sidebar__item--agents"
-          data-active={agentsOpen}
+          data-active={active === "agents"}
           data-status={agentStatus}
-          aria-label={copy("Open Agents overlay", "打开 Agents 浮窗")}
+          aria-label={copy("Agent management", "Agent 管理")}
           onClick={onOpenAgents}
         >
           <span className="workspace-sidebar__item-icon">

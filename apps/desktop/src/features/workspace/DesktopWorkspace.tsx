@@ -73,7 +73,7 @@ const emptySummary: DashboardSummary = {
 
 export function DesktopWorkspace(): JSX.Element {
   const { copy } = useI18n();
-  const { open, isOpen } = useChatOverlay();
+  const { focusAgent } = useChatOverlay();
   const [tab, setTab] = useState<WorkspaceTab>("home");
   const [sidebarExpanded, setSidebarExpanded] = useState(false);
   const [summary, setSummary] = useState<DashboardSummary>(emptySummary);
@@ -209,6 +209,14 @@ export function DesktopWorkspace(): JSX.Element {
         description: copy(
           "Configure model access, external tools, sync preferences, and local review rules.",
           "配置模型接入、外部工具、同步偏好和本地复核规则。",
+        ),
+      },
+      agents: {
+        eyebrow: copy("Agent operations", "Agent 运行管理"),
+        title: copy("Agent management", "Agent 管理"),
+        description: copy(
+          "Inspect agent runs, sessions, approvals, memory, skills, tools, and execution configuration.",
+          "查看 Agent 运行、会话、确认项、Memory、Skill、工具和执行配置。",
         ),
       },
     }),
@@ -373,10 +381,8 @@ export function DesktopWorkspace(): JSX.Element {
   };
 
   const openAgents = (panel: "conversation" | "config" | "approvals", agent: "assistant" | "autonomous") => {
-    open({
-      agentKind: agent,
-      panel,
-    });
+    focusAgent(agent, panel);
+    setTab("agents");
   };
 
   const content = (() => {
@@ -451,6 +457,8 @@ export function DesktopWorkspace(): JSX.Element {
             onHealthcheckMcpServer={handleHealthcheckMcpServer}
           />
         );
+      case "agents":
+        return <ChatOverlay transport={transport} workspaceAgent={summary.agent} variant="page" />;
       default:
         return <DashboardView summary={summary} stateMachine={stateMachine} />;
     }
@@ -462,7 +470,7 @@ export function DesktopWorkspace(): JSX.Element {
   return (
     <>
       <AppLayout
-        hideTopbar={tab === "applicationFollowUp" || tab === "jdManagement"}
+        hideTopbar={tab === "applicationFollowUp" || tab === "jdManagement" || tab === "agents"}
         sidebarExpanded={sidebarExpanded}
         sidebar={
           <Sidebar
@@ -471,10 +479,9 @@ export function DesktopWorkspace(): JSX.Element {
             counts={counts}
             expanded={sidebarExpanded}
             onExpandedChange={setSidebarExpanded}
-            agentsOpen={isOpen}
             agentStatus={summary.agent.status}
             agentCount={summary.approvals.filter((approval) => approval.status === "pending").length}
-            onOpenAgents={() => openAgents("conversation", "assistant")}
+            onOpenAgents={() => openAgents("conversation", "autonomous")}
           />
         }
         topbar={
@@ -500,13 +507,13 @@ export function DesktopWorkspace(): JSX.Element {
         />
       ) : null}
 
-      {tab === "jdManagement" ? null : (
+      {tab === "jdManagement" || tab === "agents" ? null : (
         <FloatingBubble
           status={summary.agent.status}
           pendingCount={summary.approvals.filter((approval) => approval.status === "pending").length}
         />
       )}
-      <ChatOverlay transport={transport} workspaceAgent={summary.agent} />
+      {tab === "agents" ? null : <ChatOverlay transport={transport} workspaceAgent={summary.agent} />}
     </>
   );
 }

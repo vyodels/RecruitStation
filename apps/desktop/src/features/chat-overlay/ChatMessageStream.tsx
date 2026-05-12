@@ -6,6 +6,8 @@ import type { AgentConversationMessage } from "../../lib/types";
 interface ChatMessageStreamProps {
   loading?: boolean;
   messages: AgentConversationMessage[];
+  timelineFooter?: React.ReactNode;
+  variant?: "cards" | "timeline";
 }
 
 type Block =
@@ -390,7 +392,304 @@ function messageKindLabel(message: AgentConversationMessage, copy: ReturnType<ty
   return null;
 }
 
-export function ChatMessageStream({ loading, messages }: ChatMessageStreamProps): JSX.Element {
+type TimelineEventKind = "thinking" | "tool_call" | "execution_result" | "human" | "confirmation";
+
+function metadataString(message: AgentConversationMessage, keys: string[]): string | null {
+  const metadata = message.metadata ?? {};
+  for (const key of keys) {
+    const value = metadata[key];
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+  return null;
+}
+
+function compactValue(value: unknown): string | null {
+  if (value == null) {
+    return null;
+  }
+  if (typeof value === "string") {
+    return value.trim() || null;
+  }
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  if (Array.isArray(value)) {
+    const values = value.map(compactValue).filter((item): item is string => Boolean(item));
+    return values.length ? values.slice(0, 3).join(", ") : null;
+  }
+  if (typeof value === "object") {
+    return null;
+  }
+  return String(value);
+}
+
+function timelineMetadataPairs(message: AgentConversationMessage): Array<{ key: string; value: string }> {
+  const metadata = message.metadata ?? {};
+  const hiddenKeys = new Set([
+    "eventKind",
+    "eventType",
+    "itemType",
+    "presentationKind",
+    "uiKind",
+    "traceKind",
+    "displayLabel",
+    "eventLabel",
+    "label",
+    "uiLabel",
+    "message_type",
+    "goal_id",
+    "goal_kind",
+    "latest_run_id",
+    "run_id",
+    "turn_id",
+    "seq",
+    "priority",
+    "lane",
+    "requested_by",
+    "constraints",
+    "turn_metadata",
+    "payload",
+    "summary",
+    "title",
+    "content",
+    "message",
+    "delta",
+  ]);
+
+  return Object.entries(metadata)
+    .filter(([key]) => !hiddenKeys.has(key))
+    .map(([key, value]) => ({ key, value: compactValue(value) }))
+    .filter((item): item is { key: string; value: string } => Boolean(item.value))
+    .slice(0, 4);
+}
+
+function timelineKindFromLifecycle(message: AgentConversationMessage): TimelineEventKind {
+  const lifecycle = [
+    metadataString(message, ["status", "runStatus", "turnStatus", "state"]),
+    message.status,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  if (/approval|confirm|permission|waiting_human|blocked|timeout/.test(lifecycle)) {
+    return "confirmation";
+  }
+  if (/completed|failed|cancelled|interrupted|sent/.test(lifecycle)) {
+    return "execution_result";
+  }
+  return "thinking";
+}
+
+function resolveTimelineEventKind(message: AgentConversationMessage): TimelineEventKind {
+  /*
+   * Timeline rendering follows protocol/runtime item semantics first
+   * (`eventKind`, `itemType`, `traceKind`), mirroring Claude Code/Codex-style
+   * adapters. The management timeline intentionally does not infer execution
+   * semantics from the older card-view `message.kind` field.
+   */
+  const explicitKind = metadataString(message, ["uiKind", "presentationKind", "eventKind", "eventType", "itemType"]);
+  if (explicitKind) {
+    const normalizedKind = explicitKind.toLowerCase();
+    if (/approval|confirm|permission|human/.test(normalizedKind)) {
+      return "confirmation";
+    }
+    if (/tool[_\s-]?use|tool[_\s-]?call|mcp_tool_call|command_execution|web_search/.test(normalizedKind)) {
+      return "tool_call";
+    }
+    if (/tool[_\s-]?result|result|completed|execution|file_change/.test(normalizedKind)) {
+      return "execution_result";
+    }
+    if (/status|run_update|state/.test(normalizedKind)) {
+      return timelineKindFromLifecycle(message);
+    }
+    if (/reasoning|thinking/.test(normalizedKind)) {
+      return "thinking";
+    }
+  }
+
+  const traceKind = metadataString(message, ["traceKind"]);
+  if (traceKind) {
+    const normalizedTraceKind = traceKind.toLowerCase();
+    if (/approval|confirm|permission|human/.test(normalizedTraceKind)) {
+      return "confirmation";
+    }
+    if (/tool[_\s-]?use|tool[_\s-]?call|mcp_tool_call|command_execution|web_search/.test(normalizedTraceKind)) {
+      return "tool_call";
+    }
+    if (/tool[_\s-]?result|result|completed|execution|file_change/.test(normalizedTraceKind)) {
+      return "execution_result";
+    }
+    if (/status|run_update|state|queued|started|running|blocked|failed|cancelled/.test(normalizedTraceKind)) {
+      return timelineKindFromLifecycle(message);
+    }
+    if (/reasoning|thinking/.test(normalizedTraceKind)) {
+      return "thinking";
+    }
+  }
+  return timelineKindFromLifecycle(message);
+}
+
+function timelineLabel(message: AgentConversationMessage, copy: ReturnType<typeof useI18n>["copy"]): string {
+  const explicitLabel = metadataString(message, ["uiLabel", "displayLabel", "eventLabel", "label"]);
+  if (explicitLabel) {
+    return explicitLabel;
+  }
+  switch (resolveTimelineEventKind(message)) {
+    case "tool_call":
+      return copy("Tool Call", "Tool Call");
+    case "execution_result":
+      return copy("Tool Result", "Tool Result");
+    case "confirmation":
+      return copy("Needs Confirmation", "需要确认");
+    case "human":
+      return copy("Human Instruction", "人工指令");
+    case "thinking":
+      return copy("Thinking", "Thinking");
+  }
+}
+
+function timelineSummary(message: AgentConversationMessage, copy: ReturnType<typeof useI18n>["copy"]): string {
+  const metadataTitle = metadataString(message, ["toolName", "tool_name", "name", "title", "summary"]);
+  if (message.title || metadataTitle) {
+    return message.title || metadataTitle || "";
+  }
+  switch (resolveTimelineEventKind(message)) {
+    case "tool_call":
+      return copy("Calling connected tool", "调用已连接工具");
+    case "execution_result":
+      return copy("Tool or runtime returned result", "工具或 runtime 返回结果");
+    case "confirmation":
+      return copy("Waiting for human decision", "等待人工决策");
+    default:
+      return timelineLabel(message, copy);
+  }
+}
+
+function firstContentLine(content: string): string | null {
+  return content
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .find((line) => line.length > 0) ?? null;
+}
+
+function normalizedText(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function formatTimelineTime(value: string): string {
+  const numericValue = /^\d+$/.test(value.trim()) ? Number(value.trim()) : null;
+  const date = numericValue == null
+    ? new Date(value)
+    : new Date(numericValue > 1_000_000_000_000 ? numericValue : numericValue * 1000);
+  if (Number.isNaN(date.getTime())) {
+    return formatDateTime(value);
+  }
+  return date.toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+}
+
+function renderTimelinePayload(message: AgentConversationMessage, blocks: Block[], copy: ReturnType<typeof useI18n>["copy"]): React.ReactNode {
+  const eventKind = resolveTimelineEventKind(message);
+  const metadataPairs = timelineMetadataPairs(message);
+  const toolName = metadataString(message, ["toolName", "tool_name", "name"]);
+  const contentLine = firstContentLine(message.content);
+  const payloadTitle = eventKind === "execution_result"
+    ? contentLine || toolName || message.title || timelineSummary(message, copy)
+    : message.title || toolName || timelineSummary(message, copy);
+  const shouldRenderBody = Boolean(
+    message.content && !(eventKind === "execution_result" && contentLine && normalizedText(message.content) === normalizedText(contentLine)),
+  );
+  const payloadHint =
+    eventKind === "tool_call"
+      ? copy("Parameters", "参数")
+      : eventKind === "confirmation"
+        ? copy("Human-in-the-loop", "Human-in-the-loop")
+        : null;
+
+  if (eventKind === "thinking" || eventKind === "human") {
+    return (
+      <div className="agent-execution-event__plain">
+        {message.content
+          ? blocks.map((block, index) => renderBlock(block, `${message.id}-timeline-${index}`))
+          : message.status === "streaming"
+            ? copy("Assistant is responding…", "Assistant 正在输出…")
+            : timelineSummary(message, copy)}
+      </div>
+    );
+  }
+
+  return (
+    <div className="agent-execution-payload">
+      <div className="agent-execution-payload__head">
+        <span className="agent-execution-payload__icon" aria-hidden="true" />
+        <div>
+          <strong>{payloadTitle}</strong>
+          {payloadHint ? <span>{payloadHint}</span> : null}
+        </div>
+      </div>
+      {metadataPairs.length ? (
+        <div className="agent-execution-payload__chips">
+          {metadataPairs.map((item) => (
+            <span key={`${message.id}-${item.key}`}>
+              {item.key}: {item.value}
+            </span>
+          ))}
+        </div>
+      ) : null}
+      {shouldRenderBody ? (
+        <div className="agent-execution-payload__body">
+          {blocks.map((block, index) => renderBlock(block, `${message.id}-timeline-${index}`))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function TimelineNodeIcon({ kind }: { kind: TimelineEventKind }): JSX.Element {
+  switch (kind) {
+    case "tool_call":
+      return (
+        <svg viewBox="0 0 18 18" aria-hidden="true">
+          <path d="M9 2.7 14.4 5.8v6.4L9 15.3l-5.4-3.1V5.8L9 2.7Z" />
+          <path d="M9 8.8 14.2 5.9M9 8.8 3.8 5.9M9 8.8v6" />
+        </svg>
+      );
+    case "execution_result":
+      return (
+        <svg viewBox="0 0 18 18" aria-hidden="true">
+          <path d="m5 9.2 2.6 2.5L13 6.5" />
+        </svg>
+      );
+    case "confirmation":
+      return (
+        <svg viewBox="0 0 18 18" aria-hidden="true">
+          <path d="M9 3.2 15 14H3L9 3.2Z" />
+          <path d="M9 7v3.2M9 12.3h.01" />
+        </svg>
+      );
+    case "human":
+      return (
+        <svg viewBox="0 0 18 18" aria-hidden="true">
+          <path d="M9 8.4a2.6 2.6 0 1 0 0-5.2 2.6 2.6 0 0 0 0 5.2Z" />
+          <path d="M4.8 14.4c.7-2.1 2-3.1 4.2-3.1s3.5 1 4.2 3.1" />
+        </svg>
+      );
+    case "thinking":
+      return (
+        <svg viewBox="0 0 18 18" aria-hidden="true">
+          <path d="M4.8 9h.01M9 9h.01M13.2 9h.01" />
+        </svg>
+      );
+  }
+}
+
+export function ChatMessageStream({ loading, messages, timelineFooter, variant = "cards" }: ChatMessageStreamProps): JSX.Element {
   const { copy } = useI18n();
 
   if (loading) {
@@ -407,10 +706,44 @@ export function ChatMessageStream({ loading, messages }: ChatMessageStreamProps)
         <div className="chat-stream__empty-title">{copy("No messages yet", "还没有消息")}</div>
         <div className="chat-stream__empty-text">
           {copy(
-            "Use the composer below to start a new assistant request or autonomous session.",
-            "在下方输入框发起第一条 Assistant 请求或 Autonomous 会话。",
+            "Use the composer below to start a new assistant request or automation task.",
+            "在下方输入框发起第一条 Assistant 请求或自动化任务。",
           )}
         </div>
+      </div>
+    );
+  }
+
+  if (variant === "timeline") {
+    return (
+      <div className="agent-execution-timeline">
+        {messages.map((message) => {
+          const blocks = contentToBlocks(message.content);
+          const eventKind = resolveTimelineEventKind(message);
+          return (
+            <article
+              key={message.id}
+              className="agent-execution-event"
+              data-role={message.role}
+              data-event-kind={eventKind}
+            >
+              <div className="agent-execution-event__time">{formatTimelineTime(message.createdAt)}</div>
+              <div className="agent-execution-event__node">
+                <TimelineNodeIcon kind={eventKind} />
+              </div>
+              <div className="agent-execution-event__body">
+                <div className="agent-execution-event__head">
+                  <div>
+                    <strong>{timelineLabel(message, copy)}</strong>
+                    {eventKind === "execution_result" ? null : <span>{timelineSummary(message, copy)}</span>}
+                  </div>
+                </div>
+                {renderTimelinePayload(message, blocks, copy)}
+              </div>
+            </article>
+          );
+        })}
+        {timelineFooter}
       </div>
     );
   }

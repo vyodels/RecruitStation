@@ -208,6 +208,7 @@ def test_agents_routes_expose_builtin_profiles_and_runtime_collections(tmp_path:
         assert assistant_conversation.status_code == 200
         assert assistant_conversation.json()["conversation"]["id"] == conversation.conversation_id
         assert assistant_conversation.json()["messages"][0]["content"] == "Workspace ready."
+        assert assistant_conversation.json()["messages"][0]["metadata"]["eventKind"] == "thinking"
 
         patched = client.patch("/api/agents/assistant", json={"description": "chat-first"})
         assert patched.status_code == 200
@@ -280,8 +281,10 @@ def test_agents_routes_expose_builtin_profiles_and_runtime_collections(tmp_path:
         )
         assert autonomous_conversation.status_code == 200
         assert autonomous_conversation.json()["conversation"]["id"] == AUTONOMOUS_PRIMARY_CONVERSATION_ID
-        assert autonomous_conversation.json()["messages"][0]["content"] == "Fetch one candidate：等待人工处理后继续。"
         assert len(autonomous_conversation.json()["messages"]) == 2
+        assert autonomous_conversation.json()["messages"][0]["content"] == "Fetch one candidate：等待人工处理后继续。"
+        assert autonomous_conversation.json()["messages"][0]["metadata"]["eventKind"] == "confirmation"
+        assert autonomous_conversation.json()["messages"][1]["content"] == "Waiting for approval before external action."
 
         runs = client.get("/api/agents/autonomous/runs")
         assert runs.status_code == 200
