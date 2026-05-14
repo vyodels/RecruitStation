@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 
-from recruit_agent.product_adapters.limits import SceneExecutionLimits, TurnLimits
-from recruit_agent.capabilities.tools import ToolExecutionResult
+from recruit_station.product_adapters.limits import SceneExecutionLimits, TurnLimits
+from recruit_station.capabilities.tools import ToolExecutionResult
 
 
 def test_product_limits_split_between_scene_execution_and_turn() -> None:

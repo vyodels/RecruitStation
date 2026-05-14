@@ -12,14 +12,14 @@ SRC = Path(__file__).resolve().parents[1] / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from recruit_agent.core.settings import AppSettings
-from recruit_agent.db.session import create_engine_from_settings, create_session_factory, initialize_database
-from recruit_agent.models import SyncBacklogEntry, TaskQueueItem
-from recruit_agent.repositories.domain import TaskQueueRepository
-from recruit_agent.scheduler.queue import InMemoryQueue, SqlAlchemyQueue, TaskEnvelope
-from recruit_agent.scheduler.scheduler import SerialScheduler
-from recruit_agent.services.agent_control import AgentControlService
-from recruit_agent.services.sync import SyncService
+from recruit_station.core.settings import AppSettings
+from recruit_station.db.session import create_engine_from_settings, create_session_factory, initialize_database
+from recruit_station.models import SyncBacklogEntry, TaskQueueItem
+from recruit_station.repositories.domain import TaskQueueRepository
+from recruit_station.scheduler.queue import InMemoryQueue, SqlAlchemyQueue, TaskEnvelope
+from recruit_station.scheduler.scheduler import SerialScheduler
+from recruit_station.services.agent_control import AgentControlService
+from recruit_station.services.sync import SyncService
 
 
 class QueueTests(unittest.TestCase):

@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from "react";
-import type { RecruitmentStateMachine } from "@recruit-agent/shared";
+import type { RecruitmentStateMachine } from "@recruit-station/shared";
 import { PageToolbar, PageToolbarGroup, StatusBadge } from "../../components";
 import { formatCompactDate } from "../../lib/format";
 import { useI18n } from "../../lib/i18n";

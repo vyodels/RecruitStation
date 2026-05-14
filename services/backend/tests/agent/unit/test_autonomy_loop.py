@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
-from recruit_agent.services.autonomy_loop import AutonomyLoop
+from recruit_station.services.autonomy_loop import AutonomyLoop
 
 
 class StubHeartbeat:

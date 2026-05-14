@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 
-from recruit_agent.agent_runtime.types import LLMMessage
-from recruit_agent.product_adapters.context_builder import (
+from recruit_station.agent_runtime.types import LLMMessage
+from recruit_station.product_adapters.context_builder import (
     build_agent_turn_context,
     build_assistant_turn_context,
     build_autonomous_turn_context,

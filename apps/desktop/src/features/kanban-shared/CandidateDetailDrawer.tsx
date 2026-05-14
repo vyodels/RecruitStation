@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import type { ApplicationTransitionPayload, HumanActionDefinition, RecruitmentStateMachine } from "@recruit-agent/shared";
+import type { ApplicationTransitionPayload, HumanActionDefinition, RecruitmentStateMachine } from "@recruit-station/shared";
 import { FormTextarea, SectionTabs, StatusBadge } from "../../components";
 import { formatCompactDate } from "../../lib/format";
 import { useI18n } from "../../lib/i18n";

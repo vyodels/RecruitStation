@@ -32,7 +32,7 @@
 
 ## 产品方向
 
-本仓库服务的产品是 **Recruit Agent**，一个 local-first 的招聘工作台。
+本仓库服务的产品是 **RecruitStation**，一个 local-first 的招聘工作台。
 
 当前产品主线包括：
 
@@ -75,7 +75,7 @@
 
 ### Agent 与业务边界
 
-- `services/backend/src/recruit_agent/agent_runtime/**` 必须保持业务无关。
+- `services/backend/src/recruit_station/agent_runtime/**` 必须保持业务无关。
 - 招聘业务只能通过 product adapter、tool、skill、plugin、prompt、MCP 或 business service 接入。
 - 优先通过 prompt、结构化上下文、tool contract、skill 修复能力缺口，而不是往 core runtime 里补业务硬编码。
 - 不在 core runtime / Agent 主路径里硬编码站点规则、页面词表、selector 或一次性 workflow。
@@ -111,7 +111,7 @@ cd services/backend
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .[dev]
-uvicorn recruit_agent.server:create_app --reload --factory
+uvicorn recruit_station.server:create_app --reload --factory
 ```
 
 测试：

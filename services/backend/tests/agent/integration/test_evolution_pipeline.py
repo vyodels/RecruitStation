@@ -6,15 +6,15 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
-from recruit_agent.api.routers.evolution import build_router
-from recruit_agent.core.settings import AppSettings
-from recruit_agent.db.session import create_engine_from_settings, create_session_factory, initialize_database
-from recruit_agent.evolution.learning_writer import LearningWriter
-from recruit_agent.evolution.promotion import PromotionService
-from recruit_agent.evolution.queue import EvolutionQueue
-from recruit_agent.mcp.health import summarize_mcp_health
-from recruit_agent.mcp.registry import McpRegistry
-from recruit_agent.models.domain import McpServer
+from recruit_station.api.routers.evolution import build_router
+from recruit_station.core.settings import AppSettings
+from recruit_station.db.session import create_engine_from_settings, create_session_factory, initialize_database
+from recruit_station.evolution.learning_writer import LearningWriter
+from recruit_station.evolution.promotion import PromotionService
+from recruit_station.evolution.queue import EvolutionQueue
+from recruit_station.mcp.health import summarize_mcp_health
+from recruit_station.mcp.registry import McpRegistry
+from recruit_station.models.domain import McpServer
 
 
 def _make_session(tmp_path: Path) -> Session:

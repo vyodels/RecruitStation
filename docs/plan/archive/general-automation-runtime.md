@@ -11,7 +11,7 @@
 
 ## 当前状态
 
-当前产品方向已经切到 `Recruit Agent`：
+当前产品方向已经切到 `RecruitStation`：
 
 - 招聘 Agent 配置与外露治理
 - 候选人进度管理

@@ -17,4 +17,4 @@ Do not use it for:
 ## Current index
 - [`agent-context-memory-design-reference.md`](./agent-context-memory-design-reference.md)
 - [`runtime-and-hermes-comparison.md`](./runtime-and-hermes-comparison.md)
-- [`recruit-agent-web-tooling-notes.md`](./recruit-agent-web-tooling-notes.md)
+- [`recruit-station-web-tooling-notes.md`](./recruit-station-web-tooling-notes.md)

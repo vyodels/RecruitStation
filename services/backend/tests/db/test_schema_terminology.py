@@ -4,8 +4,8 @@ from pathlib import Path
 
 from sqlalchemy import inspect
 
-from recruit_agent.core.settings import AppSettings
-from recruit_agent.db.session import create_engine_from_settings, initialize_database
+from recruit_station.core.settings import AppSettings
+from recruit_station.db.session import create_engine_from_settings, initialize_database
 
 
 def test_schema_uses_turn_terminology(tmp_path: Path) -> None:
@@ -19,7 +19,7 @@ def test_schema_uses_turn_terminology(tmp_path: Path) -> None:
 
     table_names = set(inspector.get_table_names())
     assert "agent_definitions" in table_names
-    assert "recruit_agent_profiles" not in table_names
+    assert "recruit_station_profiles" not in table_names
     assert "goal_specs" not in table_names
     turn_record_tables = {name for name in table_names if name.startswith("agent_") and name.endswith("_records")}
     assert turn_record_tables == {"agent_turn_records"}

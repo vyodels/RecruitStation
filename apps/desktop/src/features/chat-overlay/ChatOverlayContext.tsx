@@ -33,8 +33,8 @@ interface ChatOverlayContextValue {
   setOverlayRect(rect: OverlayRect): void;
 }
 
-const bubbleStorageKey = "recruit-agent.chat-bubble-position";
-const overlayStorageKey = "recruit-agent.chat-overlay-rect";
+const bubbleStorageKey = "recruit-station.chat-bubble-position";
+const overlayStorageKey = "recruit-station.chat-overlay-rect";
 
 const ChatOverlayContext = createContext<ChatOverlayContextValue | null>(null);
 

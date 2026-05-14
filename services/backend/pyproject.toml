@@ -3,9 +3,9 @@ requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "recruit-agent-backend"
+name = "recruit-station-backend"
 version = "0.1.0"
-description = "FastAPI backend foundation for the Recruit Agent workspace"
+description = "FastAPI backend foundation for the RecruitStation workspace"
 requires-python = ">=3.14"
 dependencies = [
   "fastapi>=0.115.0",
@@ -23,15 +23,15 @@ dev = [
 ]
 
 [project.scripts]
-recruit-agent-backend = "recruit_agent.core.app:main"
-recruit-agent-migrate = "recruit_agent.db.migrations:main"
+recruit-station-backend = "recruit_station.core.app:main"
+recruit-station-migrate = "recruit_station.db.migrations:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["recruit_agent*"]
+include = ["recruit_station*"]
 namespaces = true
 
 [tool.pytest.ini_options]

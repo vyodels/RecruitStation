@@ -6,7 +6,7 @@
 
 ## 核心原则
 
-`services/backend/src/recruit_agent/agent_runtime/**` 必须保持业务无关。
+`services/backend/src/recruit_station/agent_runtime/**` 必须保持业务无关。
 
 Agent runtime 只负责 Agent 本身的职责：
 

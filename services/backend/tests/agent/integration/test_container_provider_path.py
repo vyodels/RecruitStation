@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import pytest
 
-from recruit_agent.agent_runtime.types import LLMRequest
-from recruit_agent.core.settings import AppSettings
-from recruit_agent.repositories.domain import SettingsRepository
-from recruit_agent.agent_runtime.providers import ProviderError
-from recruit_agent.services.container import AppContainer
+from recruit_station.agent_runtime.types import LLMRequest
+from recruit_station.core.settings import AppSettings
+from recruit_station.repositories.domain import SettingsRepository
+from recruit_station.agent_runtime.providers import ProviderError
+from recruit_station.services.container import AppContainer
 
 
 def test_container_uses_explicit_unavailable_provider_without_credentials(tmp_path) -> None:

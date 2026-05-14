@@ -1,9 +1,9 @@
 # Agent 操作手册 · 读页面 + 控键鼠
 
-> **读者**：recruit-agent 以及其他需要"读网页 → 决策 → 键鼠操作"的 Agent
+> **读者**：recruit-station 以及其他需要"读网页 → 决策 → 键鼠操作"的 Agent
 > **单一事实源**：本文档是 Agent 使用 `browser-mcp` 和 `VirtualHID` 两套工具的**唯一入口说明**；两套工具仓库内部的实施文档不是 Agent 该读的
 > **最后更新**：2026-04-25
-> **配套跨系统方案**：`~/AgentProjects/cross-project-runtime-docs/recruit-agent-browser-virtualhid-overview.md`
+> **配套跨系统方案**：`~/AgentProjects/cross-project-runtime-docs/recruit-station-browser-virtualhid-overview.md`
 
 ---
 
@@ -51,7 +51,7 @@ args = ["/Users/vyodels/AgentProjects/VirtualHID/mcp/server.mjs"]
 browser observe/wait -> Agent decision -> hid_action write -> browser observe/wait -> Agent decision -> hid_action write
 ```
 
-这条时序约束描述的是 `recruit-agent` 内部 Agent 操作外部 / mock 招聘网站的产品执行链路，不限制外部测试 harness 操作 `recruit-agent` 自己的前端。测试 harness 可以用 Playwright、Chrome DevTools 或等价 UI 工具启动 goal、配置参数和查看运行状态；一旦进入招聘网站执行，页面观察和写入仍必须回到 `browser-mcp` + `VirtualHID` 组合链路。
+这条时序约束描述的是 `recruit-station` 内部 Agent 操作外部 / mock 招聘网站的产品执行链路，不限制外部测试 harness 操作 `recruit-station` 自己的前端。测试 harness 可以用 Playwright、Chrome DevTools 或等价 UI 工具启动 goal、配置参数和查看运行状态；一旦进入招聘网站执行，页面观察和写入仍必须回到 `browser-mcp` + `VirtualHID` 组合链路。
 
 - `browser_*` 提供类似 Playwright locator / page state 的观察层。
 - `hid_action` 提供类似 Playwright click/type/scroll 的写入层，只是写入由 macOS HID 事件完成。
@@ -99,7 +99,7 @@ browser observe/wait -> Agent decision -> hid_action write -> browser observe/wa
 |---|---|
 | `browser_locate_download` | 通过 Chrome background/downloads API 定位下载记录、本地路径、下载状态和字节进度；用于 HID 触发下载后、workspace 写入前 |
 
-`browser_locate_download` 不打开 `chrome://downloads`，不注入页面 JS，不让 mock 页面回传下载状态，也不使用 DOM 标记作为 proof。它只能把 Chrome 下载记录里可见的 `filename / state / exists / mime / url / finalUrl / referrer / bytesReceived / totalBytes / startTime / endTime` 等结构化事实交给 Agent；`state` 可以是 `in_progress`、`interrupted` 或 `complete`。当下载由 HID 点击触发时，Agent 应把点击前 snapshot 的 `href/sourceUrl`、`download` 或预期 filename、`startedAfter` 时间戳传给它做来源关联，避免多次下载造成路径误配。是否满足简历归档要求由 `recruit-agent` 根据业务目标继续判断。
+`browser_locate_download` 不打开 `chrome://downloads`，不注入页面 JS，不让 mock 页面回传下载状态，也不使用 DOM 标记作为 proof。它只能把 Chrome 下载记录里可见的 `filename / state / exists / mime / url / finalUrl / referrer / bytesReceived / totalBytes / startTime / endTime` 等结构化事实交给 Agent；`state` 可以是 `in_progress`、`interrupted` 或 `complete`。当下载由 HID 点击触发时，Agent 应把点击前 snapshot 的 `href/sourceUrl`、`download` 或预期 filename、`startedAfter` 时间戳传给它做来源关联，避免多次下载造成路径误配。是否满足简历归档要求由 `recruit-station` 根据业务目标继续判断。
 
 ### 2.4 等待
 
@@ -300,13 +300,13 @@ browser_list_tabs / browser_get_active_tab / browser_snapshot 的 URL
 
 所以 Agent 不应再把 `browser_snapshot` 里的坐标直接换算成最终 `CGPoint`；应把页面语义、目标区域和动作意图传给 VirtualHID。
 
-`viewportInScreen`、`screenX/screenY` 这类屏幕坐标最多只能作为兼容诊断字段；browser / recruit-agent 不承担屏幕坐标权威，VirtualHID 必须通过 macOS AX/CG/目标窗口证据解析真实 viewport/window 并完成 screen 坐标换算。
+`viewportInScreen`、`screenX/screenY` 这类屏幕坐标最多只能作为兼容诊断字段；browser / recruit-station 不承担屏幕坐标权威，VirtualHID 必须通过 macOS AX/CG/目标窗口证据解析真实 viewport/window 并完成 screen 坐标换算。
 
-`verification` 只说明 HID 执行层证据，例如注入事件、最终指针、焦点确认。页面语义是否成功，仍必须由 `browser_snapshot` / recruit-agent 业务结果确认。
+`verification` 只说明 HID 执行层证据，例如注入事件、最终指针、焦点确认。页面语义是否成功，仍必须由 `browser_snapshot` / recruit-station 业务结果确认。
 
-### 6.2 recruit-agent 侧合同建议
+### 6.2 recruit-station 侧合同建议
 
-在 `recruit-agent` 里，推荐把这组信息放进 `delegate_scene_context` 的 `environment_requirements` / `context`：
+在 `recruit-station` 里，推荐把这组信息放进 `delegate_scene_context` 的 `environment_requirements` / `context`：
 
 1. `browser_target`：`application`、`window_title`、`tab_id`、`host`、`url` / `url_pattern`
 2. `computer_target`：`application`、`window_title`、`post_mode`、`activation_policy`

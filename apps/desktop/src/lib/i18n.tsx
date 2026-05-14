@@ -8,7 +8,7 @@ interface I18nContextValue {
   copy(en: string, zh: string): string;
 }
 
-const STORAGE_KEY = "recruit-agent:ui-language";
+const STORAGE_KEY = "recruit-station:ui-language";
 
 const I18nContext = createContext<I18nContextValue | null>(null);
 

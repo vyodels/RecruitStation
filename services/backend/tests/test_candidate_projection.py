@@ -5,8 +5,8 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from recruit_agent.core.settings import load_settings
-from recruit_agent.repositories.domain import (
+from recruit_station.core.settings import load_settings
+from recruit_station.repositories.domain import (
     AgentSessionRepository,
     ApprovalRepository,
     CandidateApplicationRepository,
@@ -14,12 +14,12 @@ from recruit_agent.repositories.domain import (
     JobDescriptionRepository,
     OperatorInteractionRepository,
 )
-from recruit_agent.server import create_app
-from recruit_agent.services.recruit_agent import ensure_primary_agent_definition
+from recruit_station.server import create_app
+from recruit_station.services.recruit_station import ensure_primary_agent_definition
 
 
 def test_resume_artifact_updates_candidate_projection(tmp_path: Path) -> None:
-    os.environ["RECRUIT_AGENT_DATA_DIR"] = str(tmp_path)
+    os.environ["RECRUIT_STATION_DATA_DIR"] = str(tmp_path)
     load_settings.cache_clear()
     app = create_app()
     client = TestClient(app)
@@ -88,12 +88,12 @@ def test_resume_artifact_updates_candidate_projection(tmp_path: Path) -> None:
         assert len(thread_payload["resumeArtifacts"]) == 1
     finally:
         client.__exit__(None, None, None)
-        os.environ.pop("RECRUIT_AGENT_DATA_DIR", None)
+        os.environ.pop("RECRUIT_STATION_DATA_DIR", None)
         load_settings.cache_clear()
 
 
 def test_application_thread_runtime_records_are_isolated_by_application_id(tmp_path: Path) -> None:
-    os.environ["RECRUIT_AGENT_DATA_DIR"] = str(tmp_path)
+    os.environ["RECRUIT_STATION_DATA_DIR"] = str(tmp_path)
     load_settings.cache_clear()
     app = create_app()
     client = TestClient(app)
@@ -220,5 +220,5 @@ def test_application_thread_runtime_records_are_isolated_by_application_id(tmp_p
         }
     finally:
         client.__exit__(None, None, None)
-        os.environ.pop("RECRUIT_AGENT_DATA_DIR", None)
+        os.environ.pop("RECRUIT_STATION_DATA_DIR", None)
         load_settings.cache_clear()

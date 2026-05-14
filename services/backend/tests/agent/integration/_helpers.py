@@ -6,14 +6,14 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session, sessionmaker
 
-from recruit_agent.agents.assistant import AssistantAdapter
-from recruit_agent.api.routers.assistant import build_router as build_assistant_router
-from recruit_agent.core.settings import AppSettings
-from recruit_agent.db.session import create_engine_from_settings, create_session_factory, initialize_database
-from recruit_agent.plugins.host import PluginHost
-from recruit_agent.agent_runtime.providers import LLMProvider
-from recruit_agent.capabilities.tools import ToolRegistry, register_core_tools
-from recruit_agent.assistant.session_store import AssistantSessionStore
+from recruit_station.agents.assistant import AssistantAdapter
+from recruit_station.api.routers.assistant import build_router as build_assistant_router
+from recruit_station.core.settings import AppSettings
+from recruit_station.db.session import create_engine_from_settings, create_session_factory, initialize_database
+from recruit_station.plugins.host import PluginHost
+from recruit_station.agent_runtime.providers import LLMProvider
+from recruit_station.capabilities.tools import ToolRegistry, register_core_tools
+from recruit_station.assistant.session_store import AssistantSessionStore
 
 
 def make_session_factory(tmp_path: Path, db_name: str) -> sessionmaker[Session]:

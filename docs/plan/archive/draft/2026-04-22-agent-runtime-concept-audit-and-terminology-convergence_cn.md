@@ -2,7 +2,7 @@
 
 **状态**: 草稿  
 **日期**: 2026-04-22  
-**背景**: 基于当前对 `recruit-agent` 内部 Agent 运行时概念的审查，以及与 Anthropic Claude API / Managed Agents、Claude Code、OpenAI Agents、Codex 的术语对照。
+**背景**: 基于当前对 `recruit-station` 内部 Agent 运行时概念的审查，以及与 Anthropic Claude API / Managed Agents、Claude Code、OpenAI Agents、Codex 的术语对照。
 
 ---
 

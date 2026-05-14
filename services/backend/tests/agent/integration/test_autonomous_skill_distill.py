@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from recruit_agent.services.evolution import build_skill_distill_review_payload
+from recruit_station.services.evolution import build_skill_distill_review_payload
 
 
 def test_skill_distill_review_payload_uses_run_fields() -> None:

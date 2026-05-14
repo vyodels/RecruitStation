@@ -4,10 +4,10 @@ from typing import Any
 
 import pytest
 
-from recruit_agent.core.settings import AppSettings
-from recruit_agent.models.domain import McpServer, McpTool
-from recruit_agent.services.container import AppContainer
-from recruit_agent.services.mcp_registry import McpBridgeError, _reset_browser_hid_sequence_state_for_tests
+from recruit_station.core.settings import AppSettings
+from recruit_station.models.domain import McpServer, McpTool
+from recruit_station.services.container import AppContainer
+from recruit_station.services.mcp_registry import McpBridgeError, _reset_browser_hid_sequence_state_for_tests
 
 
 def test_container_build_and_reload_register_enabled_dynamic_mcp_tools(tmp_path, monkeypatch) -> None:
@@ -42,8 +42,8 @@ def test_container_build_and_reload_register_enabled_dynamic_mcp_tools(tmp_path,
             "source": server.endpoint,
         }
 
-    monkeypatch.setattr("recruit_agent.services.mcp_registry._mcp_list_tools", fake_list_tools)
-    monkeypatch.setattr("recruit_agent.services.mcp_registry._mcp_call_tool", fake_call_tool)
+    monkeypatch.setattr("recruit_station.services.mcp_registry._mcp_list_tools", fake_list_tools)
+    monkeypatch.setattr("recruit_station.services.mcp_registry._mcp_call_tool", fake_call_tool)
 
     settings = AppSettings(
         data_dir=str(tmp_path / "data"),
@@ -143,8 +143,8 @@ def test_dynamic_mcp_tool_handler_survives_healthcheck_resync(tmp_path, monkeypa
             "source": server.endpoint,
         }
 
-    monkeypatch.setattr("recruit_agent.services.mcp_registry._mcp_list_tools", fake_list_tools)
-    monkeypatch.setattr("recruit_agent.services.mcp_registry._mcp_call_tool", fake_call_tool)
+    monkeypatch.setattr("recruit_station.services.mcp_registry._mcp_list_tools", fake_list_tools)
+    monkeypatch.setattr("recruit_station.services.mcp_registry._mcp_call_tool", fake_call_tool)
 
     settings = AppSettings(
         data_dir=str(tmp_path / "data"),
@@ -216,8 +216,8 @@ def test_browser_locate_download_wait_ms_is_clamped_below_stdio_timeout(tmp_path
         tool_calls.append((server.endpoint, tool_name, dict(arguments)))
         return {"located": True, "filename": "/tmp/candidate-resume.pdf", "state": "complete"}
 
-    monkeypatch.setattr("recruit_agent.services.mcp_registry._mcp_list_tools", fake_list_tools)
-    monkeypatch.setattr("recruit_agent.services.mcp_registry._mcp_call_tool", fake_call_tool)
+    monkeypatch.setattr("recruit_station.services.mcp_registry._mcp_list_tools", fake_list_tools)
+    monkeypatch.setattr("recruit_station.services.mcp_registry._mcp_call_tool", fake_call_tool)
 
     settings = AppSettings(
         data_dir=str(tmp_path / "data"),
@@ -329,8 +329,8 @@ def test_browser_hid_runtime_requires_observe_after_substantive_hid_action(tmp_p
         tool_calls.append((server.endpoint, tool_name, dict(arguments)))
         return {"ok": True, "tool": tool_name}
 
-    monkeypatch.setattr("recruit_agent.services.mcp_registry._mcp_list_tools", fake_list_tools)
-    monkeypatch.setattr("recruit_agent.services.mcp_registry._mcp_call_tool", fake_call_tool)
+    monkeypatch.setattr("recruit_station.services.mcp_registry._mcp_list_tools", fake_list_tools)
+    monkeypatch.setattr("recruit_station.services.mcp_registry._mcp_call_tool", fake_call_tool)
 
     settings = AppSettings(
         data_dir=str(tmp_path / "data"),
@@ -424,9 +424,9 @@ def test_standard_mcp_tool_retries_once_on_transient_failure(tmp_path, monkeypat
             raise McpBridgeError("Transport closed while reading MCP response")
         return {"ok": True, "tool": tool_name, "arguments": dict(arguments)}
 
-    monkeypatch.setattr("recruit_agent.services.mcp_registry._mcp_list_tools", fake_list_tools)
-    monkeypatch.setattr("recruit_agent.services.mcp_registry._mcp_call_tool", fake_call_tool)
-    monkeypatch.setattr("recruit_agent.services.mcp_registry.time.sleep", lambda _: None)
+    monkeypatch.setattr("recruit_station.services.mcp_registry._mcp_list_tools", fake_list_tools)
+    monkeypatch.setattr("recruit_station.services.mcp_registry._mcp_call_tool", fake_call_tool)
+    monkeypatch.setattr("recruit_station.services.mcp_registry.time.sleep", lambda _: None)
 
     settings = AppSettings(
         data_dir=str(tmp_path / "data"),
@@ -483,9 +483,9 @@ def test_standard_mcp_tool_marks_server_unhealthy_after_persistent_transient_fai
         tool_calls.append((server.endpoint, tool_name, dict(arguments)))
         raise McpBridgeError("MCP socket not found: /tmp/browser-mcp.sock")
 
-    monkeypatch.setattr("recruit_agent.services.mcp_registry._mcp_list_tools", fake_list_tools)
-    monkeypatch.setattr("recruit_agent.services.mcp_registry._mcp_call_tool", fake_call_tool)
-    monkeypatch.setattr("recruit_agent.services.mcp_registry.time.sleep", lambda _: None)
+    monkeypatch.setattr("recruit_station.services.mcp_registry._mcp_list_tools", fake_list_tools)
+    monkeypatch.setattr("recruit_station.services.mcp_registry._mcp_call_tool", fake_call_tool)
+    monkeypatch.setattr("recruit_station.services.mcp_registry.time.sleep", lambda _: None)
 
     settings = AppSettings(
         data_dir=str(tmp_path / "data"),

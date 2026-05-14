@@ -4,8 +4,8 @@ from pathlib import Path
 
 from sqlalchemy import select
 
-from recruit_agent.evolution.prompt_evolution import PromptEvolution
-from recruit_agent.models.domain import EvolutionArtifact, JobDescription
+from recruit_station.evolution.prompt_evolution import PromptEvolution
+from recruit_station.models.domain import EvolutionArtifact, JobDescription
 
 from ._helpers import make_session_factory
 

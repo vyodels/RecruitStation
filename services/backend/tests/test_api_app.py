@@ -20,11 +20,11 @@ except ModuleNotFoundError:
 @unittest.skipIf(TestClient is None, "FastAPI test dependencies are not installed")
 class ApiAppTests(unittest.TestCase):
     def setUp(self) -> None:
-        from recruit_agent.core.settings import load_settings
-        from recruit_agent.server import create_app
+        from recruit_station.core.settings import load_settings
+        from recruit_station.server import create_app
 
         self.tempdir = tempfile.TemporaryDirectory()
-        os.environ["RECRUIT_AGENT_DATA_DIR"] = self.tempdir.name
+        os.environ["RECRUIT_STATION_DATA_DIR"] = self.tempdir.name
         load_settings.cache_clear()
         self.client = TestClient(create_app())
         self.client.__enter__()
@@ -33,7 +33,7 @@ class ApiAppTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.client.__exit__(None, None, None)
         self.tempdir.cleanup()
-        os.environ.pop("RECRUIT_AGENT_DATA_DIR", None)
+        os.environ.pop("RECRUIT_STATION_DATA_DIR", None)
         self._load_settings.cache_clear()
 
     def test_health_and_agent_queue_surface(self) -> None:
@@ -91,14 +91,14 @@ class ApiAppTests(unittest.TestCase):
             "/api/sync/status": self.client.get("/api/sync/status"),
             "/api/mcp/presets": self.client.get("/api/mcp/presets"),
             "/api/mcp/servers": self.client.get("/api/mcp/servers"),
-            "/api/recruit-agent/agent-definition": self.client.get("/api/recruit-agent/agent-definition"),
-            "/api/recruit-agent/runtime/traces": self.client.get("/api/recruit-agent/runtime/traces"),
-            "/api/recruit-agent/runtime/graphs": self.client.get("/api/recruit-agent/runtime/graphs"),
-            "/api/recruit-agent/runtime/strategy-fragments": self.client.get("/api/recruit-agent/runtime/strategy-fragments"),
-            "/api/recruit-agent/runtime/operator-interactions": self.client.get("/api/recruit-agent/runtime/operator-interactions"),
+            "/api/recruit-station/agent-definition": self.client.get("/api/recruit-station/agent-definition"),
+            "/api/recruit-station/runtime/traces": self.client.get("/api/recruit-station/runtime/traces"),
+            "/api/recruit-station/runtime/graphs": self.client.get("/api/recruit-station/runtime/graphs"),
+            "/api/recruit-station/runtime/strategy-fragments": self.client.get("/api/recruit-station/runtime/strategy-fragments"),
+            "/api/recruit-station/runtime/operator-interactions": self.client.get("/api/recruit-station/runtime/operator-interactions"),
             "/api/candidate-applications/threads": self.client.get("/api/candidate-applications/threads"),
             "/api/state-machine": self.client.get("/api/state-machine"),
-            "/api/recruit-agent/evolution-artifacts": self.client.get("/api/recruit-agent/evolution-artifacts"),
+            "/api/recruit-station/evolution-artifacts": self.client.get("/api/recruit-station/evolution-artifacts"),
         }
 
         for path, response in responses.items():
@@ -106,7 +106,7 @@ class ApiAppTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 200, path)
 
     def test_dashboard_learning_alerts_do_not_parse_jsonish_content_as_business_protocol(self) -> None:
-        from recruit_agent.models.domain import AgentLearning
+        from recruit_station.models.domain import AgentLearning
 
         with self.client.app.state.session_factory() as session:
             session.add(

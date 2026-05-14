@@ -7,7 +7,7 @@
 > Last reviewed against code: 2026-04-20
 > Legacy path retained: docs/recruiting-workflow-ux-redesign-plan_cn.md
 
-> 本文是针对当前 Recruit Agent 代码库的产品与 UX 方案。  
+> 本文是针对当前 RecruitStation 代码库的产品与 UX 方案。
 > 它并不是要团队移除 runtime 内核，而是要**把实现层语言藏到招聘业务友好的工作流背后**，让产品更像招聘工作台，而不是 agent 运维控制台。
 
 ## 为什么要写这份文档
@@ -47,7 +47,7 @@
 1. **实现层概念泄漏到了默认 UI。**
    像 `goal`、`trace`、`graph`、`artifact`、`compact`、`operator interaction`、`adaptive runtime`、`MCP health` 这些词出现得太早。
 2. **工作流被拆散到了太多一级页面。**
-   候选人相关工作被分散在 `Dashboard`、`Workbench`、`Communications`、`Agent IM`、`Evolution`、`Recruit Agent` 多个页面。
+   候选人相关工作被分散在 `Dashboard`、`Workbench`、`Communications`、`Agent IM`、`Evolution`、`RecruitStation` 多个页面。
 3. **产品入口从配置和 runtime 控制出发，而不是从招聘待办出发。**
    招聘用户应该首先看到“我现在要处理什么”，而不是“run agent once”或者“start adaptive goal”。
 4. **沟通页承载了过多职责。**
@@ -64,8 +64,8 @@
 - `apps/desktop/src/features/workspace/DesktopWorkspace.tsx` 在启动时几乎加载了所有领域对象，并把它们变成顶层 tab。
 - `apps/desktop/src/features/workbench/WorkbenchView.tsx` 把 candidate progress、`run once`、`goal`、`replay`、`diagnostics`、`adaptive runtime`、queue depth、sync backlog 混在一起。
 - `apps/desktop/src/features/communications/CommunicationsView.tsx` 把 chat、state transition、assessment、structured facts、runtime confirmation 混在一起。
-- `apps/desktop/src/features/recruit-agent/RecruitAgentView.tsx` 把 blueprint、context policy、memory policy、原始编辑面板暴露得过于靠前。
-- `services/backend/src/recruit_agent/api/routers/recruit_agent.py` 明明已经有很完整的 recruiting CRUD 能力，但它们在产品表面仍与 runtime 和治理接口混在一起。
+- `apps/desktop/src/features/recruit-station/RecruitStationView.tsx` 把 blueprint、context policy、memory policy、原始编辑面板暴露得过于靠前。
+- `services/backend/src/recruit_station/api/routers/recruit_station.py` 明明已经有很完整的 recruiting CRUD 能力，但它们在产品表面仍与 runtime 和治理接口混在一起。
 - `apps/desktop/src/styles.css` 与 `apps/desktop/src/lib/theme.ts` 仍然保留暗色 console 风格，这与新的桌面设计规范相冲突。
 
 ## 产品北极星
@@ -99,7 +99,7 @@
 | Dashboard | 面向今日待办的总览页 | 入口应从今日待办出发，而不是抽象指标 |
 | Workbench | 主候选人 pipeline 工作台 | 主工作单元应该是候选人队列，而不是 runtime 操作 |
 | Communications | 候选人 thread/cockpit 工作面 | 把沟通、简历、评估、下一步建议收束成一个招聘工作流页面 |
-| Recruit Agent | 高级 agent 配置与策略区 | blueprint/context/memory 编辑不该处于日常默认流里 |
+| RecruitStation | 高级 agent 配置与策略区 | blueprint/context/memory 编辑不该处于日常默认流里 |
 | Agent IM + Evolution | 高级 review 与治理区 | 把非候选人审批、skill 异常、演进提案合并成一个高级治理层 |
 | Settings | 运营/管理设置页 | 保留，但明确它是运营/管理设置 |
 | — | Import Center（新页面或内嵌模块） | 增加明确的 Boss/import intake 页面 |
@@ -114,7 +114,7 @@
 - `Dashboard` 的行为应当像 Today view
 - `Workbench` 的行为应当像主 candidate pipeline
 - `Communications` 的行为应当像 candidate cockpit
-- `Recruit Agent` 应被视为高级配置区
+- `RecruitStation` 应被视为高级配置区
 - `Agent IM` 与 `Evolution` 在视觉和交互上应被下沉到高级治理工作区
 
 `runtime diagnostics`、`MCP registry`、`trace/graph`、`memory editing` 等内容应该放在高级区域，不要作为默认日常主工作面。
@@ -315,9 +315,9 @@
 
 把这些从默认招聘流程中移走。
 
-### 7. Recruit Agent（高级区域）
+### 7. RecruitStation（高级区域）
 
-当前的 `Recruit Agent` 页面应该被重新定义为高级管理页。
+当前的 `RecruitStation` 页面应该被重新定义为高级管理页。
 
 保留在这里：
 
@@ -347,7 +347,7 @@
 | Talent pool sync record | Export status |
 | Workbench | candidate pipeline workspace |
 | Communications | candidate cockpit / thread workspace |
-| Recruit Agent | advanced agent strategy/configuration area |
+| RecruitStation | advanced agent strategy/configuration area |
 | Agent IM | advanced review center / operator review area |
 
 ## 后端与 API 对齐建议
@@ -650,7 +650,7 @@ agent 应该持续沉淀招聘经验，但必须写到正确层级。
 ### 工作流草图
 
 ```text
-[Recruit Agent Profile / Playbook / Policy]
+[RecruitStation Profile / Playbook / Policy]
 [招聘 Agent 配置 / Playbook / 策略]
                   |
                   v
@@ -710,12 +710,12 @@ agent 应该持续沉淀招聘经验，但必须写到正确层级。
 
 它只是一个 **candidate-scoped operating surface 和 record aggregate**。
 
-长期存在的 `Recruit Agent` 仍然是唯一的主 agent 身份。
+长期存在的 `RecruitStation` 仍然是唯一的主 agent 身份。
 
 #### 关系草图
 
 ```text
-                    [Persistent Recruit Agent]
+                    [Persistent RecruitStation]
                     [持续存在的主招聘 Agent]
                               |
         +---------------------+---------------------+
@@ -731,7 +731,7 @@ agent 应该持续沉淀招聘经验，但必须写到正确层级。
 
 **中文说明：**
 
-- `Persistent Recruit Agent`：系统里唯一长期存在的主 Agent 身份。
+- `Persistent RecruitStation`：系统里唯一长期存在的主 Agent 身份。
 - `Candidate Thread`：某个候选人的局部工作面，不是独立子 Agent。
 - `local state only`：线程内只允许持有该候选人的沟通、简历、评估、阶段与待办上下文。
 - 主 Agent 可以跨候选人调度工作；单个 Thread 不可以跨候选人推理。
@@ -741,7 +741,7 @@ agent 应该持续沉淀招聘经验，但必须写到正确层级。
 
 | Surface | Responsibilities | Must not do |
 |---|---|---|
-| Persistent Recruit Agent | 选工作、应用招聘策略、决定 next action、编排 sourcing/evaluation/outreach、请求 review、沉淀可复用经验 | 把 candidate-private fact 写进 global scope、把 runtime diagnostics 当成产品目标 |
+| Persistent RecruitStation | 选工作、应用招聘策略、决定 next action、编排 sourcing/evaluation/outreach、请求 review、沉淀可复用经验 | 把 candidate-private fact 写进 global scope、把 runtime diagnostics 当成产品目标 |
 | Candidate Thread | 持有单个 candidate 的 communication log、resume facts、stage events、assessments、sync records、pending review、next action context | 变成独立长期 agent、跨多个 candidate 推理、自主修改全局策略 |
 | Recruiter / operator | 审批敏感动作、纠偏策略、处理边缘案例、决定何时 override、校准 hiring quality | 微操所有低风险只读步骤 |
 

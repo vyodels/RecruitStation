@@ -4,9 +4,9 @@ import json
 
 from fastapi.testclient import TestClient
 
-from recruit_agent.core.settings import AppSettings
-from recruit_agent.server import create_app
-from recruit_agent.services.mcp_registry import VIRTUALHID_SOCKET_PRESET_KEY
+from recruit_station.core.settings import AppSettings
+from recruit_station.server import create_app
+from recruit_station.services.mcp_registry import VIRTUALHID_SOCKET_PRESET_KEY
 
 
 def _browser_tool_payloads() -> list[dict[str, object]]:
@@ -250,8 +250,8 @@ def _virtualhid_tool_payloads() -> list[dict[str, object]]:
     ]
 
 
-def test_mcp_presets_load_from_recruit_agent_assets(tmp_path, monkeypatch) -> None:
-    preset_dir = tmp_path / ".recruit-agent" / "mcp" / "presets"
+def test_mcp_presets_load_from_recruit_station_assets(tmp_path, monkeypatch) -> None:
+    preset_dir = tmp_path / ".recruit-station" / "mcp" / "presets"
     preset_dir.mkdir(parents=True)
     (preset_dir / "custom-unix.json").write_text(
         json.dumps(
@@ -269,7 +269,7 @@ def test_mcp_presets_load_from_recruit_agent_assets(tmp_path, monkeypatch) -> No
         encoding="utf-8",
     )
     monkeypatch.setattr(
-        "recruit_agent.services.mcp_registry.mcp_preset_templates_root",
+        "recruit_station.services.mcp_registry.mcp_preset_templates_root",
         lambda: preset_dir,
     )
 
@@ -337,15 +337,15 @@ def test_browser_preset_healthcheck_uses_upstream_stdio_mcp_server(tmp_path, mon
         return {}
 
     monkeypatch.setattr(
-        "recruit_agent.services.mcp_registry.default_browser_mcp_server_command",
+        "recruit_station.services.mcp_registry.default_browser_mcp_server_command",
         lambda: ("node", "/virtual/browser-mcp/server.mjs"),
     )
     monkeypatch.setattr(
-        "recruit_agent.services.mcp_registry.default_browser_upstream_endpoint",
+        "recruit_station.services.mcp_registry.default_browser_upstream_endpoint",
         lambda: "/virtual/default-browser.sock",
     )
     monkeypatch.setattr(
-        "recruit_agent.services.mcp_registry._mcp_session_request",
+        "recruit_station.services.mcp_registry._mcp_session_request",
         fake_mcp_session_request,
     )
 
@@ -438,15 +438,15 @@ def test_virtualhid_preset_healthcheck_uses_upstream_stdio_mcp_server(tmp_path, 
         return {}
 
     monkeypatch.setattr(
-        "recruit_agent.services.mcp_registry.default_virtualhid_mcp_server_command",
+        "recruit_station.services.mcp_registry.default_virtualhid_mcp_server_command",
         lambda: ("node", "/virtual/VirtualHID/mcp/server.mjs"),
     )
     monkeypatch.setattr(
-        "recruit_agent.services.mcp_registry.default_virtualhid_upstream_endpoint",
+        "recruit_station.services.mcp_registry.default_virtualhid_upstream_endpoint",
         lambda: "/virtual/default-virtualhid.sock",
     )
     monkeypatch.setattr(
-        "recruit_agent.services.mcp_registry._mcp_session_request",
+        "recruit_station.services.mcp_registry._mcp_session_request",
         fake_mcp_session_request,
     )
 

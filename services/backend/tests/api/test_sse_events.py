@@ -4,7 +4,7 @@ from pathlib import Path
 
 from dataclasses import dataclass, field
 
-from recruit_agent.agent_runtime.types import LLMInvocationResult, LLMMessage, LLMRequest, LLMResponse
+from recruit_station.agent_runtime.types import LLMInvocationResult, LLMMessage, LLMRequest, LLMResponse
 from agent.integration._helpers import build_assistant_client
 
 

@@ -5,13 +5,13 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from recruit_agent.core.settings import load_settings
-from recruit_agent.models.domain import AgentDefinition
-from recruit_agent.server import create_app
+from recruit_station.core.settings import load_settings
+from recruit_station.models.domain import AgentDefinition
+from recruit_station.server import create_app
 
 
 def test_agents_memory_routes_isolate_file_memory_by_agent_and_scope(tmp_path: Path) -> None:
-    os.environ["RECRUIT_AGENT_DATA_DIR"] = str(tmp_path)
+    os.environ["RECRUIT_STATION_DATA_DIR"] = str(tmp_path)
     load_settings.cache_clear()
     app = create_app()
     client = TestClient(app)
@@ -19,7 +19,7 @@ def test_agents_memory_routes_isolate_file_memory_by_agent_and_scope(tmp_path: P
     try:
         session_factory = app.state.session_factory
         with session_factory() as session:
-            definition = session.query(AgentDefinition).filter_by(definition_key="recruit-agent").one()
+            definition = session.query(AgentDefinition).filter_by(definition_key="recruit-station").one()
 
         store = app.state.container.memory_file_store
         store.write_file(
@@ -77,5 +77,5 @@ def test_agents_memory_routes_isolate_file_memory_by_agent_and_scope(tmp_path: P
         assert {item["summary"] for item in assistant_global.json()} == {"assistant global", "autonomous global"}
     finally:
         client.__exit__(None, None, None)
-        os.environ.pop("RECRUIT_AGENT_DATA_DIR", None)
+        os.environ.pop("RECRUIT_STATION_DATA_DIR", None)
         load_settings.cache_clear()

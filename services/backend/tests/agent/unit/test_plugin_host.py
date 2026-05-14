@@ -4,9 +4,9 @@ import asyncio
 
 from fastapi import APIRouter
 
-from recruit_agent.plugins.host import PluginHost
-from recruit_agent.plugins.loader import install_manifest
-from recruit_agent.capabilities.tools import ToolDefinition
+from recruit_station.plugins.host import PluginHost
+from recruit_station.plugins.loader import install_manifest
+from recruit_station.capabilities.tools import ToolDefinition
 
 
 def test_plugin_host_registers_and_runs_extensions() -> None:

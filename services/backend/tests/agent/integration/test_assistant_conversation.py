@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from recruit_agent.agent_runtime.types import LLMInvocationResult, LLMMessage, LLMRequest, LLMResponse
+from recruit_station.agent_runtime.types import LLMInvocationResult, LLMMessage, LLMRequest, LLMResponse
 
 from ._helpers import build_assistant_client
 

@@ -7,8 +7,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
 const appDir = path.join(repoRoot, "apps", "desktop");
 const electronEntry = path.join(appDir, "dist-electron", "electron", "main.js");
-const rendererOrigin = process.env.RECRUIT_AGENT_DESKTOP_RENDERER_URL ?? "http://127.0.0.1:5174";
-const remoteDebugPort = process.env.RECRUIT_AGENT_ELECTRON_REMOTE_DEBUG_PORT ?? "9222";
+const rendererOrigin = process.env.RECRUIT_STATION_DESKTOP_RENDERER_URL ?? "http://127.0.0.1:5174";
+const remoteDebugPort = process.env.RECRUIT_STATION_ELECTRON_REMOTE_DEBUG_PORT ?? "9222";
 const viteCommand = process.platform === "win32" ? "npm.cmd" : "npm";
 const electronCommand = path.join(
   repoRoot,
@@ -116,8 +116,8 @@ try {
     cwd: appDir,
     env: {
       ...process.env,
-      RECRUIT_AGENT_DESKTOP_RENDERER_URL: rendererOrigin,
-      RECRUIT_AGENT_ELECTRON_REMOTE_DEBUG_PORT: remoteDebugPort,
+      RECRUIT_STATION_DESKTOP_RENDERER_URL: rendererOrigin,
+      RECRUIT_STATION_ELECTRON_REMOTE_DEBUG_PORT: remoteDebugPort,
     },
   });
   await new Promise((resolve, reject) => {

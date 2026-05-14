@@ -5,13 +5,13 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from recruit_agent.core.settings import load_settings
-from recruit_agent.repositories.domain import CandidateApplicationRepository, CandidateRepository, JobDescriptionRepository
-from recruit_agent.server import create_app
+from recruit_station.core.settings import load_settings
+from recruit_station.repositories.domain import CandidateApplicationRepository, CandidateRepository, JobDescriptionRepository
+from recruit_station.server import create_app
 
 
 def test_job_description_crud_routes(tmp_path: Path) -> None:
-    os.environ["RECRUIT_AGENT_DATA_DIR"] = str(tmp_path)
+    os.environ["RECRUIT_STATION_DATA_DIR"] = str(tmp_path)
     load_settings.cache_clear()
     app = create_app()
     client = TestClient(app)
@@ -60,12 +60,12 @@ def test_job_description_crud_routes(tmp_path: Path) -> None:
         assert missing.status_code == 404
     finally:
         client.__exit__(None, None, None)
-        os.environ.pop("RECRUIT_AGENT_DATA_DIR", None)
+        os.environ.pop("RECRUIT_STATION_DATA_DIR", None)
         load_settings.cache_clear()
 
 
 def test_job_description_list_pagination_metadata(tmp_path: Path) -> None:
-    os.environ["RECRUIT_AGENT_DATA_DIR"] = str(tmp_path)
+    os.environ["RECRUIT_STATION_DATA_DIR"] = str(tmp_path)
     load_settings.cache_clear()
     app = create_app()
     client = TestClient(app)
@@ -108,12 +108,12 @@ def test_job_description_list_pagination_metadata(tmp_path: Path) -> None:
         assert filtered.json()["items"][0]["title"] == "销售工程师 2"
     finally:
         client.__exit__(None, None, None)
-        os.environ.pop("RECRUIT_AGENT_DATA_DIR", None)
+        os.environ.pop("RECRUIT_STATION_DATA_DIR", None)
         load_settings.cache_clear()
 
 
 def test_job_description_list_filters_by_applicant_keyword(tmp_path: Path) -> None:
-    os.environ["RECRUIT_AGENT_DATA_DIR"] = str(tmp_path)
+    os.environ["RECRUIT_STATION_DATA_DIR"] = str(tmp_path)
     load_settings.cache_clear()
     app = create_app()
     client = TestClient(app)
@@ -171,12 +171,12 @@ def test_job_description_list_filters_by_applicant_keyword(tmp_path: Path) -> No
         assert by_phone.json()["items"][0]["title"] == "Java 开发工程师"
     finally:
         client.__exit__(None, None, None)
-        os.environ.pop("RECRUIT_AGENT_DATA_DIR", None)
+        os.environ.pop("RECRUIT_STATION_DATA_DIR", None)
         load_settings.cache_clear()
 
 
 def test_job_description_funnel_stats_use_state_machine_milestones(tmp_path: Path) -> None:
-    os.environ["RECRUIT_AGENT_DATA_DIR"] = str(tmp_path)
+    os.environ["RECRUIT_STATION_DATA_DIR"] = str(tmp_path)
     load_settings.cache_clear()
     app = create_app()
     client = TestClient(app)
@@ -233,5 +233,5 @@ def test_job_description_funnel_stats_use_state_machine_milestones(tmp_path: Pat
         assert steps["communicating"]["percent"] == 80.0
     finally:
         client.__exit__(None, None, None)
-        os.environ.pop("RECRUIT_AGENT_DATA_DIR", None)
+        os.environ.pop("RECRUIT_STATION_DATA_DIR", None)
         load_settings.cache_clear()

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from recruit_agent.product_adapters.business_state_projection import project_runtime_business_state
+from recruit_station.product_adapters.business_state_projection import project_runtime_business_state
 
 
 def test_sync_jd_blocked_summary_uses_run_fields() -> None:

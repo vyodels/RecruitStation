@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from recruit_agent.memory.filesystem import MemoryFileStore
-from recruit_agent.memory.writeback import (
+from recruit_station.memory.filesystem import MemoryFileStore
+from recruit_station.memory.writeback import (
     MemoryWritebackPolicy,
     should_start_memory_writeback_job,
     write_stable_memory_facts_to_files,

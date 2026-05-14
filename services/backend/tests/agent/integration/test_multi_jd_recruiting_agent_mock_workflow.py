@@ -7,9 +7,9 @@ from typing import Any
 from sqlalchemy import select
 
 from agent_runtime.fixtures import LLMResponse, ScriptedProvider, ToolCall
-from recruit_agent.agents.autonomous import AutonomousAdapter
-from recruit_agent.core.settings import AppSettings
-from recruit_agent.models.domain import (
+from recruit_station.agents.autonomous import AutonomousAdapter
+from recruit_station.core.settings import AppSettings
+from recruit_station.models.domain import (
     AgentDefinition,
     AgentRun,
     AgentSession,
@@ -17,14 +17,14 @@ from recruit_agent.models.domain import (
     JobDescription,
     JobDescriptionPlatformIdx,
 )
-from recruit_agent.plugins.recruit.toolkit import (
+from recruit_station.plugins.recruit.toolkit import (
     get_candidate_thread,
     get_jd_progress,
     list_pending_candidate_message_syncs,
     upsert_candidate,
     upsert_job_description,
 )
-from recruit_agent.services.container import AppContainer
+from recruit_station.services.container import AppContainer
 
 
 def _build_container(tmp_path: Path, name: str) -> AppContainer:
@@ -218,7 +218,7 @@ def test_multi_jd_autonomous_agent_runs_complete_mock_recruiting_workflow(tmp_pa
                         name="upsert_job_description",
                         arguments={
                             "title": "后端工程师 JD-A",
-                            "company_name": "Recruit Agent Lab",
+                            "company_name": "RecruitStation Lab",
                             "department": "Agent Platform",
                             "location": "上海/远程",
                             "platform": "boss_mock",
@@ -233,7 +233,7 @@ def test_multi_jd_autonomous_agent_runs_complete_mock_recruiting_workflow(tmp_pa
                         name="upsert_job_description",
                         arguments={
                             "title": "数据平台工程师 JD-B",
-                            "company_name": "Recruit Agent Lab",
+                            "company_name": "RecruitStation Lab",
                             "department": "Data Platform",
                             "location": "杭州/远程",
                             "platform": "boss_mock",

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from recruit_agent.agent_runtime.providers import AnthropicProvider, OpenAIProvider, ProviderConfig
-from recruit_agent.agent_runtime.types import LLMMessage, LLMRequest
-from recruit_agent.agent_runtime.providers import ProviderRegistry, UnavailableProvider
+from recruit_station.agent_runtime.providers import AnthropicProvider, OpenAIProvider, ProviderConfig
+from recruit_station.agent_runtime.types import LLMMessage, LLMRequest
+from recruit_station.agent_runtime.providers import ProviderRegistry, UnavailableProvider
 
 
 def test_runtime_provider_registry_uses_new_invoke_contract() -> None:

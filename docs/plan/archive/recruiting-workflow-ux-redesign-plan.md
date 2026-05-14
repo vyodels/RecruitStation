@@ -7,7 +7,7 @@
 > Last reviewed against code: 2026-04-20
 > Legacy path retained: docs/recruiting-workflow-ux-redesign-plan.md
 
-> This document is a product and UX plan for the current Recruit Agent codebase.  
+> This document is a product and UX plan for the current RecruitStation codebase.
 > It is not asking the team to remove the runtime core. The goal is to **hide implementation language behind recruiter-friendly workflows** and make the product feel like a recruiting workspace instead of an agent operations console.
 
 ## Why this document exists
@@ -47,7 +47,7 @@ That mismatch is the main UX problem.
 1. **Implementation concepts leak into the default UI.**
    Terms like `goal`, `trace`, `graph`, `artifact`, `compact`, `operator interaction`, `adaptive runtime`, and `MCP health` appear too early.
 2. **The workflow is split across too many top-level pages.**
-   Candidate work is currently scattered across `Dashboard`, `Workbench`, `Communications`, `Agent IM`, `Evolution`, and `Recruit Agent`.
+   Candidate work is currently scattered across `Dashboard`, `Workbench`, `Communications`, `Agent IM`, `Evolution`, and `RecruitStation`.
 3. **The product starts from configuration and runtime control, not from recruiter work queues.**
    A recruiter should start from “what needs my attention now?”, not “run agent once” or “start adaptive goal”.
 4. **The communication page mixes too many jobs.**
@@ -64,8 +64,8 @@ The following files show why the product feels runtime-first instead of recruite
 - `apps/desktop/src/features/workspace/DesktopWorkspace.tsx` loads almost every domain object at startup and exposes them as top-level tabs.
 - `apps/desktop/src/features/workbench/WorkbenchView.tsx` mixes candidate progress with `run once`, `goal`, `replay`, `diagnostics`, `adaptive runtime`, queue depth, and sync backlog.
 - `apps/desktop/src/features/communications/CommunicationsView.tsx` mixes chat, state transition, assessments, structured facts, and runtime confirmations.
-- `apps/desktop/src/features/recruit-agent/RecruitAgentView.tsx` exposes blueprint, context policy, memory policy, and raw editing surfaces too prominently.
-- `services/backend/src/recruit_agent/api/routers/recruit_agent.py` already contains strong recruiting CRUD endpoints, but they live next to runtime and governance endpoints in the same product surface.
+- `apps/desktop/src/features/recruit-station/RecruitStationView.tsx` exposes blueprint, context policy, memory policy, and raw editing surfaces too prominently.
+- `services/backend/src/recruit_station/api/routers/recruit_station.py` already contains strong recruiting CRUD endpoints, but they live next to runtime and governance endpoints in the same product surface.
 - `apps/desktop/src/styles.css` and `apps/desktop/src/lib/theme.ts` still reflect a dark console visual system, which conflicts with the new desktop design guidelines.
 
 ## Product north star
@@ -99,7 +99,7 @@ The redesign should focus on:
 | Dashboard | Today-facing actionable overview | Start from today’s actionable queues, not abstract metrics |
 | Workbench | Main candidate pipeline workspace | Make the primary unit of work a candidate queue, not runtime operations |
 | Communications | Candidate cockpit for thread-based work | Keep communication, resume, evaluation, and next actions in one recruiter flow |
-| Recruit Agent | Advanced agent configuration and strategy | Move blueprint/context/memory editing out of the default daily workflow |
+| RecruitStation | Advanced agent configuration and strategy | Move blueprint/context/memory editing out of the default daily workflow |
 | Agent IM + Evolution | Advanced review and governance area | Merge non-candidate approvals, skill issues, and evolution artifacts into one advanced governance layer |
 | Settings | Operational/admin settings | Keep as operational and system configuration |
 | — | Import Center (new page or nested module) | Add an explicit Boss/import intake surface |
@@ -114,7 +114,7 @@ Instead:
 - `Dashboard` should behave like a Today view
 - `Workbench` should behave like the main candidate pipeline
 - `Communications` should behave like a candidate cockpit
-- `Recruit Agent` should be treated as advanced configuration
+- `RecruitStation` should be treated as advanced configuration
 - `Agent IM` and `Evolution` should be visually and behaviorally pushed into advanced governance work
 
 `runtime diagnostics`, `MCP registry`, `trace/graph`, and `memory editing` should be nested under advanced areas, not shown as core daily surfaces.
@@ -315,9 +315,9 @@ Keep here:
 
 Remove these from the default recruiter flow.
 
-### 7. Recruit Agent (advanced area)
+### 7. RecruitStation (advanced area)
 
-Today’s `Recruit Agent` page should be reframed as an advanced admin surface.
+Today’s `RecruitStation` page should be reframed as an advanced admin surface.
 
 Keep here:
 
@@ -347,7 +347,7 @@ This guidance is about **descriptions, helper copy, panel titles, empty states, 
 | Talent pool sync record | Export status |
 | Workbench | candidate pipeline workspace |
 | Communications | candidate cockpit / thread workspace |
-| Recruit Agent | advanced agent strategy/configuration area |
+| RecruitStation | advanced agent strategy/configuration area |
 | Agent IM | advanced review center / operator review area |
 
 ## Backend and API alignment recommendations
@@ -650,7 +650,7 @@ This is a good technical baseline, but it still needs product-layer simplificati
 ### Workflow sketch
 
 ```text
-[Recruit Agent Profile / Playbook / Policy]
+[RecruitStation Profile / Playbook / Policy]
 [招聘 Agent 配置 / Playbook / 策略]
                   |
                   v
@@ -710,12 +710,12 @@ The most important clarification is this:
 
 It is a **candidate-scoped operating surface and record aggregate**.
 
-The persistent `Recruit Agent` remains the only long-lived agent identity.
+The persistent `RecruitStation` remains the only long-lived agent identity.
 
 #### Relationship sketch
 
 ```text
-                    [Persistent Recruit Agent]
+                    [Persistent RecruitStation]
                     [持续存在的主招聘 Agent]
                               |
         +---------------------+---------------------+
@@ -731,7 +731,7 @@ The persistent `Recruit Agent` remains the only long-lived agent identity.
 
 **Chinese notes:**
 
-- `Persistent Recruit Agent`：系统里唯一长期存在的主 Agent 身份。
+- `Persistent RecruitStation`：系统里唯一长期存在的主 Agent 身份。
 - `Candidate Thread`：某个候选人的局部工作面，不是独立子 Agent。
 - `local state only`：线程内只允许持有该候选人的沟通、简历、评估、阶段与待办上下文。
 - 主 Agent 可以跨候选人调度工作；单个 Thread 不可以跨候选人推理。
@@ -741,7 +741,7 @@ The persistent `Recruit Agent` remains the only long-lived agent identity.
 
 | Surface | Responsibilities | Must not do |
 |---|---|---|
-| Persistent Recruit Agent | select work, apply recruiting policy, decide next action, orchestrate sourcing/evaluation/outreach, request review, distill reusable learning | store candidate-private facts in global scope, treat runtime diagnostics as the product goal |
+| Persistent RecruitStation | select work, apply recruiting policy, decide next action, orchestrate sourcing/evaluation/outreach, request review, distill reusable learning | store candidate-private facts in global scope, treat runtime diagnostics as the product goal |
 | Candidate Thread | hold one candidate’s communication log, resume facts, stage events, assessments, sync records, pending reviews, and next action context | become an independent long-lived agent, reason across multiple candidates, change global strategy on its own |
 | Recruiter / operator | approve sensitive actions, correct strategy, handle edge cases, decide when to override, calibrate hiring quality | micromanage every low-risk read-only step |
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from recruit_agent.models.domain import (
+from recruit_station.models.domain import (
     AgentRun,
     AgentRuntimeEvent,
     ApprovalItem,

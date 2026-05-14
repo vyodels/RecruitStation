@@ -298,7 +298,7 @@ stealth 代码跑在主 world 时，页面可以通过覆写 `Object.definePrope
 
 ---
 
-## 十五、对 `recruit-agent` 当前选型的映射
+## 十五、对 `recruit-station` 当前选型的映射
 
 | 所需能力 | 主要对应检测点 |
 |---|---|

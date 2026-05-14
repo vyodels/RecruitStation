@@ -1,4 +1,4 @@
-import { getFunnelMilestone } from "@recruit-agent/shared";
+import { getFunnelMilestone } from "@recruit-station/shared";
 import type { ApplicationDateFilter } from "./kanbanUtils";
 import { hasReachedFunnelMilestone, isWithinApplicationDateFilter, type ApplicationViewModel } from "./kanbanUtils";
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from recruit_agent.product_adapters.mcp_resource_context import (
+from recruit_station.product_adapters.mcp_resource_context import (
     build_mcp_resource_context,
     extract_mcp_resource_context_policy,
 )

@@ -22,7 +22,7 @@
 - JD 管理页表格分页与筛选改为通过后端分页接口读取。
 - JD KPI 的状态数量通过后端分页接口的 `total` 读取，不再使用前端假增减。
 - JD 漏斗统计新增 `GET /api/job-descriptions/{id}/funnel-stats`，前端 JD 管理页当前页逐 JD 读取后端 typed stats，不再用前端状态文本 token 归类沟通、面试、Offer。
-- 沟通话术模板迁移到 `.recruit-agent/communication_templates/default.json`，后端提供 `GET /api/communication-templates` 与 `POST /api/communication-templates/{id}/render`；前端不再拼接常用语、发送职位、交换微信、建议话术文案。
+- 沟通话术模板迁移到 `.recruit-station/communication_templates/default.json`，后端提供 `GET /api/communication-templates` 与 `POST /api/communication-templates/{id}/render`；前端不再拼接常用语、发送职位、交换微信、建议话术文案。
 - 简历 artifact 创建时后端写入基础 `structured_facts`，前端投递跟进页不再从在线简历文本正则猜年龄、学历、工作年限。
 - 删除静态 demo 头像资源，头像只允许读取后端 `contactInfo/avatarUrl` 等真实字段，缺失时降级为空或首字。
 - AI 评分、简历评分、状态汇总、时间线等前端兜底假值已收敛为缺失态。
@@ -32,7 +32,7 @@
 ### 1. 话术模板
 
 已落地基础版：
-- 默认模板以资产文件方式存放在 `.recruit-agent/communication_templates/default.json`。
+- 默认模板以资产文件方式存放在 `.recruit-station/communication_templates/default.json`。
 - 后端提供模板列表与按投递记录上下文渲染接口。
 - 前端投递记录跟进页与共享 `ChatInputArea` 只调用后端渲染接口，不再拼接话术正文。
 

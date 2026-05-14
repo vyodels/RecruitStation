@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from recruit_agent.agent_runtime.engine import InteractionEngine, InteractionEngineConfig, transcript_from_checkpoint
-from recruit_agent.agent_runtime.tools import FunctionToolHandler
-from recruit_agent.agent_runtime.transcript import InMemoryTranscript
-from recruit_agent.agent_runtime.types import LLMInvocationResult, LLMMessage, LLMRequest, LLMResponse, TokenUsage, ToolDefinition, ToolSchema, ToolUse
+from recruit_station.agent_runtime.engine import InteractionEngine, InteractionEngineConfig, transcript_from_checkpoint
+from recruit_station.agent_runtime.tools import FunctionToolHandler
+from recruit_station.agent_runtime.transcript import InMemoryTranscript
+from recruit_station.agent_runtime.types import LLMInvocationResult, LLMMessage, LLMRequest, LLMResponse, TokenUsage, ToolDefinition, ToolSchema, ToolUse
 
 
 @dataclass(slots=True)

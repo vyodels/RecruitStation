@@ -12,8 +12,8 @@ __pycache__
 .env
 .npm-cache
 .codex
-recruit-agent.db
-services/backend/recruit-agent.db
+recruit-station.db
+services/backend/recruit-station.db
 services/backend/.mypy_cache
 services/backend/.ruff_cache
 services/backend/data

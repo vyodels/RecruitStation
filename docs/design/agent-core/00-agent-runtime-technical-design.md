@@ -4,7 +4,7 @@
 
 本文是 Agent Runtime 的唯一设计源，合并并取代原 `agent-runtime-protocol.md`。后续 runtime 架构、协议边界、核心类型、实施步骤都在本文维护，避免 design/protocol 双文档漂移。
 
-本文目标是为 `/Users/vyodels/AgentProjects/recruit-agent` 的 agent 重构提供可实现方案。方案参考 Claude Code 和 Codex 的设计思想，但不直接复制任一方协议：
+本文目标是为 `/Users/vyodels/AgentProjects/recruit-station` 的 agent 重构提供可实现方案。方案参考 Claude Code 和 Codex 的设计思想，但不直接复制任一方协议：
 
 - `InteractionEngine` 采用 Claude Code `QueryEngine` 的 conversation-scoped engine 思想，不做字段级复制。
 - Turn 状态机、active turn、history replace、tool/item lifecycle 参考 Codex。
@@ -239,7 +239,7 @@ RuntimeBridge {
 }
 ```
 
-这些字段是实现桥，不是模型协议的一部分。后续如果 recruit-agent 已有存储、审批、事件总线能力，应在 adapter 层接入，不要把现有 DB record 反向提升为核心 runtime 类型。
+这些字段是实现桥，不是模型协议的一部分。后续如果 recruit-station 已有存储、审批、事件总线能力，应在 adapter 层接入，不要把现有 DB record 反向提升为核心 runtime 类型。
 
 不放入 Config 的内容：
 
@@ -687,7 +687,7 @@ ToolResult {
 
 `ToolCallState` 是内部观测和 Transcript 恢复字段，不是对外核心 API，也不是 Claude Code / Codex 的原样类型。对外 tool 生命周期通过 `ToolEvent` 表达。
 
-recruit-agent 现有工具字段需要落到 `ToolDefinition.metadata` 或 `ToolSchema` policy 上，避免把站点语义写入 core runtime：
+recruit-station 现有工具字段需要落到 `ToolDefinition.metadata` 或 `ToolSchema` policy 上，避免把站点语义写入 core runtime：
 
 ```text
 ToolMetadata {
@@ -852,7 +852,7 @@ Codex
   -> agent 管理才使用 spawn_agent/send_input/wait_agent 等 function tools
 ```
 
-recruit-agent follow 这个边界：runtime 只认识 `ToolDefinition`、`ToolCall`、`ToolResult`、`LLMMessage`、`ConversationHistory`、`Transcript` 和 `InteractionOutput`。skill、memory、MCP resource、业务 context 都由 adapter 在 Turn 前选择并组装成 messages/context，或作为普通 tool/resource result 返回；runtime 不定义它们的专用抽象。
+recruit-station follow 这个边界：runtime 只认识 `ToolDefinition`、`ToolCall`、`ToolResult`、`LLMMessage`、`ConversationHistory`、`Transcript` 和 `InteractionOutput`。skill、memory、MCP resource、业务 context 都由 adapter 在 Turn 前选择并组装成 messages/context，或作为普通 tool/resource result 返回；runtime 不定义它们的专用抽象。
 
 ```text
 skill
@@ -877,7 +877,7 @@ business context
   -> runtime 不认识业务 context 类型
 ```
 
-Runtime 不定义 skill、memory、MCP resource、business context 专用 primitive。Claude Code 的 forked skill/command 是外层调用策略；Codex 的 skill 是 input/injection 机制；二者都不是 runtime 内的 skill execution branch。recruit-agent 不保留通用 skill 调用工具。
+Runtime 不定义 skill、memory、MCP resource、business context 专用 primitive。Claude Code 的 forked skill/command 是外层调用策略；Codex 的 skill 是 input/injection 机制；二者都不是 runtime 内的 skill execution branch。recruit-station 不保留通用 skill 调用工具。
 
 ### 13.1 Context 与 memory 管理
 
@@ -958,7 +958,7 @@ ToolUse(name = "agent")
 
 Subagent 内部可以有自己的 Turn/ConversationHistory。父 Turn 默认只接收 ToolResult，不自动并入 subagent 全部内部 history。
 
-第一版 `agent` 工具覆盖的是短任务 / ephemeral subagent。recruit-agent 现有 Autonomous 长运行 run、checkpoint、approval 模型属于 product-level adapter，可以基于 `InteractionEngine` 实现，但不要被简化成一次普通 ToolCall 的内部细节。
+第一版 `agent` 工具覆盖的是短任务 / ephemeral subagent。recruit-station 现有 Autonomous 长运行 run、checkpoint、approval 模型属于 product-level adapter，可以基于 `InteractionEngine` 实现，但不要被简化成一次普通 ToolCall 的内部细节。
 
 ## 15. InteractionOutput
 
@@ -1314,7 +1314,7 @@ ErrorPolicy {
 - mid-turn input 经过 acceptance/filtering 后，才进入下一次 LLMRequest。
 - pending permission / tool state 不会被 compact 或 resume 丢失。
 
-## 20. recruit-agent 现有模型映射
+## 20. recruit-station 现有模型映射
 
 核心 runtime 类型不要直接等同现有 persistence record。迁移时按 adapter 映射：
 

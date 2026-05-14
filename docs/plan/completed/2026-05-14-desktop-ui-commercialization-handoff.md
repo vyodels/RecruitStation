@@ -1,7 +1,7 @@
 # Desktop UI Commercialization And Component Reuse Handoff
 
 Date: 2026-05-14
-Repo: `/Users/didi/AgentProjects/recruit-agent`
+Repo: `/Users/didi/AgentProjects/recruit-station`
 
 ## Current State
 
@@ -86,7 +86,7 @@ The settings surface now includes recruiter identity fields used by candidate co
 
 - frontend settings contracts in `apps/desktop/src/lib/types.ts`
 - API client updates in `apps/desktop/src/lib/api.ts`
-- backend settings schema/router/migration updates under `services/backend/src/recruit_agent/**`
+- backend settings schema/router/migration updates under `services/backend/src/recruit_station/**`
 
 ## Validation Already Run
 

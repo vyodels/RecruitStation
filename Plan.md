@@ -1,8 +1,8 @@
-# Recruit Agent 重构 Plan
+# RecruitStation 重构 Plan
 
 ## 目标
 
-把当前项目从“早期执行控制台”收束为“招聘场景优先的 `Recruit Agent`”。
+把当前项目从“早期执行控制台”收束为“招聘场景优先的 `RecruitStation`”。
 
 系统现在已经收敛为双内置 agent 形态：`Assistant` 负责桌面内联协作，`Autonomous` 负责后台目标执行；用户面入口收敛为 `home / candidates / settings` 加 `Agents` overlay，不再以通用 workflow/runtime 页面主导信息架构。
 
@@ -10,7 +10,7 @@
 
 新的产品主语是：
 
-- `Recruit Agent`
+- `RecruitStation`
 - 候选人进度管理
 - 候选人沟通与人工确认
 - 招聘 agent 的 workflow、memory、skill、自学习与演进治理
@@ -45,7 +45,7 @@
 
 ## 顶层对象模型
 
-### 1. RecruitAgentProfile
+### 1. RecruitStationProfile
 
 招聘 agent 的外露配置对象，包含：
 
@@ -61,7 +61,7 @@
 - 默认 workflow 绑定
 - 默认 dashboard 配置
 
-### 2. RecruitAgentWorkflow
+### 2. RecruitStationWorkflow
 
 招聘 agent 的内部执行编排图。
 
@@ -386,12 +386,12 @@ UI 形态：
 ### Phase 1: Product Direction Reset
 
 - 重写 README 与 Plan
-- 把产品叙事改为 `Recruit Agent`
+- 把产品叙事改为 `RecruitStation`
 - 调整 sidebar 和页面命名
 
-### Phase 2: Recruit Agent Core Config
+### Phase 2: RecruitStation Core Config
 
-- 新增 `RecruitAgentProfile`
+- 新增 `RecruitStationProfile`
 - 新增 agent 配置 API
 - 外露 agent 身份、prompt、职责、边界、压缩策略
 
@@ -457,7 +457,7 @@ UI 形态：
   - `playbook_patch`
   - `workflow_patch`
 - 演进产物创建和更新时增加了必填 schema 校验，不再接受任意形状的弱约束 JSON
-- `Recruit Agent` 的 playbook 编辑已从纯 JSON 文本框提升为结构化可视编辑：
+- `RecruitStation` 的 playbook 编辑已从纯 JSON 文本框提升为结构化可视编辑：
   - 可直接编辑阶段组
   - 可直接编辑阶段 key / label
   - 可直接编辑多轮面试默认轮次
@@ -470,17 +470,17 @@ UI 形态：
   - 评审结论
   - 同步记录
 
-这部分同样属于当前这一轮 `Recruit Agent` 收口范围，已完成，不再额外拆成新 phase。
+这部分同样属于当前这一轮 `RecruitStation` 收口范围，已完成，不再额外拆成新 phase。
 
 ## 暂缓执行项
 
 - 内部工程标识整体迁移暂缓：
-  - Python 包路径 `recruit_agent`
-  - 仓库目录名 `recruit-agent`
-  - npm workspace 包名 `@recruit-agent/shared`
-- 这类改动属于工程级迁移，不再计入当前这轮 `Recruit Agent` 产品收口任务。
+  - Python 包路径 `recruit_station`
+  - 仓库目录名 `recruit-station`
+  - npm workspace 包名 `@recruit-station/shared`
+- 这类改动属于工程级迁移，不再计入当前这轮 `RecruitStation` 产品收口任务。
 - 当前要求是：
-  - 对外 CLI、环境变量前缀、桌面启动入口、API 路径、产品文案已经统一到 `Recruit Agent`
+  - 对外 CLI、环境变量前缀、桌面启动入口、API 路径、产品文案已经统一到 `RecruitStation`
   - 内部实现层路径和仓库物理命名暂时保持现状，后续如需统一再单独开一轮迁移
 
 ## 后续 Todo
@@ -621,7 +621,7 @@ UI 形态：
 
 ## 下一轮专项计划：Runtime 与 Context
 
-这一轮不再继续扩散产品范围，而是围绕 `Recruit Agent` 的长期运行能力，补齐 `runtime` 和 `context` 两条底层主线。
+这一轮不再继续扩散产品范围，而是围绕 `RecruitStation` 的长期运行能力，补齐 `runtime` 和 `context` 两条底层主线。
 
 ### 2026-04-15 实施进度
 
@@ -632,12 +632,12 @@ UI 形态：
 - `waiting_human` 已生成 checkpoint，审批后会回到原 run 恢复，不再只是逻辑层面的“重新排队”
 - 每次执行前都会生成 `context_manifest`，并写入 `AgentRun.context_manifest`
 - `Context Assembler Policy` 已支持“代码硬边界 + 用户可配权重/预算 + 可选 LLM rerank”的三层模型
-- `Context Policy` 配置页已放入 `Recruit Agent` 内部二级页，而不是单独新增功能区
+- `Context Policy` 配置页已放入 `RecruitStation` 内部二级页，而不是单独新增功能区
 - 已开放运行态查询接口：
-  - `/api/recruit-agent/runtime/session`
-  - `/api/recruit-agent/runtime/runs`
-  - `/api/recruit-agent/runtime/checkpoints`
-  - `/api/recruit-agent/runtime/events`
+  - `/api/recruit-station/runtime/session`
+  - `/api/recruit-station/runtime/runs`
+  - `/api/recruit-station/runtime/checkpoints`
+  - `/api/recruit-station/runtime/events`
 - 桌面端设置页已支持编辑并持久化平台并发限制
 - 启动恢复已补齐到 runtime 层：
   - 程序异常关闭后，重启会立即回收遗留的 running queue task，而不再等待默认 stale 窗口
@@ -812,7 +812,7 @@ UI 形态：
 
 完成当前波次后，至少满足：
 
-- 顶层产品表述已切换为 `Recruit Agent`
+- 顶层产品表述已切换为 `RecruitStation`
 - 招聘 agent 配置可查看、可修改
 - Candidate Memory 严格按候选人隔离
 - Job / JD Memory 严格按 JD 隔离
@@ -829,7 +829,7 @@ UI 形态：
 
 这一轮不是继续把系统做成“更通用的 runtime”，而是：
 
-- 用现有执行内核服务 `Recruit Agent`
+- 用现有执行内核服务 `RecruitStation`
 - 围绕招聘场景把 agent、memory、skill、候选人进度、沟通确认、演进治理做完整
 - 未来如需增加其他内置 agent，再在这一套 agent-first、场景-first 的架构上扩展
 

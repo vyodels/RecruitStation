@@ -31,7 +31,7 @@
     ],
     "notes": [
       "boss-like 页面只复用招聘站点常见的信息架构与交互密度，不向 runtime 注入平台私有逻辑。",
-      "host 仅作为 mock fixture 命名空间，不代表 recruit-agent runtime 对特定招聘平台做分支。"
+      "host 仅作为 mock fixture 命名空间，不代表 recruit-station runtime 对特定招聘平台做分支。"
     ]
   },
   "stages": [

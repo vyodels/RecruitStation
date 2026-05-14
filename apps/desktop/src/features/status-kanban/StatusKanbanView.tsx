@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import type { ApplicationTransitionPayload, RecruitmentStateMachine, StateNode } from "@recruit-agent/shared";
+import type { ApplicationTransitionPayload, RecruitmentStateMachine, StateNode } from "@recruit-station/shared";
 import { PageToolbar, PageToolbarGroup, StatusBadge, ToolbarField, ToolbarInput, ToolbarRefreshButton, ToolbarSelect } from "../../components";
 import {
   CandidateDateRangeControl,

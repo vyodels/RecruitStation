@@ -3,14 +3,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from recruit_agent.core.settings import AppSettings
-from recruit_agent.db.session import create_engine_from_settings, create_session_factory, initialize_database
-from recruit_agent.models.domain import AgentLearning, EnvironmentSnapshot, ExecutionEpisode, ExecutionPlan, TaskSpec
-from recruit_agent.plugins.host import PluginHost
+from recruit_station.core.settings import AppSettings
+from recruit_station.db.session import create_engine_from_settings, create_session_factory, initialize_database
+from recruit_station.models.domain import AgentLearning, EnvironmentSnapshot, ExecutionEpisode, ExecutionPlan, TaskSpec
+from recruit_station.plugins.host import PluginHost
 from agent_runtime.fixtures import LLMResponse, ToolCall
 from agent_runtime.fixtures import ScriptedProvider
-from recruit_agent.capabilities.tools import ToolDefinition, ToolRegistry
-from recruit_agent.services.scene_context import SceneContextService
+from recruit_station.capabilities.tools import ToolDefinition, ToolRegistry
+from recruit_station.services.scene_context import SceneContextService
 
 
 def _session_factory(tmp_path: Path):

@@ -2,7 +2,7 @@
 
 **Status**: Draft  
 **Date**: 2026-04-22  
-**Background**: Based on the current review of internal Agent runtime concepts in `recruit-agent`, and a terminology comparison against Anthropic Claude API / Managed Agents, Claude Code, OpenAI Agents, and Codex.
+**Background**: Based on the current review of internal Agent runtime concepts in `recruit-station`, and a terminology comparison against Anthropic Claude API / Managed Agents, Claude Code, OpenAI Agents, and Codex.
 
 ---
 

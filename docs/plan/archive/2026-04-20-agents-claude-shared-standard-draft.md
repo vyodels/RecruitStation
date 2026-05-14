@@ -38,7 +38,7 @@
 
 ## 3. 产品方向
 
-仓库当前服务的产品是 **Recruit Agent**，一个 local-first 的招聘工作台。
+仓库当前服务的产品是 **RecruitStation**，一个 local-first 的招聘工作台。
 
 当前产品主线：
 
@@ -81,7 +81,7 @@
 
 ### 5.2 Prompt / Runtime / Tool 边界
 
-- 面向 LLM 的自然语言行为约束默认放在 `services/backend/src/recruit_agent/prompts/`
+- 面向 LLM 的自然语言行为约束默认放在 `services/backend/src/recruit_station/prompts/`
 - 优先通过 prompt、结构化上下文、tool contract、skill 修复能力缺口，而不是往 core runtime 里补业务硬编码
 - 不在 core runtime / agent 主路径里硬编码站点规则、页面词表、选择器或一次性 workflow
 
@@ -121,7 +121,7 @@ cd services/backend
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .[dev]
-uvicorn recruit_agent.server:create_app --reload --factory
+uvicorn recruit_station.server:create_app --reload --factory
 ```
 
 ### 测试

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from recruit_agent.asset_paths import prompt_path
-from recruit_agent.services.scene_templates import infer_source_surface, source_surface_markers
+from recruit_station.asset_paths import prompt_path
+from recruit_station.services.scene_templates import infer_source_surface, source_surface_markers
 
 
 def test_runtime_task_compiler_prompt_mentions_scene_contract_and_skill_distillation_for_agent_tasks() -> None:

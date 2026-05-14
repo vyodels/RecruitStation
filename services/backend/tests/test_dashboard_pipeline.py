@@ -5,13 +5,13 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from recruit_agent.core.settings import load_settings
-from recruit_agent.repositories.domain import CandidateApplicationRepository, CandidateRepository, JobDescriptionRepository
-from recruit_agent.server import create_app
+from recruit_station.core.settings import load_settings
+from recruit_station.repositories.domain import CandidateApplicationRepository, CandidateRepository, JobDescriptionRepository
+from recruit_station.server import create_app
 
 
 def test_dashboard_pipeline_uses_cumulative_funnel_counts(tmp_path: Path) -> None:
-    os.environ["RECRUIT_AGENT_DATA_DIR"] = str(tmp_path)
+    os.environ["RECRUIT_STATION_DATA_DIR"] = str(tmp_path)
     load_settings.cache_clear()
     app = create_app()
     client = TestClient(app)
@@ -66,5 +66,5 @@ def test_dashboard_pipeline_uses_cumulative_funnel_counts(tmp_path: Path) -> Non
         }
     finally:
         client.__exit__(None, None, None)
-        os.environ.pop("RECRUIT_AGENT_DATA_DIR", None)
+        os.environ.pop("RECRUIT_STATION_DATA_DIR", None)
         load_settings.cache_clear()

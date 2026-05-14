@@ -6,7 +6,7 @@ from pathlib import Path
 
 from agent_runtime.fixtures import LLMResponse, ToolCall
 from agent_runtime.fixtures import ScriptedProvider
-from recruit_agent.capabilities.tools import ToolDefinition, ToolRegistry, register_core_tools
+from recruit_station.capabilities.tools import ToolDefinition, ToolRegistry, register_core_tools
 
 from ._helpers import build_assistant_client
 

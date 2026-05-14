@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import type { ApplicationTransitionPayload, RecruitmentStateMachine } from "@recruit-agent/shared";
+import type { ApplicationTransitionPayload, RecruitmentStateMachine } from "@recruit-station/shared";
 import { FormSelect, FormTextarea, StatusBadge } from "../../components";
 import { useI18n } from "../../lib/i18n";
 import { applicationScopedLabel, type ApplicationViewModel } from "./kanbanUtils";

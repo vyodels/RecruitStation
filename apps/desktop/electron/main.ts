@@ -8,11 +8,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isDev = !app.isPackaged;
-const backendOrigin = (process.env.RECRUIT_AGENT_BACKEND_URL ?? "http://127.0.0.1:8741").replace(/\/$/, "");
+const backendOrigin = (process.env.RECRUIT_STATION_BACKEND_URL ?? "http://127.0.0.1:8741").replace(/\/$/, "");
 const backendHealthUrl = `${backendOrigin}/health`;
-const backendStartupTimeoutMs = Number(process.env.RECRUIT_AGENT_BACKEND_STARTUP_TIMEOUT_MS ?? 20_000);
-const electronRemoteDebugPort = process.env.RECRUIT_AGENT_ELECTRON_REMOTE_DEBUG_PORT ?? "9222";
-const rendererOrigin = (process.env.RECRUIT_AGENT_DESKTOP_RENDERER_URL ?? "http://localhost:5174").replace(/\/$/, "");
+const backendStartupTimeoutMs = Number(process.env.RECRUIT_STATION_BACKEND_STARTUP_TIMEOUT_MS ?? 20_000);
+const electronRemoteDebugPort = process.env.RECRUIT_STATION_ELECTRON_REMOTE_DEBUG_PORT ?? "9222";
+const rendererOrigin = (process.env.RECRUIT_STATION_DESKTOP_RENDERER_URL ?? "http://localhost:5174").replace(/\/$/, "");
 let backendProcess: ChildProcessWithoutNullStreams | undefined;
 
 if (isDev) {
@@ -25,7 +25,7 @@ function createWindow(): BrowserWindow {
     height: 920,
     minWidth: 1180,
     minHeight: 760,
-    title: "Recruit Agent",
+    title: "RecruitStation",
     show: false,
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
@@ -42,7 +42,7 @@ function buildBootHtml(title: string, detail: string): string {
     <html>
       <body style="margin:0;display:grid;place-items:center;background:#070b16;color:#eef3ff;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif">
         <main style="max-width:560px;padding:32px 36px;border:1px solid rgba(255,255,255,0.12);border-radius:24px;background:rgba(255,255,255,0.04)">
-          <div style="font-size:12px;letter-spacing:0.18em;text-transform:uppercase;color:rgba(238,243,255,0.56)">Recruit Agent</div>
+          <div style="font-size:12px;letter-spacing:0.18em;text-transform:uppercase;color:rgba(238,243,255,0.56)">RecruitStation</div>
           <h1 style="margin:12px 0 10px;font-size:28px;line-height:1.1">${escapedTitle}</h1>
           <p style="margin:0;color:rgba(238,243,255,0.74);line-height:1.6">${escapedDetail}</p>
         </main>
@@ -59,7 +59,7 @@ async function showBootState(window: BrowserWindow, title: string, detail: strin
 }
 
 function resolveBackendCommand(): string[] {
-  const backendCommand = process.env.RECRUIT_AGENT_BACKEND_CMD;
+  const backendCommand = process.env.RECRUIT_STATION_BACKEND_CMD;
   if (backendCommand) {
     return backendCommand.split(" ");
   }
@@ -73,16 +73,16 @@ function resolveBackendCommand(): string[] {
 
   const preferredPython = resolveConfiguredPythonExecutable()
     ?? resolvePythonExecutable();
-  return [preferredPython, "-m", "recruit_agent.core.app"];
+  return [preferredPython, "-m", "recruit_station.core.app"];
 }
 
 function resolvePackagedBackendBinary(): string | null {
-  const bundledBackendPath = process.env.RECRUIT_AGENT_BACKEND_BUNDLED_PATH;
+  const bundledBackendPath = process.env.RECRUIT_STATION_BACKEND_BUNDLED_PATH;
   if (bundledBackendPath) {
     return bundledBackendPath;
   }
 
-  const executableName = process.platform === "win32" ? "recruit-agent-backend.exe" : "recruit-agent-backend";
+  const executableName = process.platform === "win32" ? "recruit-station-backend.exe" : "recruit-station-backend";
   return path.join(process.resourcesPath, "backend-dist", executableName);
 }
 
@@ -91,7 +91,7 @@ function resolveBackendCwd(): string {
     return path.resolve(__dirname, "../../../../services/backend/src");
   }
 
-  const backendCwd = process.env.RECRUIT_AGENT_BACKEND_CWD;
+  const backendCwd = process.env.RECRUIT_STATION_BACKEND_CWD;
   if (backendCwd) {
     return backendCwd;
   }
@@ -112,7 +112,7 @@ function resolvePythonExecutable(): string {
 
 function resolveConfiguredPythonExecutable(): string | undefined {
   const configured = [
-    process.env.RECRUIT_AGENT_PYTHON,
+    process.env.RECRUIT_STATION_PYTHON,
     process.env.PYTHON3,
     process.env.PYTHON,
   ].find((candidate): candidate is string => Boolean(candidate?.trim()));
@@ -139,7 +139,7 @@ function startBackend(): Promise<void> {
       cwd,
       env: {
         ...process.env,
-        RECRUIT_AGENT_DESKTOP_MODE: "1",
+        RECRUIT_STATION_DESKTOP_MODE: "1",
       },
     });
     backendProcess = child;

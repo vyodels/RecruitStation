@@ -1,8 +1,8 @@
-# Recruit Agent Runtime 与 Hermes 对照说明
+# RecruitStation Runtime 与 Hermes 对照说明
 
 更新时间：2026-04-15
 
-这份文档用于记录当前 `Recruit Agent` runtime 的实现状态、运行模型、memory/context 管理方式，以及它与 `Hermes Agent` 的差异，方便后续回看和继续演进。
+这份文档用于记录当前 `RecruitStation` runtime 的实现状态、运行模型、memory/context 管理方式，以及它与 `Hermes Agent` 的差异，方便后续回看和继续演进。
 
 ## 当前 Runtime 处于什么阶段
 
@@ -34,7 +34,7 @@
 
 ### 1. 主 Agent
 
-系统中有一个主 `Recruit Agent`，它不是每次执行时临时创建的，而是长期存在的顶层主体。它持有：
+系统中有一个主 `RecruitStation`，它不是每次执行时临时创建的，而是长期存在的顶层主体。它持有：
 
 - profile / role / prompt
 - playbook
@@ -213,7 +213,7 @@ Hermes 更像通用 agent 平台，公开能力更偏向：
 ### 一句话比较
 
 - Hermes：通用常驻 agent OS
-- 当前项目：带持久化 runtime 的 Recruit Agent 执行系统
+- 当前项目：带持久化 runtime 的 RecruitStation 执行系统
 
 ## 当前最大缺口
 
@@ -230,7 +230,7 @@ Hermes 更像通用 agent 平台，公开能力更偏向：
 
 当前 runtime 可以定义为：
 
-**一个持久化的主 Recruit Agent，下面挂很多按候选人隔离、按 run 执行、可 checkpoint 恢复的执行记录。**
+**一个持久化的主 RecruitStation，下面挂很多按候选人隔离、按 run 执行、可 checkpoint 恢复的执行记录。**
 
 它已经明显超过普通 workflow 执行器，但还没有发展成 Hermes 那种通用常驻 agent 平台。
 
@@ -238,12 +238,12 @@ Hermes 更像通用 agent 平台，公开能力更偏向：
 
 本地实现参考：
 
-- [services/backend/src/recruit_agent/services/runtime_control.py](/Users/didi/AgentProjects/recruit-agent/services/backend/src/recruit_agent/services/runtime_control.py)
-- [services/backend/src/recruit_agent/services/agent.py](/Users/didi/AgentProjects/recruit-agent/services/backend/src/recruit_agent/services/agent.py)
-- [services/backend/src/recruit_agent/services/context_assembler.py](/Users/didi/AgentProjects/recruit-agent/services/backend/src/recruit_agent/services/context_assembler.py)
-- [services/backend/src/recruit_agent/services/recruit_agent.py](/Users/didi/AgentProjects/recruit-agent/services/backend/src/recruit_agent/services/recruit_agent.py)
-- [services/backend/src/recruit_agent/models/domain.py](/Users/didi/AgentProjects/recruit-agent/services/backend/src/recruit_agent/models/domain.py)
-- [Plan.md](/Users/didi/AgentProjects/recruit-agent/Plan.md)
+- [services/backend/src/recruit_station/services/runtime_control.py](/Users/didi/AgentProjects/recruit-station/services/backend/src/recruit_station/services/runtime_control.py)
+- [services/backend/src/recruit_station/services/agent.py](/Users/didi/AgentProjects/recruit-station/services/backend/src/recruit_station/services/agent.py)
+- [services/backend/src/recruit_station/services/context_assembler.py](/Users/didi/AgentProjects/recruit-station/services/backend/src/recruit_station/services/context_assembler.py)
+- [services/backend/src/recruit_station/services/recruit_station.py](/Users/didi/AgentProjects/recruit-station/services/backend/src/recruit_station/services/recruit_station.py)
+- [services/backend/src/recruit_station/models/domain.py](/Users/didi/AgentProjects/recruit-station/services/backend/src/recruit_station/models/domain.py)
+- [Plan.md](/Users/didi/AgentProjects/recruit-station/Plan.md)
 
 Hermes 官方参考：
 

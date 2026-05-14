@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from recruit_agent.models.domain import Skill
-from recruit_agent.skills.context import build_skill_context_injections
+from recruit_station.models.domain import Skill
+from recruit_station.skills.context import build_skill_context_injections
 
 
 def test_build_skill_context_injections_uses_active_and_trial_skills_only() -> None:

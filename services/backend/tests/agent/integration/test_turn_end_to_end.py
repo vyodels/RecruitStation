@@ -5,14 +5,14 @@ from pathlib import Path
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from recruit_agent.agents.autonomous import AutonomousAdapter
-from recruit_agent.core.settings import AppSettings
-from recruit_agent.db.session import create_engine_from_settings, create_session_factory, initialize_database
-from recruit_agent.models.domain import AgentRun, AgentSession, AgentTurnRecord, Candidate, AgentDefinition
-from recruit_agent.plugins.host import PluginHost
+from recruit_station.agents.autonomous import AutonomousAdapter
+from recruit_station.core.settings import AppSettings
+from recruit_station.db.session import create_engine_from_settings, create_session_factory, initialize_database
+from recruit_station.models.domain import AgentRun, AgentSession, AgentTurnRecord, Candidate, AgentDefinition
+from recruit_station.plugins.host import PluginHost
 from agent_runtime.fixtures import LLMResponse
 from agent_runtime.fixtures import ScriptedProvider
-from recruit_agent.capabilities.tools import ToolRegistry, register_core_tools
+from recruit_station.capabilities.tools import ToolRegistry, register_core_tools
 
 
 def _make_session(tmp_path: Path) -> Session:

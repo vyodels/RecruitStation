@@ -7,7 +7,7 @@
 > Last reviewed against code: 2026-04-20
 > Legacy path retained: docs/agent-v2-design-summary.md
 
-> 本文档是 recruit-agent Agent 系统升级的**设计总览**。
+> 本文档是 recruit-station Agent 系统升级的**设计总览**。
 > 目标：把当前规则驱动、实现耦合的 agent 基础设施，升级为两个真正自主、可长期运行、自进化的 agent —
 > **Autonomous Agent**（自主招聘）与 **Assistant Agent**（对话助手）。
 >
@@ -420,7 +420,7 @@ register_router               → 暴露场景专属 API router
 ### 6.3 可用性控制
 
 ```
-base level：       AgentProfile.capability_profile（唯一权威能力配置，当前招聘实现落在 RecruitAgentProfile）
+base level：       AgentProfile.capability_profile（唯一权威能力配置，当前招聘实现落在 RecruitStationProfile）
 AutonomousAssembly / AssistantAssembly 覆盖：   可添加 / 禁用 / 缩小范围
 runtime health：    circuit breaker / auth / rate limit 先过滤
 GuardPolicy：       最终再做一次白名单/黑名单校验
@@ -616,7 +616,7 @@ M8（持续）：可观测性 + SRE
 | `EvolutionArtifact`                               | 保留，改造为 EvolutionQueue 的底层存储                         |
 | `SqlAlchemyQueue`                                 | 保留；外面包 Heartbeat daemon                             |
 | `SerialScheduler`                                 | 保留；Heartbeat 调用它                                    |
-| `RecruitAgentProfile.prompt_config`               | 保留 base；新增 `JobAssembly` 表存 overlay                 |
+| `RecruitStationProfile.prompt_config`               | 保留 base；新增 `JobAssembly` 表存 overlay                 |
 
 
 **方针**：优先扩现有表；只有真正不存在同类存储时才新增新表。对 `agent_runs` / `approval_items` / `agent_runtime_events` / memory 表，不再引入平行替代物。

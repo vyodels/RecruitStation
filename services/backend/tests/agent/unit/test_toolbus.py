@@ -3,14 +3,14 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from recruit_agent.capabilities.tools import ToolDefinition, ToolRegistry, build_delegate_scene_context_tool, is_scene_context_tool, register_core_tools
-from recruit_agent.core.settings import AppSettings
-from recruit_agent.db.session import create_engine_from_settings, create_session_factory, initialize_database
-from recruit_agent.models.domain import Candidate
-from recruit_agent.plugins.host import PluginHost
-from recruit_agent.plugins.recruit.manifest import RecruitPluginManifest
-from recruit_agent.memory.filesystem import MemoryFileStore
-from recruit_agent.services.container import (
+from recruit_station.capabilities.tools import ToolDefinition, ToolRegistry, build_delegate_scene_context_tool, is_scene_context_tool, register_core_tools
+from recruit_station.core.settings import AppSettings
+from recruit_station.db.session import create_engine_from_settings, create_session_factory, initialize_database
+from recruit_station.models.domain import Candidate
+from recruit_station.plugins.host import PluginHost
+from recruit_station.plugins.recruit.manifest import RecruitPluginManifest
+from recruit_station.memory.filesystem import MemoryFileStore
+from recruit_station.services.container import (
     _build_delete_memory_file_handler,
     _build_list_memory_files_handler,
     _build_read_memory_file_handler,

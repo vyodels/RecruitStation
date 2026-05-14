@@ -1,7 +1,7 @@
 # Agent 上下文与记忆架构设计参考
 
 > 本文档汇总 Claude Code 在 coding 场景中的上下文管理、三层记忆架构、记忆检索机制、
-> LLM API 协议设计等关键设计点，作为 recruit-agent 中 Autonomous Agent / Assistant Agent
+> LLM API 协议设计等关键设计点，作为 recruit-station 中 Autonomous Agent / Assistant Agent
 > 设计的参考资料。
 
 > **术语约定**：文中 **Observation** 指一次 turn 从 DB / 外部系统实时拉取的"真实世界快照"
@@ -42,7 +42,7 @@
   - [两家的关键差异](#两家的关键差异)
   - [容易漏掉的几个东西](#容易漏掉的几个东西)
   - [System vs User 的设计决策](#system-vs-user-的设计决策)
-- [Part 7：映射到 recruit-agent 的 Autonomous Agent 设计](#part-7映射到-recruit-agent-的-loop-agent-设计)
+- [Part 7：映射到 recruit-station 的 Autonomous Agent 设计](#part-7映射到-recruit-station-的-loop-agent-设计)
 - [Part 8：术语表与 cache_control 深入](#part-8术语表与-cache_control-深入)
   - [术语：Turn / Run / Session](#术语turn--run--session)
   - [cache_control 深入：标记 ≠ 命令](#cache_control-深入标记--命令)
@@ -374,8 +374,8 @@ session.jsonl (中期持久化)
       ├── MEMORY.md                       ← 索引（永远加载）
       └── *.md                            ← 单个记忆文件（按需读）
 
-  示例（recruit-agent 项目）:
-    /Users/didi/.claude/projects/-Users-didi-AgentProjects-recruit-agent/memory/
+  示例（recruit-station 项目）:
+    /Users/didi/.claude/projects/-Users-didi-AgentProjects-recruit-station/memory/
     ├── MEMORY.md                         ← 索引文件
     └── feedback_simple_responses.md      ← 单个记忆文件
 
@@ -404,9 +404,9 @@ session.jsonl (中期持久化)
 项目路径转 encoded-path 时，`/` 替换为 `-`：
 
 ```
-/Users/didi/AgentProjects/recruit-agent
+/Users/didi/AgentProjects/recruit-station
         ↓
--Users-didi-AgentProjects-recruit-agent
+-Users-didi-AgentProjects-recruit-station
 ```
 
 ---
@@ -936,7 +936,7 @@ assistant 消息有 tool_use → 下一条必须是 tool_result
 
 ---
 
-# Part 7：映射到 recruit-agent 的 Autonomous Agent 设计
+# Part 7：映射到 recruit-station 的 Autonomous Agent 设计
 
 ## 各层对应关系
 

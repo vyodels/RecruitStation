@@ -8,14 +8,14 @@ BACKEND_ROOT = Path(__file__).resolve().parents[3]
 
 def test_legacy_runtime_paths_are_removed() -> None:
     missing_targets = [
-        BACKEND_ROOT / "src" / "recruit_agent" / "runtime" / "agent_loop.py",
-        BACKEND_ROOT / "src" / "recruit_agent" / "runtime" / "prompts.py",
-        BACKEND_ROOT / "src" / "recruit_agent" / "services" / "agent.py",
-        BACKEND_ROOT / "src" / "recruit_agent" / "services" / "autonomy.py",
-        BACKEND_ROOT / "src" / "recruit_agent" / "services" / "runtime.py",
-        BACKEND_ROOT / "src" / "recruit_agent" / "services" / "runtime_control.py",
-        BACKEND_ROOT / "src" / "recruit_agent" / "services" / "context_assembler.py",
-        BACKEND_ROOT / "src" / "recruit_agent" / "api" / "routers" / "runtime.py",
+        BACKEND_ROOT / "src" / "recruit_station" / "runtime" / "agent_loop.py",
+        BACKEND_ROOT / "src" / "recruit_station" / "runtime" / "prompts.py",
+        BACKEND_ROOT / "src" / "recruit_station" / "services" / "agent.py",
+        BACKEND_ROOT / "src" / "recruit_station" / "services" / "autonomy.py",
+        BACKEND_ROOT / "src" / "recruit_station" / "services" / "runtime.py",
+        BACKEND_ROOT / "src" / "recruit_station" / "services" / "runtime_control.py",
+        BACKEND_ROOT / "src" / "recruit_station" / "services" / "context_assembler.py",
+        BACKEND_ROOT / "src" / "recruit_station" / "api" / "routers" / "runtime.py",
         BACKEND_ROOT / "tests" / "test_runtime_agent_loop.py",
         BACKEND_ROOT / "tests" / "test_runtime_prompts.py",
         BACKEND_ROOT / "tests" / "test_runtime_tools.py",

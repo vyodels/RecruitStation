@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from recruit_agent.agents.outcome import AgentTurnOutcome
+from recruit_station.agents.outcome import AgentTurnOutcome
 
 
 def test_autonomous_completion_gate_uses_run_done() -> None:

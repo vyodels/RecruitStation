@@ -2,7 +2,7 @@
 
 ## 结论
 
-Recruit Agent 只有一套业务无关的 Agent runtime。`assistant` 与 `autonomous` 是 Agent type，用来决定产品层配置、触发方式、生命周期、状态治理和 UI/API 表达，不是两套 runtime，也不是新的执行单位。
+RecruitStation 只有一套业务无关的 Agent runtime。`assistant` 与 `autonomous` 是 Agent type，用来决定产品层配置、触发方式、生命周期、状态治理和 UI/API 表达，不是两套 runtime，也不是新的执行单位。
 
 ```text
 Agent runtime

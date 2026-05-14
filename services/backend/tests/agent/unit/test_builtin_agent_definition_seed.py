@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from recruit_agent.core.settings import AppSettings
-from recruit_agent.db.session import create_engine_from_settings, create_session_factory, initialize_database
-from recruit_agent.models.domain import AgentDefinition
-from recruit_agent.services.container import _seed_builtin_agent_definitions
+from recruit_station.core.settings import AppSettings
+from recruit_station.db.session import create_engine_from_settings, create_session_factory, initialize_database
+from recruit_station.models.domain import AgentDefinition
+from recruit_station.services.container import _seed_builtin_agent_definitions
 
 
 def test_seed_builtin_definitions_normalizes_memory_writeback_policy(tmp_path: Path) -> None:
@@ -20,8 +20,8 @@ def test_seed_builtin_definitions_normalizes_memory_writeback_policy(tmp_path: P
     with session_factory() as session:
         session.add(
             AgentDefinition(
-                definition_key="recruit-agent",
-                name="Recruit Agent",
+                definition_key="recruit-station",
+                name="RecruitStation",
                 is_primary=True,
                 prompt_config={},
                 memory_policy={
@@ -37,7 +37,7 @@ def test_seed_builtin_definitions_normalizes_memory_writeback_policy(tmp_path: P
     _seed_builtin_agent_definitions(session_factory)
 
     with session_factory() as session:
-        definition = session.query(AgentDefinition).filter_by(definition_key="recruit-agent").one()
+        definition = session.query(AgentDefinition).filter_by(definition_key="recruit-station").one()
         assert set(definition.memory_policy) == {"writeback"}
         assert definition.memory_policy["writeback"]["auto_write_min_confidence"] == 0.9
         assert definition.memory_policy["writeback"]["max_stable_facts"] == 3
@@ -56,8 +56,8 @@ def test_seed_builtin_definitions_do_not_backfill_legacy_instruction_templates(t
     with session_factory() as session:
         session.add(
             AgentDefinition(
-                definition_key="recruit-agent",
-                name="Recruit Agent",
+                definition_key="recruit-station",
+                name="RecruitStation",
                 is_primary=True,
                 prompt_config={},
                 memory_policy={},
@@ -68,7 +68,7 @@ def test_seed_builtin_definitions_do_not_backfill_legacy_instruction_templates(t
     _seed_builtin_agent_definitions(session_factory)
 
     with session_factory() as session:
-        definition = session.query(AgentDefinition).filter_by(definition_key="recruit-agent").one()
+        definition = session.query(AgentDefinition).filter_by(definition_key="recruit-station").one()
         prompt_config = dict(definition.prompt_config or {})
         role_definition = dict(definition.role_definition or {})
         assert "instruction_template" not in prompt_config

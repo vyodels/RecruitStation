@@ -8,7 +8,7 @@
 > Legacy path retained: docs/autonomous-agent-improvement-plan.md
 
 > 本文档基于 [agent-context-memory-design-reference.md](./agent-context-memory-design-reference.md)
-> 的设计参考，给出 recruit-agent 现有 Autonomous Agent 的改进路径，以及尚未启动的
+> 的设计参考，给出 recruit-station 现有 Autonomous Agent 的改进路径，以及尚未启动的
 > Assistant Agent 的初步设计规范。
 >
 > 核心思路：把 Autonomous Agent 重构成一个**最小可复用的 round 级 LLM 内核**，外面包装清晰的
@@ -32,7 +32,7 @@
 # Part 0：现状盘点
 
 读完 `services/agent.py`、`scheduler/scheduler.py`、`runtime/agent_loop.py`、
-`runtime/prompts.py`、`services/recruit_agent.py`、`services/context_assembler.py`
+`runtime/prompts.py`、`services/recruit_station.py`、`services/context_assembler.py`
 后，对当前 Autonomous Agent 的判断：
 
 ## 已经有的能力
@@ -47,7 +47,7 @@
 | `PromptBuilder`                       | ✅ 可用 | 文件式 prompt + 模板渲染                        |
 | `AgentRun / Checkpoint / Event`       | ✅ 完整 | runtime 状态、checkpoint、事件流齐全              |
 | 三类 Memory 表                           | ✅ 完整 | Candidate / Job / Global 三层              |
-| `prompt_config / RecruitAgentProfile` | ✅ 完整 | 长期 prompt 与 policy 都在表里                  |
+| `prompt_config / RecruitStationProfile` | ✅ 完整 | 长期 prompt 与 policy 都在表里                  |
 
 
 ## 当前的问题
@@ -96,7 +96,7 @@
 │ 1. Agent Assembly  （启动一次，长期持有）                     │
 │    把"Agent 是谁、能做什么"组装好                             │
 │                                                              │
-│    输入：RecruitAgentProfile + GlobalMemory 索引 +           │
+│    输入：RecruitStationProfile + GlobalMemory 索引 +           │
 │         Skill 注册表 + Tool 注册表                            │
 │    产出：AgentDefinition（Persona、Tools、Long-term Memory   │
 │         索引、Policies）                                      │
@@ -290,7 +290,7 @@ messages: [
 ```python
 @dataclass
 class AgentKernel:
-    profile: RecruitAgentProfile        # Assembly 阶段产物
+    profile: RecruitStationProfile        # Assembly 阶段产物
     provider: LLMProvider               # 共享
     tools: ToolRegistry                 # 共享
     context_assembler: ContextAssembler # 改造后的版本（见 1.2）
@@ -406,7 +406,7 @@ class Heartbeat:
 
 ### 3.2 进程化部署
 
-加一个 entrypoint `python -m recruit_agent.runtime.heartbeat`，独立进程跑。
+加一个 entrypoint `python -m recruit_station.runtime.heartbeat`，独立进程跑。
 API 进程只管收任务入队，心跳进程只管出队执行。
 
 ## 阶段 4：自学习闭环（2 周）
@@ -458,7 +458,7 @@ LLM 在 `record_learning` 时可以标记 `promote_to_skill: true`，
 
 ## 复用的部分
 
-- **Agent Assembly** 完全复用：同一个 RecruitAgentProfile + GlobalMemory 索引
+- **Agent Assembly** 完全复用：同一个 RecruitStationProfile + GlobalMemory 索引
 - **Agent Kernel** 大部分复用：`assemble / deliberate / guard / act / persist_learning`
 - **Tool Registry** 完全复用：所有工具（搜索候选人、读 memory、enqueue 任务）都能用
 
@@ -564,7 +564,7 @@ class AssistantAgent:
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │  Agent Assembly（共用）                                            │
-│   RecruitAgentProfile + GlobalMemory 索引 + Skill + Tool 注册表   │
+│   RecruitStationProfile + GlobalMemory 索引 + Skill + Tool 注册表   │
 └─────────────────┬────────────────────────┬───────────────────────┘
                   │                        │
                   ▼                        ▼
@@ -631,7 +631,7 @@ class AssistantAgent:
 | `services/context_assembler.py`                                     | 新增 `build_layered_request()`，按三书签输出                              |
 | `runtime/prompts.py`                                                | 拆出 `build_persona / build_prompt_config / build_memory_index` 三段 |
 | `scheduler/scheduler.py`                                            | 保留；包一层 `Heartbeat` 作为常驻进程                                        |
-| `services/recruit_agent.py:477-565` `default_recruit_agent_profile` | 增加 `kernel_config` 段（`turn_limits` / `round_limits` / `cache_strategy`） |
+| `services/recruit_station.py:477-565` `default_recruit_station_profile` | 增加 `kernel_config` 段（`turn_limits` / `round_limits` / `cache_strategy`） |
 | 新建 `runtime/kernel.py`                                              | Kernel 主体                                                        |
 | 新建 `runtime/guard.py`                                               | Guard policy 评估                                                  |
 | 新建 `runtime/memory_writer.py`                                       | persist_learning 实现                                              |

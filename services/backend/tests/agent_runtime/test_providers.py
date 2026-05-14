@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from recruit_agent.agent_runtime.providers import AnthropicProvider, OpenAIProvider, ProviderConfig
-from recruit_agent.agent_runtime.types import LLMMessage, LLMRequest, ToolSchema, ToolUse
+from recruit_station.agent_runtime.providers import AnthropicProvider, OpenAIProvider, ProviderConfig
+from recruit_station.agent_runtime.types import LLMMessage, LLMRequest, ToolSchema, ToolUse
 
 
 def test_openai_responses_stream_maps_text_tool_and_usage() -> None:

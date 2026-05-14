@@ -3,16 +3,16 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from recruit_agent.core.settings import AppSettings
-from recruit_agent.db.session import create_engine_from_settings, create_session_factory, initialize_database
-from recruit_agent.models.domain import ExecutionEpisode
-from recruit_agent.plugins.host import PluginHost
-from recruit_agent.plugins.recruit.toolkit import attach_resume_artifact, upsert_candidate, upsert_job_description
+from recruit_station.core.settings import AppSettings
+from recruit_station.db.session import create_engine_from_settings, create_session_factory, initialize_database
+from recruit_station.models.domain import ExecutionEpisode
+from recruit_station.plugins.host import PluginHost
+from recruit_station.plugins.recruit.toolkit import attach_resume_artifact, upsert_candidate, upsert_job_description
 from agent_runtime.fixtures import LLMResponse, ToolCall
 from agent_runtime.fixtures import ScriptedProvider
-from recruit_agent.capabilities.tools import ToolDefinition, ToolRegistry
-from recruit_agent.services.scene_context import SceneContextService
-from recruit_agent.services.scene_templates import shared_scene_template_catalog
+from recruit_station.capabilities.tools import ToolDefinition, ToolRegistry
+from recruit_station.services.scene_context import SceneContextService
+from recruit_station.services.scene_templates import shared_scene_template_catalog
 
 
 _FIXTURE_PATH = Path(__file__).with_name("simulated_recruiting_task_execution_contracts.json")

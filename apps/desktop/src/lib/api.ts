@@ -5,7 +5,7 @@ import type {
   StateCriteriaOptimizationReport,
   RecruitmentStateMachineVersionRecord,
   RecruitmentStateMachineUpdatePayload,
-} from "@recruit-agent/shared";
+} from "@recruit-station/shared";
 import type {
   ApplicationAssessmentRecord,
   ApplicationConversationEntry,
@@ -1695,7 +1695,7 @@ function normalizeSkillRecord(raw: unknown): SkillRecord {
     skillMetadata: asRecord(record.skillMetadata ?? record.skill_metadata),
     health: String(record.health ?? record.lastHealthStatus ?? record.last_health_status ?? "warning") as SkillRecord["health"],
     lastCheckedAt: String(record.lastCheckedAt ?? record.last_health_check ?? new Date().toISOString()),
-    summary: String(record.summary ?? record.description ?? "Skill strategy managed by Recruit Agent."),
+    summary: String(record.summary ?? record.description ?? "Skill strategy managed by RecruitStation."),
   };
 }
 
@@ -3045,7 +3045,7 @@ function normalizeCompileTaskResponse(raw: unknown): CompileTaskResponse {
   };
 }
 
-const recruitAgentRuntimeApiBase = "/api/recruit-agent/runtime";
+const recruitAgentRuntimeApiBase = "/api/recruit-station/runtime";
 
 async function requestRuntimeReplay(baseUrl: string, episodeId: string): Promise<RuntimeEpisodeReplay> {
   return normalizeRuntimeReplay(await requestJson<unknown>(baseUrl, `${recruitAgentRuntimeApiBase}/execution-episodes/${episodeId}/replay`));
@@ -3262,10 +3262,10 @@ function createFetchClient(baseUrl: string): DesktopApiClient {
           body: JSON.stringify({ reviewer: "desktop-user", reason }),
         }),
       ),
-    getAgentDefinition: async () => normalizeAgentDefinition(await requestJson<unknown>(baseUrl, "/api/recruit-agent/agent-definition"), "autonomous"),
+    getAgentDefinition: async () => normalizeAgentDefinition(await requestJson<unknown>(baseUrl, "/api/recruit-station/agent-definition"), "autonomous"),
     updateAgentDefinition: async (payload) =>
       normalizeAgentDefinition(
-        await requestJson<unknown>(baseUrl, "/api/recruit-agent/agent-definition", {
+        await requestJson<unknown>(baseUrl, "/api/recruit-station/agent-definition", {
           method: "PATCH",
           body: JSON.stringify(agentDefinitionPatchPayload(payload)),
         }),
@@ -3284,28 +3284,28 @@ function createFetchClient(baseUrl: string): DesktopApiClient {
       asArray(
         await requestJson<unknown>(
           baseUrl,
-          `/api/recruit-agent/runtime/traces${runId ? `?run_id=${encodeURIComponent(runId)}` : ""}`,
+          `/api/recruit-station/runtime/traces${runId ? `?run_id=${encodeURIComponent(runId)}` : ""}`,
         ),
       ).map(normalizeExecutionTrace),
     listExecutionGraphs: async (runId) =>
       asArray(
         await requestJson<unknown>(
           baseUrl,
-          `/api/recruit-agent/runtime/graphs${runId ? `?run_id=${encodeURIComponent(runId)}` : ""}`,
+          `/api/recruit-station/runtime/graphs${runId ? `?run_id=${encodeURIComponent(runId)}` : ""}`,
         ),
       ).map(normalizeExecutionGraph),
     listStrategyFragments: async () =>
-      asArray(await requestJson<unknown>(baseUrl, "/api/recruit-agent/runtime/strategy-fragments")).map(normalizeStrategyFragment),
+      asArray(await requestJson<unknown>(baseUrl, "/api/recruit-station/runtime/strategy-fragments")).map(normalizeStrategyFragment),
     listOperatorInteractions: async (applicationId) =>
       asArray(
         await requestJson<unknown>(
           baseUrl,
-          `/api/recruit-agent/runtime/operator-interactions${applicationId ? `?application_id=${encodeURIComponent(applicationId)}` : ""}`,
+          `/api/recruit-station/runtime/operator-interactions${applicationId ? `?application_id=${encodeURIComponent(applicationId)}` : ""}`,
         ),
       ).map(normalizeOperatorInteraction),
     resolveOperatorInteraction: async (interactionId, payload) =>
       normalizeOperatorInteraction(
-        await requestJson<unknown>(baseUrl, `/api/recruit-agent/runtime/operator-interactions/${interactionId}/resolve`, {
+        await requestJson<unknown>(baseUrl, `/api/recruit-station/runtime/operator-interactions/${interactionId}/resolve`, {
           method: "POST",
           body: JSON.stringify({
             action: payload.action,
@@ -3415,10 +3415,10 @@ function createFetchClient(baseUrl: string): DesktopApiClient {
         }),
       ),
     listEvolutionArtifacts: async () =>
-      asArray(await requestJson<unknown>(baseUrl, "/api/recruit-agent/evolution-artifacts")).map(normalizeEvolutionArtifact),
+      asArray(await requestJson<unknown>(baseUrl, "/api/recruit-station/evolution-artifacts")).map(normalizeEvolutionArtifact),
     updateEvolutionArtifact: async (artifactId, payload) =>
       normalizeEvolutionArtifact(
-        await requestJson<unknown>(baseUrl, `/api/recruit-agent/evolution-artifacts/${artifactId}`, {
+        await requestJson<unknown>(baseUrl, `/api/recruit-station/evolution-artifacts/${artifactId}`, {
           method: "PATCH",
           body: JSON.stringify({
             summary: payload.summary,
@@ -3760,7 +3760,7 @@ function createFetchClient(baseUrl: string): DesktopApiClient {
         const traces = traceRunId
           ? await requestOptionalJson<unknown>(
             baseUrl,
-            `/api/recruit-agent/runtime/traces?run_id=${encodeURIComponent(traceRunId)}`,
+            `/api/recruit-station/runtime/traces?run_id=${encodeURIComponent(traceRunId)}`,
           ).then((value) => (value ? asArray(value).map(normalizeExecutionTrace) : []))
           : [];
         const run = traceRunId ? (runs.find((item) => item.id === traceRunId) ?? null) : null;

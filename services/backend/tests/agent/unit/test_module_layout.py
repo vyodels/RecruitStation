@@ -4,7 +4,7 @@ import ast
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[3] / "src" / "recruit_agent"
+ROOT = Path(__file__).resolve().parents[3] / "src" / "recruit_station"
 
 
 def test_agent_packages_exist() -> None:
@@ -39,16 +39,16 @@ def test_agent_test_packages_exist() -> None:
 
 def test_agent_runtime_does_not_import_product_capability_layers() -> None:
     forbidden_import_fragments = [
-        "recruit_agent.agents",
-        "recruit_agent.assistant",
-        "recruit_agent.memory",
-        "recruit_agent.mcp",
-        "recruit_agent.models",
-        "recruit_agent.plugins",
-        "recruit_agent.capabilities",
-        "recruit_agent.product_adapters",
-        "recruit_agent.services",
-        "recruit_agent.skills",
+        "recruit_station.agents",
+        "recruit_station.assistant",
+        "recruit_station.memory",
+        "recruit_station.mcp",
+        "recruit_station.models",
+        "recruit_station.plugins",
+        "recruit_station.capabilities",
+        "recruit_station.product_adapters",
+        "recruit_station.services",
+        "recruit_station.skills",
     ]
     offenders: list[str] = []
     for path in (ROOT / "agent_runtime").glob("*.py"):
@@ -67,7 +67,7 @@ def test_agent_runtime_does_not_reintroduce_product_run_concepts() -> None:
     forbidden_terms = [
         "GoalSpec",
         "AgentProfile",
-        "RecruitAgentProfile",
+        "RecruitStationProfile",
         "Assistant",
         "Autonomous",
         "AgentRun",

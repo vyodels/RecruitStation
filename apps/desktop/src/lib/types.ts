@@ -30,7 +30,7 @@ import type {
   RuntimeTaskSpec as SharedRuntimeTaskSpec,
   RuntimeTemplate as SharedRuntimeTemplate,
   RuntimeWorkspaceData as SharedRuntimeWorkspaceData,
-} from "@recruit-agent/shared";
+} from "@recruit-station/shared";
 
 export type WorkspaceTab =
   | "home"

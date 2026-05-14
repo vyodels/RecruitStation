@@ -1,6 +1,6 @@
-# Recruit Agent
+# RecruitStation
 
-Recruit Agent is a local-first recruiting automation workspace.
+RecruitStation is a local-first recruiting automation workspace.
 
 The current direction is no longer the earlier execution console model. The product now centers on two built-in agents, `Assistant` and `Autonomous`, managed through a desktop ChatOverlay alongside the recruiting workspace, with editable execution blueprints, isolated memory, skill governance, candidate progress tracking, and operator-controlled communication review.
 
@@ -26,8 +26,8 @@ Not the current product focus:
 
 ## Core Objects
 
-- `RecruitAgentProfile`: agent identity, prompt assets, tone, boundaries, success criteria, forbidden actions, compression policies
-- `RecruitAgentPlaybook`: recruiting playbook graph used internally by the agent
+- `RecruitStationProfile`: agent identity, prompt assets, tone, boundaries, success criteria, forbidden actions, compression policies
+- `RecruitStationPlaybook`: recruiting playbook graph used internally by the agent
 - `Candidate`: structured candidate record and progress source of truth
 - `Candidate Memory`: long-term memory isolated per candidate
 - `Job / JD Memory`: long-term memory isolated per JD
@@ -120,7 +120,7 @@ cd services/backend
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .[dev]
-uvicorn recruit_agent.server:create_app --reload --factory
+uvicorn recruit_station.server:create_app --reload --factory
 ```
 
 Tests:

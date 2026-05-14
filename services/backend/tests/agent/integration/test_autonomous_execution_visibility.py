@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from recruit_agent.models.domain import AgentRun
+from recruit_station.models.domain import AgentRun
 
 
 def test_autonomous_visibility_model_is_run_based() -> None:

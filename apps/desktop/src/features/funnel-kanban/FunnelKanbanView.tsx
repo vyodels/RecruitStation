@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { funnelMilestones } from "@recruit-agent/shared";
-import type { ApplicationTransitionPayload, RecruitmentStateMachine } from "@recruit-agent/shared";
+import { funnelMilestones } from "@recruit-station/shared";
+import type { ApplicationTransitionPayload, RecruitmentStateMachine } from "@recruit-station/shared";
 import { ToolbarField, ToolbarRefreshButton, ToolbarSelect } from "../../components";
 import { CandidateTable } from "../kanban-shared/CandidateTable";
 import { CandidateCommunicationPanel } from "../kanban-shared/CandidateCommunicationPanel";

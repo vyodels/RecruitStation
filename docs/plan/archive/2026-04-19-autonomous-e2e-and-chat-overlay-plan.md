@@ -3,7 +3,7 @@
 > Status: archived
 > Supersedes: docs/plan/archive/recruiting-workflow-ux-redesign-plan.md; docs/plan/archive/recruiting-workflow-ux-redesign-plan_cn.md
 > Superseded by: /Users/vyodels/AgentProjects/cross-project-runtime-docs/final-mock-recruiting-validation-2026-04-25.md for the browser / HID mock recruiting execution chain; UI cleanup topics are not current active work.
-> Distilled into: /Users/vyodels/AgentProjects/cross-project-runtime-docs/recruit-agent-browser-virtualhid-overview.md
+> Distilled into: /Users/vyodels/AgentProjects/cross-project-runtime-docs/recruit-station-browser-virtualhid-overview.md
 > Last reviewed against code: 2026-04-25
 > Historical source path: docs/superpowers/plans/2026-04-19-autonomous-e2e-and-chat-overlay-plan.md
 
@@ -62,7 +62,7 @@
 | `features/dashboard/DashboardView.tsx`（顶层 tab `home`）                                                                 | 招聘待办 / 阻塞 / 今日动作总览                                | **保留**（工作台看板，硬约束）                                                                                     | 用户明确点名工作台看板不能动                              |
 | `features/candidates/CandidatesKanbanView.tsx` + `kanban-shared/`*（顶层 tab `candidates`）                               | 候选人漏斗 / 状态跟进 / JD 管理三视图                           | **保留**（工作台看板核心）                                                                                       | Autonomous E2E 的输出落点就在这里，必须留                |
 | `features/settings/SettingsView.tsx`（顶层 tab `settings`）                                                               | LLM provider / MCP / sync 设置                      | **保留**（必要配置面板，硬约束）                                                                                    | 用户明确点名 LLM API 配置不能删                        |
-| `features/recruit-agent/RecruitAgentView.tsx`（顶层 tab `ai-strategy`）                                                   | profile / state-machine / skills / 三类 memory 集中编辑 | **建议删除**                                                                                              | 这些能力在 §3 全部归到对话窗 Agent 面板里，独立 tab 与对话窗重复    |
+| `features/recruit-station/RecruitStationView.tsx`（顶层 tab `ai-strategy`）                                                   | profile / state-machine / skills / 三类 memory 集中编辑 | **建议删除**                                                                                              | 这些能力在 §3 全部归到对话窗 Agent 面板里，独立 tab 与对话窗重复    |
 | `features/agent-inbox/AgentInboxView.tsx`（顶层 tab `ai-review` 之 queue）                                                 | 审批 / 人工介入 / 阻塞任务集中处理                              | **建议删除**                                                                                              | approvals 在 §3 进入对话窗内 Agent 面板，独立 tab 重复且割裂 |
 | `features/evolution/EvolutionView.tsx`（顶层 tab `ai-review` 之 changes）                                                  | 演进产物 / Skill 健康 / Memory 刷新提案                     | **建议删除**                                                                                              | evolution 是 Agent 内部能力，应进对话窗 Agent 面板       |
 | `features/workbench/WorkbenchView.tsx`                                                                                | 旧执行控制台残留                                          | **建议删除**                                                                                              | README 明确说不再是 execution-record-first 模型     |
@@ -115,13 +115,13 @@
 ### 1.1 现状勘察（**Codex 第一步必须做**，结果写到 commit message）
 
 - grep `boss` / `zhipin` / `直聘` 全仓库，列出所有命中位置，区分"文档提及"vs"代码实现"。
-- 检查 `services/backend/src/recruit_agent/services/browser_mcp_bridge.py`、`services/backend/src/recruit_agent/execution_units/browser_worker.py`、`services/backend/src/recruit_agent/mcp/registry.py`、`services/backend/src/recruit_agent/plugins/recruit/toolkit.py`，判断：
+- 检查 `services/backend/src/recruit_station/services/browser_mcp_bridge.py`、`services/backend/src/recruit_station/execution_units/browser_worker.py`、`services/backend/src/recruit_station/mcp/registry.py`、`services/backend/src/recruit_station/plugins/recruit/toolkit.py`，判断：
   - 是否已存在通用 Browser MCP / 协议桥与通用招聘流程工具契约？
   - 是否已存在"拉取候选人列表 / 拉取联系方式 / 拉取简历"这三个工具的契约？
-- 在 `services/backend/src/recruit_agent/models/domain.py` 里确认候选人 / 简历 / 联系方式的存储模型：
+- 在 `services/backend/src/recruit_station/models/domain.py` 里确认候选人 / 简历 / 联系方式的存储模型：
   - `Candidate` 表里是否已有 `phone` / `wechat` / `email` / `resume_url` 等字段？
   - 简历附件是落到本地文件系统、走 BLOB 存储、还是只存 URL？
-- 在 `services/backend/src/recruit_agent/api/routers/` 里找候选人写入 API（POST/PATCH 候选人、上传简历），确认 Agent 工具有路径写入。
+- 在 `services/backend/src/recruit_station/api/routers/` 里找候选人写入 API（POST/PATCH 候选人、上传简历），确认 Agent 工具有路径写入。
 - 把以上四个调查结果以一段 200 字以内的总结写到本节末尾的 `调研结论` 子小节，并据此回答两个问题：
   - **通用外部站点集成现状是哪一档**：已有可用 / 部分可用（缺 X）/ 完全没有？
   - **如果"完全没有"或"部分可用"，是补做还是先 mock**？补做的范围有多大？
@@ -135,18 +135,18 @@
 
 > 以下任务是"假设 §1.1 调查结论是'部分可用，需要补'"的最小化准备。如果调研结论是"已经齐全"，本节大半任务可以跳过。注意：这里补的是**通用招聘流程语义与通用 MCP 接入**，不是 Boss 专用工具。
 
-- 修通 `services/backend/src/recruit_agent/services/mcp_registry.py` 与 `services/backend/src/recruit_agent/services/container.py`，确保已启用的 Browser MCP / 其它 MCP 动态工具能够真实进入 Agent 可见工具集，而不是只停留在配置层。
+- 修通 `services/backend/src/recruit_station/services/mcp_registry.py` 与 `services/backend/src/recruit_station/services/container.py`，确保已启用的 Browser MCP / 其它 MCP 动态工具能够真实进入 Agent 可见工具集，而不是只停留在配置层。
 - 在 prompt / skill / 运行时合同里补齐通用招聘流程语义，让 Agent 能在运行时自行完成：
   - 候选人发现 / 列表筛选
   - 联系方式获取（需要触发 Guard，按"外部动作"上报 `gate_signal=wait_human`）
   - 简历抓取 / 归档
 - 若需要新增主程序侧工具，只允许新增通用招聘语义工具；metadata 中标注 `external_target=True`、`requires_confirmation`，不得出现站点专用命名或站点专用选择器固化。
 - 在 `models/domain.py` 上**只补必要字段**：如果 `Candidate` 缺联系方式或简历字段，按调研结论补；不要预添加未在 §1.4 happy path 用到的字段。
-- 如果简历是文件，确认/创建 `~/.recruit-agent/resumes/<candidate_id>.<ext>` 落地路径，并在 `services/` 下建一个轻量 `ResumeStorageService` 负责写入与读取 URL 生成。
+- 如果简历是文件，确认/创建 `~/.recruit-station/resumes/<candidate_id>.<ext>` 落地路径，并在 `services/` 下建一个轻量 `ResumeStorageService` 负责写入与读取 URL 生成。
 
 ### 1.3 Autonomous goal → run 完整链路打通
 
-- 在 `services/backend/src/recruit_agent/api/routers/agent.py` 里确认/补全以下 API：
+- 在 `services/backend/src/recruit_station/api/routers/agent.py` 里确认/补全以下 API：
   - `POST /api/agents/autonomous/goals`：入参 `{title, goal_text, jd_id, candidate_count_target, ...}` → 创建 `AgentRun` + `GoalSpec`，并 enqueue 到 scheduler。
   - `GET /api/agents/autonomous/runs/{run_id}`：返回 run + 最近 N 个 turn + 最近 M 个 round 事件。
   - `POST /api/agents/autonomous/runs/{run_id}/cancel`：发送 cancel signal。
@@ -178,7 +178,7 @@
     - 至少 1 条 `ResumeBlob` 落到 storage（mock 文件系统或临时目录）。
     - `OperatorInteraction` 至少出现过 1 次 `pending`，并能通过 API approve 让 run 继续。
     - 最终 run 状态为 `completed`。
-- **（手工验收后再做）** 如果 Browser MCP 与真实外部站点联调可用，再补一个 `tests/agent/integration/test_autonomous_real_site.py` 标记为 `pytest.mark.skipif(not RECRUIT_AGENT_REAL_BROWSER_MCP)`，由 human 在本地真实浏览器登录状态下手动开。
+- **（手工验收后再做）** 如果 Browser MCP 与真实外部站点联调可用，再补一个 `tests/agent/integration/test_autonomous_real_site.py` 标记为 `pytest.mark.skipif(not RECRUIT_STATION_REAL_BROWSER_MCP)`，由 human 在本地真实浏览器登录状态下手动开。
 
 **§1 期内的最低测试要求：** §1.2 / §1.3 / §1.4 涉及到的每个新增 service / writer / API endpoint 都要有相应的**单元测试**——只是不必须串成端到端集成测试。
 
@@ -204,7 +204,7 @@
 - 新建 `apps/desktop/src/features/chat-overlay/FloatingBubble.tsx`：
   - position: fixed，默认右下角 `bottom: 24px; right: 24px`。
   - 直径 56px，圆形，阴影 `0 8px 24px rgba(0,0,0,0.16)`。
-  - 内部图标：当前 Recruit Agent 头像（profile.avatar 或一个默认 icon）。
+  - 内部图标：当前 RecruitStation 头像（profile.avatar 或一个默认 icon）。
   - 状态指示：右上角小圆点——`idle` 灰、`running` 蓝色脉冲、`waiting_human` 黄色、`failed` 红色。
   - 可拖拽：mousedown + mousemove 改 fixed 位置；松手时位置写到 `localStorage.bubblePosition`。
   - 点击：dispatch 一个 React context 事件打开对话窗。
@@ -218,7 +218,7 @@
     - 左侧 240px：会话列表（顶部一个 "+ 新会话" 按钮，下方 Assistant Agent 与 Autonomous Agent 两组分类，每组下挂这个 Agent 的最近 N 条会话）。
     - 中间 ~520px：当前会话的消息流。
     - 右侧 200px（可折叠）：当前 Agent 的元信息卡片（goal / 状态 / 当前 run / 进度）。
-  - 顶部 header：左上 logo（Recruit Agent），中间会话标题，右上 minimize / close。
+  - 顶部 header：左上 logo（RecruitStation），中间会话标题，右上 minimize / close。
 - 与 FloatingBubble 通过 React context 通信：`useChatOverlay()` 暴露 `open() / close() / toggle() / focusAgent("assistant" | "autonomous")`。
 
 ### 2.4 消息流区域
@@ -254,7 +254,7 @@
 
 ### 3.1 后端：两个独立的 AgentProfile
 
-- `models/domain.py` 中确认 `AgentProfile`（或当前的 `RecruitAgentProfile`）能持有 **2 行**：一行 `kind=assistant`，一行 `kind=autonomous`。每行都有自己的：
+- `models/domain.py` 中确认 `AgentProfile`（或当前的 `RecruitStationProfile`）能持有 **2 行**：一行 `kind=assistant`，一行 `kind=autonomous`。每行都有自己的：
   - `name` / `prompt_system` / `goal_template` / `tone` / `boundaries` / `forbidden_actions` / `compression_policy`。
   - `default_provider_id` / `default_model_id`。
   - `memory_scope_ref`（独立 memory 命名空间）。
@@ -292,7 +292,7 @@
   - approve / reject 调对应 API；成功后从列表里消失，并在对话流内插入一条系统消息。
 - **记忆 tab**：
   - 三个子 tab：Candidate / Job / Global。
-  - 列表 + 单条详情编辑（沿用 RecruitAgentView 里现有 memory 编辑组件，把组件抽到 `apps/desktop/src/features/chat-overlay/agent-panel/MemoryEditors.tsx`，**不要在多处复制**）。
+  - 列表 + 单条详情编辑（沿用 RecruitStationView 里现有 memory 编辑组件，把组件抽到 `apps/desktop/src/features/chat-overlay/agent-panel/MemoryEditors.tsx`，**不要在多处复制**）。
   - 支持 manual compact 触发。
 - **技能 tab**：
   - 列出该 Agent 可用 skill；展示 status / health / 最近调用次数。

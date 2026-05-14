@@ -18,6 +18,6 @@ This directory contains long-term normative documents only. It must stay small.
 
 ## Hard Boundary
 
-`services/backend/src/recruit_agent/agent_runtime/**` must remain business-agnostic.
+`services/backend/src/recruit_station/agent_runtime/**` must remain business-agnostic.
 
 Business enters Agent execution only through adapter-built context, prompt assets, tool schemas, tool results, skills, plugins, MCP capabilities, and product-layer state mapping.

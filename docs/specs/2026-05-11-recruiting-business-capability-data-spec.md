@@ -4,15 +4,15 @@
 
 本文是招聘业务能力、skill、业务事实、候选人/JD/投递数据模型和 UI/API 字段契约的合并规范。
 
-本文只约束业务层。招聘业务不得进入 `services/backend/src/recruit_agent/agent_runtime/**`。
+本文只约束业务层。招聘业务不得进入 `services/backend/src/recruit_station/agent_runtime/**`。
 
 ## 业务能力接入
 
 招聘能力通过以下方式接入 Agent：
 
-- `.recruit-agent/prompts/**`
-- `.recruit-agent/skills/**`
-- `.recruit-agent/plugins/**`
+- `.recruit-station/prompts/**`
+- `.recruit-station/skills/**`
+- `.recruit-station/plugins/**`
 - backend thin plugin mount code
 - tool schema / tool result
 - MCP capability

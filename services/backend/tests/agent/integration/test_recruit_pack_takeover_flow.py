@@ -6,13 +6,13 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
-from recruit_agent.core.settings import AppSettings
-from recruit_agent.db.session import create_engine_from_settings, create_session_factory, initialize_database
-from recruit_agent.models.domain import Candidate, CandidateApplication, JobDescription
-from recruit_agent.plugins.host import PluginHost
-from recruit_agent.plugins.loader import install_manifest
-from recruit_agent.plugins.recruit.manifest import RecruitPluginManifest
-from recruit_agent.services.application_window import make_application_window
+from recruit_station.core.settings import AppSettings
+from recruit_station.db.session import create_engine_from_settings, create_session_factory, initialize_database
+from recruit_station.models.domain import Candidate, CandidateApplication, JobDescription
+from recruit_station.plugins.host import PluginHost
+from recruit_station.plugins.loader import install_manifest
+from recruit_station.plugins.recruit.manifest import RecruitPluginManifest
+from recruit_station.services.application_window import make_application_window
 
 
 def _make_session(tmp_path: Path) -> Session:

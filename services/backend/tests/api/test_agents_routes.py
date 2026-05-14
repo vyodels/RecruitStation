@@ -4,15 +4,15 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from agent_runtime.fixtures import LLMResponse, ScriptedProvider, ToolCall
-from recruit_agent.capabilities.tools import ToolDefinition
-from recruit_agent.core.settings import load_settings
-from recruit_agent.models.domain import AgentRun, AgentRunCheckpoint, ApprovalItem, OperatorInteraction, TaskQueueItem
-from recruit_agent.server import create_app
+from recruit_station.capabilities.tools import ToolDefinition
+from recruit_station.core.settings import load_settings
+from recruit_station.models.domain import AgentRun, AgentRunCheckpoint, ApprovalItem, OperatorInteraction, TaskQueueItem
+from recruit_station.server import create_app
 
 
 def _client(tmp_path, monkeypatch, db_name: str) -> TestClient:
-    monkeypatch.setenv("RECRUIT_AGENT_DATA_DIR", str(tmp_path / f"{db_name}-data"))
-    monkeypatch.setenv("RECRUIT_AGENT_DATABASE_URL", f"sqlite:///{tmp_path / f'{db_name}.db'}")
+    monkeypatch.setenv("RECRUIT_STATION_DATA_DIR", str(tmp_path / f"{db_name}-data"))
+    monkeypatch.setenv("RECRUIT_STATION_DATABASE_URL", f"sqlite:///{tmp_path / f'{db_name}.db'}")
     load_settings.cache_clear()
     return TestClient(create_app())
 

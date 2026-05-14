@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import type { ApplicationTransitionPayload, HumanActionDefinition, RecruitmentStateMachine } from "@recruit-agent/shared";
+import type { ApplicationTransitionPayload, HumanActionDefinition, RecruitmentStateMachine } from "@recruit-station/shared";
 import { FormTextarea, StatusBadge, ToolbarInput, ToolbarRefreshButton, ToolbarSelect } from "../../components";
 import { apiClient } from "../../lib/api";
 import { formatChineseMessageTime, formatCompactDate } from "../../lib/format";

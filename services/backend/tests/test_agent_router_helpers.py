@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from recruit_agent.api.routers.agent import _serialize_agent_projection
+from recruit_station.api.routers.agent import _serialize_agent_projection
 
 
 def test_serialize_agent_projection_accepts_legacy_datetime_strings() -> None:
     payload = _serialize_agent_projection(
         SimpleNamespace(
             id="definition-1",
-            definition_key="recruit-agent",
+            definition_key="recruit-station",
             name="Autonomous",
             status="active",
             description="desc",

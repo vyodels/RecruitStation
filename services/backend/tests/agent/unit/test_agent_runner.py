@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from agent_runtime.fixtures import LLMResponse, ScriptedProvider
 
-from recruit_agent.capabilities.tools import ToolRegistry
-from recruit_agent.product_adapters.agent_runner import run_agent_turn
-from recruit_agent.product_adapters.context_builder import build_assistant_turn_context, build_autonomous_turn_context
-from recruit_agent.product_adapters.result_semantics import extract_execution_status
+from recruit_station.capabilities.tools import ToolRegistry
+from recruit_station.product_adapters.agent_runner import run_agent_turn
+from recruit_station.product_adapters.context_builder import build_assistant_turn_context, build_autonomous_turn_context
+from recruit_station.product_adapters.result_semantics import extract_execution_status
 
 
 def test_runner_places_adapter_system_prompt_outside_messages_for_both_agent_kinds() -> None:

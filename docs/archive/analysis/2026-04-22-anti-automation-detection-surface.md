@@ -296,7 +296,7 @@ Implication for our design: **no single mitigation is proof of invisibility**. M
 
 ---
 
-## 15. Mapping to `recruit-agent`'s current choices
+## 15. Mapping to `recruit-station`'s current choices
 
 | Capability we need | Dominant detection points |
 |---|---|

@@ -2,7 +2,7 @@ import React, { startTransition, useCallback, useEffect, useMemo, useState } fro
 import type {
   ApplicationTransitionPayload,
   RecruitmentStateMachine,
-} from "@recruit-agent/shared";
+} from "@recruit-station/shared";
 import { AppLayout, Sidebar, ToastNotification, TopBar } from "../../components";
 import { ChatOverlay, useChatOverlay } from "../chat-overlay";
 import { apiClient } from "../../lib/api";
@@ -34,7 +34,7 @@ const emptySettings: SettingsSnapshot = {
   providers: [],
   intranetSync: {
     enabled: false,
-    apiPath: "/api/recruit-agent/sync",
+    apiPath: "/api/recruit-station/sync",
     timeoutSeconds: 10,
   },
   platform: {
