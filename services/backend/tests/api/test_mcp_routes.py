@@ -314,6 +314,55 @@ def test_mcp_presets_load_from_recruit_station_assets(tmp_path, monkeypatch) -> 
         assert payload["server_metadata"] == {"preset_installed": True}
 
 
+def test_mcp_servers_include_builtin_standard_config_without_db_install(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "recruit_station.services.mcp_registry.default_browser_mcp_server_command",
+        lambda: ("node", "/virtual/browser-mcp/server.mjs"),
+    )
+    monkeypatch.setattr(
+        "recruit_station.services.mcp_registry.default_browser_upstream_endpoint",
+        lambda: "/virtual/default-browser.sock",
+    )
+    monkeypatch.setattr(
+        "recruit_station.services.mcp_registry.default_virtualhid_mcp_server_command",
+        lambda: ("node", "/virtual/VirtualHID/mcp/server.mjs"),
+    )
+    monkeypatch.setattr(
+        "recruit_station.services.mcp_registry.default_virtualhid_upstream_endpoint",
+        lambda: "/virtual/default-virtualhid.sock",
+    )
+
+    settings = AppSettings(
+        data_dir=str(tmp_path / "data"),
+        database_url=f"sqlite:///{tmp_path / 'mcp-builtin-config.db'}",
+        provider_config={},
+    )
+
+    app = create_app(settings)
+    with TestClient(app) as client:
+        servers = client.get("/api/mcp/servers")
+
+    assert servers.status_code == 200
+    by_key = {item["server_key"]: item for item in servers.json()}
+    assert {"browser-mcp", "virtualhid"}.issubset(by_key)
+    browser_config = by_key["browser-mcp"]["standardConfig"]["mcpServers"]["browser-mcp"]
+    assert browser_config == {
+        "command": "node",
+        "args": ["/virtual/browser-mcp/server.mjs"],
+        "env": {"MCP_BROWSER_CHROME_SOCKET": "/virtual/default-browser.sock"},
+        "transport": "stdio",
+    }
+    virtualhid_config = by_key["virtualhid"]["standardConfig"]["mcpServers"]["virtualhid"]
+    assert virtualhid_config == {
+        "command": "node",
+        "args": ["/virtual/VirtualHID/mcp/server.mjs"],
+        "env": {"VIRTUALHID_SOCKET": "/virtual/default-virtualhid.sock"},
+        "transport": "stdio",
+    }
+    assert by_key["browser-mcp"]["id"] == "builtin:browser-mcp"
+    assert by_key["virtualhid"]["id"] == "builtin:virtualhid"
+
+
 def test_browser_preset_healthcheck_uses_upstream_stdio_mcp_server(tmp_path, monkeypatch) -> None:
     runtime_requests: list[tuple[str, str, str, dict[str, object]]] = []
 
@@ -479,8 +528,8 @@ def test_virtualhid_preset_healthcheck_uses_upstream_stdio_mcp_server(tmp_path, 
         assert payload["server_metadata"]["stdio_command"] == ["node", "/virtual/VirtualHID/mcp/server.mjs"]
         assert payload["server_metadata"]["stdio_env"] == {"VIRTUALHID_SOCKET": "/virtual/upstream-virtualhid.sock"}
         assert payload["server_metadata"]["runtime_tool_capabilities"] == {
-            "default": ["scene", "computer"],
-            "read_only": ["computer_read"],
+            "default": ["mcp", "hid", "computer"],
+            "read_only": ["computer_read", "read_only"],
             "mutating": ["computer_write"],
         }
         assert payload["server_metadata"]["runtime_tool_read_only_names"] == [
@@ -500,11 +549,11 @@ def test_virtualhid_preset_healthcheck_uses_upstream_stdio_mcp_server(tmp_path, 
 
         hid_state = next(tool for tool in checked_payload["tools"] if tool["name"] == "hid_state")
         assert hid_state["risk_level"] == "low"
-        assert set(hid_state["capabilities"]) == {"scene", "computer", "computer_read"}
+        assert set(hid_state["capabilities"]) == {"mcp", "hid", "computer", "computer_read", "read_only"}
 
         hid_action = next(tool for tool in checked_payload["tools"] if tool["name"] == "hid_action")
         assert hid_action["risk_level"] == "medium"
-        assert set(hid_action["capabilities"]) == {"scene", "computer", "computer_write"}
+        assert set(hid_action["capabilities"]) == {"mcp", "hid", "computer", "computer_write"}
 
     assert any(
         server_key == "virtualhid-managed"

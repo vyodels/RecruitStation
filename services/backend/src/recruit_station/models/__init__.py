@@ -9,6 +9,7 @@ from .domain import (
     ApplicationSession,
     ApplicationStatusTransition,
     ApplicationSyncRecord,
+    AgentPendingUserInput,
     AgentRun,
     AgentRunCheckpoint,
     AgentRuntimeEvent,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -582,8 +583,10 @@ def _seed_builtin_agent_definitions(session_factory: sessionmaker[Session]) -> N
             updates["memory_policy"] = resolved_memory_policy
         default_definition = _default_agent_definition()
         for key in ("product_bindings", "product_config", "product_projections"):
-            if dict(getattr(definition, key) or {}) != dict(default_definition[key]):
-                updates[key] = default_definition[key]
+            existing_value = dict(getattr(definition, key) or {})
+            merged_value = _merge_missing_default_config(existing_value, dict(default_definition[key]))
+            if merged_value != existing_value:
+                updates[key] = merged_value
         metadata = dict(definition.agent_metadata or {})
         metadata.update({"supports_builtin_agents": True, "current_primary_definition": "recruit-station"})
         if metadata != dict(definition.agent_metadata or {}):
@@ -594,3 +597,14 @@ def _seed_builtin_agent_definitions(session_factory: sessionmaker[Session]) -> N
 
 def _default_agent_definition() -> dict[str, Any]:
     return default_agent_definition()
+
+
+def _merge_missing_default_config(existing: dict[str, Any], defaults: dict[str, Any]) -> dict[str, Any]:
+    merged = deepcopy(existing)
+    for key, value in defaults.items():
+        if key not in merged:
+            merged[key] = deepcopy(value)
+            continue
+        if isinstance(merged.get(key), dict) and isinstance(value, dict):
+            merged[key] = _merge_missing_default_config(dict(merged[key]), value)
+    return merged

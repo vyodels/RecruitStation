@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 from sqlalchemy.orm import Session, sessionmaker
 
 from recruit_station.asset_paths import mcp_preset_templates_root
-from recruit_station.db.base import utcnow
+from recruit_station.db.base import unix_seconds_now, utcnow
 from recruit_station.models import McpServer, McpTool
 from recruit_station.repositories import McpServerRepository, McpToolRepository
 from recruit_station.capabilities.tools import ToolDefinition, ToolRegistry
@@ -41,6 +41,10 @@ MCP_STDIO_REQUEST_TIMEOUT_SECONDS = 8.0
 MCP_TRANSIENT_RETRY_DELAY_SECONDS = 0.35
 VIRTUALHID_SOCKET_PRESET_KEY = "virtualhid-json-socket"
 MCP_RESOURCE_TOOL_NAMES = {"list_mcp_resources", "read_mcp_resource"}
+BUILTIN_MCP_SERVER_SPECS: tuple[tuple[str, str, str], ...] = (
+    (BROWSER_SOCKET_PRESET_KEY, "browser-mcp", "Browser MCP"),
+    (VIRTUALHID_SOCKET_PRESET_KEY, "virtualhid", "VirtualHID MCP"),
+)
 _VIRTUALHID_MCP_SERVER_ENV = "VIRTUALHID_MCP_SERVER"
 _VIRTUALHID_MCP_COMMAND_ENV = "VIRTUALHID_MCP_COMMAND"
 _KNOWN_STDIO_COMMAND_RESOLVERS = {"browser_mcp_server", "virtualhid_mcp_server"}
@@ -65,12 +69,33 @@ _BROWSER_READ_ONLY_RUNTIME_TOOL_NAMES = set(_BROWSER_TARGET_IDENTIFICATION_TOOL_
 _HID_BROWSER_SEQUENCE_PRIMITIVE_TYPES = {"click", "drag", "scroll", "type", "pasteText", "key"}
 
 
+@dataclass(slots=True)
+class _ConfiguredMcpServer:
+    id: str
+    server_key: str
+    name: str
+    transport_kind: str
+    protocol: str
+    endpoint: str
+    enabled: bool
+    preset_key: str | None
+    auth_config: dict[str, Any]
+    server_metadata: dict[str, Any]
+    health_status: str = "unknown"
+    health_error: str | None = None
+    last_health_at: int | None = None
+    created_at: int = 0
+    updated_at: int = 0
+
+
 def _default_browser_endpoint() -> str:
     return default_browser_upstream_endpoint()
 
 
 def default_virtualhid_upstream_endpoint() -> str:
-    return os.environ.get("VIRTUALHID_SOCKET") or f"{tempfile.gettempdir()}/virtualhid.sock"
+    return os.environ.get("VIRTUALHID_SOCKET") or str(
+        Path.home() / "Library" / "Application Support" / "VirtualHID" / "virtualhid.sock"
+    )
 
 
 def _reset_browser_hid_sequence_state_for_tests() -> None:
@@ -222,6 +247,107 @@ def _apply_preset_server_defaults(
             existing_metadata=existing_metadata,
         ),
     }
+
+
+def _standard_mcp_server_config(server: McpServer) -> dict[str, Any]:
+    metadata = dict(server.server_metadata or {})
+    if server.transport_kind == "stdio":
+        command = _normalize_string_list(metadata.get("stdio_command"))
+        config: dict[str, Any] = {}
+        if command:
+            config["command"] = command[0]
+            config["args"] = command[1:]
+        env = _normalize_string_dict(metadata.get("stdio_env"))
+        if env:
+            config["env"] = env
+        config["transport"] = "stdio"
+        return {"mcpServers": {server.server_key: config}}
+
+    parsed = urlparse(str(server.endpoint or ""))
+    if parsed.scheme in {"http", "https"}:
+        return {"mcpServers": {server.server_key: {"url": server.endpoint}}}
+    return {
+        "mcpServers": {
+            server.server_key: {
+                "transport": server.transport_kind,
+                "endpoint": server.endpoint,
+            }
+        }
+    }
+
+
+def _configured_server_from_payload(payload: dict[str, Any]) -> _ConfiguredMcpServer:
+    return _ConfiguredMcpServer(
+        id=str(payload["id"]),
+        server_key=str(payload["server_key"]),
+        name=str(payload["name"]),
+        transport_kind=str(payload["transport_kind"]),
+        protocol=str(payload["protocol"]),
+        endpoint=str(payload["endpoint"]),
+        enabled=bool(payload.get("enabled", True)),
+        preset_key=str(payload.get("preset_key") or "") or None,
+        auth_config=dict(payload.get("auth_config") or {}),
+        server_metadata=dict(payload.get("server_metadata") or {}),
+        health_status=str(payload.get("health_status") or "unknown"),
+        health_error=str(payload.get("health_error") or "") or None,
+        last_health_at=payload.get("last_health_at"),
+        created_at=int(payload.get("created_at") or 0),
+        updated_at=int(payload.get("updated_at") or 0),
+    )
+
+
+def _configured_builtin_server_payloads(
+    *,
+    exclude_keys: set[str] | None = None,
+    exclude_preset_keys: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    excluded = {str(item).strip() for item in set(exclude_keys or set()) if str(item).strip()}
+    excluded_presets = {str(item).strip() for item in set(exclude_preset_keys or set()) if str(item).strip()}
+    payloads: list[dict[str, Any]] = []
+    for preset_key, server_key, name in BUILTIN_MCP_SERVER_SPECS:
+        if server_key in excluded or preset_key in excluded_presets:
+            continue
+        template = _preset_template_by_key(preset_key)
+        if template is None:
+            continue
+        endpoint = _default_endpoint_for_preset(preset_key) or str(template.get("endpoint_example") or "").strip()
+        server_payload = {
+            "id": f"builtin:{server_key}",
+            "server_key": server_key,
+            "name": name,
+            "transport_kind": template["transport_kind"],
+            "protocol": template["protocol"],
+            "endpoint": endpoint,
+            "enabled": True,
+            "preset_key": preset_key,
+            "auth_config": {},
+            "server_metadata": {"builtin": True},
+            "health_status": "unknown",
+            "health_error": None,
+            "last_health_at": None,
+            "created_at": 0,
+            "updated_at": 0,
+        }
+        server_payload.update(
+            _apply_preset_server_defaults(
+                template,
+                endpoint=endpoint,
+                existing_metadata=server_payload["server_metadata"],
+            )
+        )
+        server_payload["standard_config"] = _standard_mcp_server_config(_configured_server_from_payload(server_payload))  # type: ignore[arg-type]
+        payloads.append(server_payload)
+    return payloads
+
+
+def _configured_builtin_server_by_ref(ref: str) -> _ConfiguredMcpServer | None:
+    normalized = str(ref or "").strip()
+    if not normalized:
+        return None
+    for payload in _configured_builtin_server_payloads():
+        if normalized in {payload["id"], payload["server_key"], str(payload.get("preset_key") or "")}:
+            return _configured_server_from_payload(payload)
+    return None
 
 
 def _preset_template_by_key(preset_key: str) -> dict[str, Any] | None:
@@ -852,6 +978,8 @@ def _normalize_discovered_tool(server: McpServer, payload: dict[str, Any]) -> di
         return None
     if _is_browser_mcp_tool(server, name) and name not in _BROWSER_READ_ONLY_RUNTIME_TOOL_NAMES:
         return None
+    if _is_virtualhid_mcp_tool(server, name) and not name.startswith("hid_"):
+        return None
     annotations = payload.get("annotations") if isinstance(payload.get("annotations"), dict) else {}
     parameters = payload.get("inputSchema") if isinstance(payload.get("inputSchema"), dict) else {"type": "object", "properties": {}, "additionalProperties": True}
     read_only = _tool_read_only_hint(server, name, annotations)
@@ -928,7 +1056,14 @@ class McpRegistryService:
     def list_servers(self) -> list[dict[str, Any]]:
         with self.session_factory() as session:
             repo = McpServerRepository(session)
-            return [self._serialize_server_payload(session, item) for item in repo.list(limit=500, offset=0)]
+            db_servers = repo.list(limit=500, offset=0)
+            db_keys = {str(item.server_key or "").strip() for item in db_servers}
+            db_preset_keys = {str(item.preset_key or "").strip() for item in db_servers if str(item.preset_key or "").strip()}
+            configured = [
+                self._serialize_configured_server_payload(_configured_server_from_payload(payload))
+                for payload in _configured_builtin_server_payloads(exclude_keys=db_keys, exclude_preset_keys=db_preset_keys)
+            ]
+            return configured + [self._serialize_server_payload(session, item) for item in db_servers]
 
     def create_server(self, payload: dict[str, Any]) -> dict[str, Any]:
         tools = list(payload.pop("tools", []) or [])
@@ -1009,6 +1144,10 @@ class McpRegistryService:
             repo.delete(server)
 
     def healthcheck_server(self, server_id: str) -> dict[str, Any]:
+        configured = _configured_builtin_server_by_ref(server_id)
+        if configured is not None:
+            return self._healthcheck_configured_server(configured)
+
         with self.session_factory() as session:
             server_repo = McpServerRepository(session)
             tool_repo = McpToolRepository(session)
@@ -1065,13 +1204,33 @@ class McpRegistryService:
             server_repo = McpServerRepository(session)
             tool_repo = McpToolRepository(session)
             has_standard_mcp_server = False
-            for server in server_repo.enabled():
+            db_servers = [self._refresh_server_from_preset(session, server) for server in server_repo.enabled()]
+            db_keys = {str(server.server_key or "").strip() for server in db_servers}
+            db_preset_keys = {str(server.preset_key or "").strip() for server in db_servers if str(server.preset_key or "").strip()}
+            for server in (
+                _configured_server_from_payload(payload)
+                for payload in _configured_builtin_server_payloads(exclude_keys=db_keys, exclude_preset_keys=db_preset_keys)
+            ):
+                if server.protocol == STANDARD_MCP_PROTOCOL:
+                    has_standard_mcp_server = True
+                    try:
+                        discovered_tools = self._discover_tools_for_server(server)  # type: ignore[arg-type]
+                    except Exception:
+                        discovered_tools = []
+                    for item in discovered_tools:
+                        name = str(item.get("name") or "").strip()
+                        if not name or name in MCP_RESOURCE_TOOL_NAMES or tools.has(name):
+                            continue
+                        tools.register(self._to_configured_tool_definition(server, item))  # type: ignore[arg-type]
+            for server in db_servers:
                 server = self._refresh_server_from_preset(session, server)
                 if server.protocol == STANDARD_MCP_PROTOCOL:
                     has_standard_mcp_server = True
                     self._best_effort_sync_tools(session, server, tool_repo=tool_repo, replace_existing=True)
                 for item in tool_repo.by_server(server.id, enabled_only=True):
                     if item.name in MCP_RESOURCE_TOOL_NAMES:
+                        continue
+                    if tools.has(item.name):
                         continue
                     tools.register(self._to_tool_definition(server, item))
             if has_standard_mcp_server:
@@ -1090,10 +1249,91 @@ class McpRegistryService:
         checks: list[dict[str, Any]] = []
         browser_ok = False
         hid_ok = False
+
+        def append_check(server: McpServer, *, kind: str, enabled_names: set[str], missing: list[str]) -> bool:
+            if missing:
+                checks.append(
+                    {
+                        "server_key": server.server_key,
+                        "kind": kind,
+                        "status": "missing_tools",
+                        "missing_tools": missing,
+                    }
+                )
+                return False
+            probe_name = ""
+            if kind == "browser-mcp":
+                for candidate in ("browser_get_active_tab", "browser_list_tabs"):
+                    if candidate in enabled_names:
+                        probe_name = candidate
+                        break
+            else:
+                probe_name = "hid_state" if "hid_state" in enabled_names else ""
+            try:
+                if probe_name:
+                    self._invoke_tool_unlocked(server, probe_name, {})
+                checks.append(
+                    {
+                        "server_key": server.server_key,
+                        "kind": kind,
+                        "status": "healthy",
+                        "missing_tools": [],
+                        "probe_tool": probe_name or None,
+                    }
+                )
+                return True
+            except Exception as exc:
+                checks.append(
+                    {
+                        "server_key": server.server_key,
+                        "kind": kind,
+                        "status": "unhealthy",
+                        "missing_tools": [],
+                        "probe_tool": probe_name or None,
+                        "error": str(exc),
+                    }
+                )
+                return False
+
         with self.session_factory() as session:
             server_repo = McpServerRepository(session)
             tool_repo = McpToolRepository(session)
-            for server in server_repo.enabled():
+            db_servers = [self._refresh_server_from_preset(session, server) for server in server_repo.enabled()]
+            db_keys = {str(server.server_key or "").strip() for server in db_servers}
+            db_preset_keys = {str(server.preset_key or "").strip() for server in db_servers if str(server.preset_key or "").strip()}
+            configured_servers = [
+                _configured_server_from_payload(payload)
+                for payload in _configured_builtin_server_payloads(exclude_keys=db_keys, exclude_preset_keys=db_preset_keys)
+            ]
+            for server in configured_servers:
+                is_browser = _is_browser_mcp_tool(server, "browser_snapshot")
+                is_hid = _is_virtualhid_mcp_tool(server, "hid_action")
+                if not is_browser and not is_hid:
+                    continue
+                try:
+                    enabled_names = {
+                        str(item.get("name") or "").strip()
+                        for item in self._discover_tools_for_server(server)  # type: ignore[arg-type]
+                        if bool(item.get("enabled", True))
+                    }
+                    if is_browser:
+                        browser_ok = browser_ok or append_check(
+                            server, kind="browser-mcp", enabled_names=enabled_names, missing=sorted({"browser_snapshot"} - enabled_names)
+                        )
+                    if is_hid:
+                        hid_ok = hid_ok or append_check(
+                            server, kind="VirtualHID", enabled_names=enabled_names, missing=sorted({"hid_action", "hid_state"} - enabled_names)
+                        )
+                except Exception as exc:
+                    checks.append(
+                        {
+                            "server_key": server.server_key,
+                            "kind": "browser-mcp" if is_browser else "VirtualHID",
+                            "status": "unhealthy",
+                            "error": str(exc),
+                        }
+                    )
+            for server in db_servers:
                 server = self._refresh_server_from_preset(session, server)
                 is_browser = _is_browser_mcp_tool(server, "browser_snapshot")
                 is_hid = _is_virtualhid_mcp_tool(server, "hid_action")
@@ -1105,25 +1345,13 @@ class McpRegistryService:
                     enabled_names = {item.name for item in tool_repo.by_server(server.id, enabled_only=True)}
                     if is_browser:
                         missing = sorted({"browser_snapshot"} - enabled_names)
-                        browser_ok = browser_ok or not missing
-                        checks.append(
-                            {
-                                "server_key": server.server_key,
-                                "kind": "browser-mcp",
-                                "status": "healthy" if not missing else "missing_tools",
-                                "missing_tools": missing,
-                            }
+                        browser_ok = browser_ok or append_check(
+                            server, kind="browser-mcp", enabled_names=enabled_names, missing=missing
                         )
                     if is_hid:
                         missing = sorted({"hid_action", "hid_state"} - enabled_names)
-                        hid_ok = hid_ok or not missing
-                        checks.append(
-                            {
-                                "server_key": server.server_key,
-                                "kind": "VirtualHID",
-                                "status": "healthy" if not missing else "missing_tools",
-                                "missing_tools": missing,
-                            }
+                        hid_ok = hid_ok or append_check(
+                            server, kind="VirtualHID", enabled_names=enabled_names, missing=missing
                         )
                 except Exception as exc:
                     self._mark_server_health(server.id, status="unhealthy", error_message=str(exc))
@@ -1253,6 +1481,41 @@ class McpRegistryService:
             name=tool.name,
             description=tool.description,
             parameters=dict(tool.parameters or {}),
+            handler=_handler,
+            metadata=metadata,
+        )
+
+    def _to_configured_tool_definition(self, server: McpServer, tool_payload: dict[str, Any]) -> ToolDefinition:
+        remote_name = str(tool_payload.get("remote_name") or tool_payload.get("name") or "").strip()
+        read_only = str(tool_payload.get("risk_level") or "") == "low"
+
+        def _handler(arguments: dict[str, Any], *, tool_name: str = remote_name) -> Any:
+            if _requires_linear_browser_hid_execution(server, tool_name):
+                with _BROWSER_HID_TOOL_LOCK:
+                    normalized_args = _normalize_mcp_tool_arguments(tool_name, arguments)
+                    _prepare_linear_browser_hid_tool_call(server, tool_name, normalized_args)
+                    result = self._invoke_tool_unlocked(server, tool_name, normalized_args)
+                    _record_linear_browser_hid_tool_call(server, tool_name, normalized_args, result)
+                    return result
+            return self._invoke_tool_unlocked(server, tool_name, _normalize_mcp_tool_arguments(tool_name, arguments))
+
+        metadata = {
+            "capabilities": list(tool_payload.get("capabilities") or _resolve_runtime_capabilities(server, read_only=read_only)),
+            "external_tool": True,
+            "real_environment": True,
+            "mcp_server_id": server.id,
+            "mcp_server_key": server.server_key,
+            "mcp_server_name": server.name,
+            "mcp_tool_id": f"{server.id}:{remote_name}",
+            "mcp_tool_name": str(tool_payload.get("name") or remote_name),
+            "mcp_remote_name": remote_name,
+            "mcp_protocol": server.protocol,
+            "builtin_mcp": bool(dict(server.server_metadata or {}).get("builtin")),
+        }
+        return ToolDefinition(
+            name=str(tool_payload.get("name") or remote_name),
+            description=str(tool_payload.get("description") or remote_name),
+            parameters=dict(tool_payload.get("parameters") or {}),
             handler=_handler,
             metadata=metadata,
         )
@@ -1409,6 +1672,8 @@ class McpRegistryService:
             "preset_key": server.preset_key,
             "auth_config": dict(server.auth_config or {}),
             "server_metadata": dict(server.server_metadata or {}),
+            "standard_config": _standard_mcp_server_config(server),
+            "standardConfig": _standard_mcp_server_config(server),
             "health_status": server.health_status,
             "health_error": server.health_error,
             "last_health_at": server.last_health_at,
@@ -1432,6 +1697,83 @@ class McpRegistryService:
             "created_at": server.created_at,
             "updated_at": server.updated_at,
         }
+
+    def _serialize_configured_server_payload(
+        self,
+        server: McpServer,
+        *,
+        health_status: str | None = None,
+        health_error: str | None = None,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        serialized_tools = []
+        for index, item in enumerate(list(tools or []), start=1):
+            name = str(item.get("name") or "").strip()
+            serialized_tools.append(
+                {
+                    "id": f"{server.id}:{name or index}",
+                    "server_id": server.id,
+                    "name": name,
+                    "description": str(item.get("description") or name),
+                    "parameters": dict(item.get("parameters") or {}),
+                    "capabilities": list(item.get("capabilities") or []),
+                    "enabled": bool(item.get("enabled", True)),
+                    "risk_level": str(item.get("risk_level") or "medium"),
+                    "remote_name": item.get("remote_name"),
+                    "tool_metadata": dict(item.get("tool_metadata") or {}),
+                    "created_at": 0,
+                    "updated_at": 0,
+                }
+            )
+        standard_config = _standard_mcp_server_config(server)
+        return {
+            "id": server.id,
+            "server_key": server.server_key,
+            "name": server.name,
+            "transport_kind": server.transport_kind,
+            "protocol": server.protocol,
+            "endpoint": server.endpoint,
+            "enabled": server.enabled,
+            "preset_key": server.preset_key,
+            "auth_config": dict(server.auth_config or {}),
+            "server_metadata": dict(server.server_metadata or {}),
+            "standard_config": standard_config,
+            "standardConfig": standard_config,
+            "health_status": health_status or server.health_status,
+            "health_error": health_error if health_error is not None else server.health_error,
+            "last_health_at": unix_seconds_now(),
+            "tools": serialized_tools,
+            "created_at": server.created_at,
+            "updated_at": server.updated_at,
+        }
+
+    def _healthcheck_configured_server(self, server: McpServer) -> dict[str, Any]:
+        status = "healthy"
+        error_message: str | None = None
+        discovered: list[dict[str, Any]] = []
+        try:
+            discovered = self._discover_tools_for_server(server)
+            probe = next(
+                (
+                    item
+                    for item in discovered
+                    if isinstance(item.get("parameters"), dict) and _tool_has_zero_argument_schema(dict(item.get("parameters") or {}))
+                ),
+                None,
+            )
+            if probe is not None:
+                self._invoke_tool_unlocked(server, str(probe.get("remote_name") or probe.get("name") or ""), {})
+            else:
+                _ = _mcp_list_tools(server)
+        except Exception as exc:
+            status = "unhealthy"
+            error_message = str(exc)
+        return self._serialize_configured_server_payload(
+            server,
+            health_status=status,
+            health_error=error_message,
+            tools=discovered,
+        )
 
     def _refresh_server_from_preset(self, session: Session, server: McpServer) -> McpServer:
         preset_key = str(server.preset_key or "").strip()

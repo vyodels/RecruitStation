@@ -18,6 +18,7 @@ import type {
   AgentConversationSummary,
   AgentKind,
   AgentMemorySummary,
+  McpServerRecord,
   AgentRunRecord,
   AgentSnapshot,
   AgentToolSummary,
@@ -45,7 +46,7 @@ interface ChatOverlayProps {
 type PanelNoticeTone = "info" | "success" | "error";
 type AgentListFilter = "all" | "running" | "waiting" | "done" | "failed";
 type CapabilityCategoryKey = "business" | "system" | "skills" | "mcp" | "memory";
-type CapabilityItemKind = "tool" | "skill" | "memory";
+type CapabilityItemKind = "tool" | "skill" | "memory" | "mcp";
 type AgentConfigSectionKey =
   | "identity"
   | "responsibilities"
@@ -107,6 +108,17 @@ interface CapabilityItem {
   tool?: AgentToolSummary;
   skill?: SkillRecord;
   memory?: AgentMemorySummary;
+  mcp?: McpServerRecord;
+}
+
+interface BusinessActionTimelineItem {
+  key: string;
+  category: "jd" | "candidate" | "resume" | "communication" | "application" | "evaluation" | "sync" | "approval" | "state";
+  label: string;
+  title: string;
+  detail: string;
+  time: string;
+  status: "running" | "success" | "warning" | "error" | "neutral";
 }
 
 interface RecruitingPolicyDraft {
@@ -124,7 +136,8 @@ interface RecruitingPolicyDraft {
 }
 
 type AutomationToolApprovalMode = "auto" | "approval";
-type AutomationConfigPageKey = "jd" | "sop" | "activation" | "resume" | "sync" | "run" | "tools" | "base";
+type AutomationConfigPageKey = "entry" | "jd" | "sop" | "activation" | "tools" | "base";
+const AGENT_KINDS: AgentKind[] = ["jd_sync", "autonomous", "assistant"];
 
 interface AutomationJobStrategyDraft {
   screeningCriteria: string;
@@ -139,19 +152,45 @@ interface AutomationJobStrategyDraft {
 }
 
 interface AutomationExecutionSopDraft {
-  name: string;
-  siteScope: string;
+  siteEntryUrl: string;
+  siteAccessRulesText: string;
   stepsText: string;
   stopRulesText: string;
 }
 
 interface AutomationActivationPolicyDraft {
-  startConditionsText: string;
-  stopConditionsText: string;
-  priorityPreset: string;
-  priorityWeightsText: string;
-  cooldownRulesText: string;
+  manualStartEnabled: boolean;
+  scheduledScanEnabled: boolean;
+  scanIntervalMinutes: string;
+  jdPoolGapEnabled: boolean;
+  candidatePoolTarget: string;
+  externalEventWakeEnabled: boolean;
+  backlogWakeEnabled: boolean;
+  backlogThreshold: string;
+  stopOnJdOffline: boolean;
+  pauseOnLoginRequired: boolean;
+  pauseOnEntryUnavailable: boolean;
+  pauseOnApprovalPending: boolean;
+  pauseOnNoProgress: boolean;
+  priorityDiscoveryWeight: string;
+  priorityUnreadMessageWeight: string;
+  priorityScoringBacklogWeight: string;
+  priorityApprovalWeight: string;
+  priorityJdGapWeight: string;
+  messageSlaMinutes: string;
+  siteCooldownMinutes: string;
+  retryCooldownMinutes: string;
+  maxActionsPerHour: string;
+  maxConsecutiveErrors: string;
 }
+
+type AutomationActivationBooleanField = {
+  [K in keyof AutomationActivationPolicyDraft]: AutomationActivationPolicyDraft[K] extends boolean ? K : never;
+}[keyof AutomationActivationPolicyDraft];
+
+type AutomationActivationNumberField = {
+  [K in keyof AutomationActivationPolicyDraft]: AutomationActivationPolicyDraft[K] extends string ? K : never;
+}[keyof AutomationActivationPolicyDraft];
 
 interface AutomationResumePolicyDraft {
   resumeSourcesText: string;
@@ -211,31 +250,51 @@ const panelItems: Array<{ key: ChatOverlayPanelKey; label: string }> = [
 const assistantUserId = "desktop-user";
 
 function agentDisplayName(kind: AgentKind): string {
-  return kind === "assistant" ? "Assistant Agent" : "Automation Agent";
+  if (kind === "assistant") {
+    return "AI助手";
+  }
+  return kind === "jd_sync" ? "JD 同步" : "自动化招聘";
+}
+
+function agentTabLabel(kind: AgentKind): string {
+  return agentDisplayName(kind);
 }
 
 function normalizeAgentTitle(kind: AgentKind, title: string | null | undefined): string {
   const trimmed = title?.trim();
-  if (kind === "autonomous" && (!trimmed || /^autonomous agent$/i.test(trimmed) || /^autonomous$/i.test(trimmed))) {
+  if (kind !== "assistant" && (!trimmed || /^autonomous agent$/i.test(trimmed) || /^autonomous$/i.test(trimmed) || /^jd sync$/i.test(trimmed))) {
     return agentDisplayName(kind);
   }
   return trimmed || agentDisplayName(kind);
 }
 
 function agentModeLabel(kind: AgentKind): string {
-  return kind === "assistant" ? "对话触发" : "事件/调度触发";
+  if (kind === "assistant") {
+    return "对话触发";
+  }
+  return kind === "jd_sync" ? "手动同步" : "事件/调度触发";
 }
 
 function agentModeSummary(kind: AgentKind): string {
   return kind === "assistant"
     ? "由用户消息驱动，适合解释、检索、局部操作和人工协作。"
+    : kind === "jd_sync"
+      ? "由人工手动启动，专门同步招聘网站 JD，不处理候选人。"
     : "由外部事件、定时调度或手工创建的自动化运行驱动，适合后台持续推进招聘流程。";
+}
+
+function agentShortCode(kind: AgentKind): string {
+  if (kind === "assistant") {
+    return "AS";
+  }
+  return kind === "jd_sync" ? "JD" : "AU";
 }
 
 function workspaceTemplate(): Record<AgentKind, AgentWorkspaceRecord | null> {
   return {
     assistant: null,
     autonomous: null,
+    jd_sync: null,
   };
 }
 
@@ -243,6 +302,7 @@ function conversationTemplate(): Record<AgentKind, string | undefined> {
   return {
     assistant: undefined,
     autonomous: undefined,
+    jd_sync: undefined,
   };
 }
 
@@ -250,6 +310,7 @@ function localConversationTemplate(): Record<AgentKind, AgentConversationSummary
   return {
     assistant: [],
     autonomous: [],
+    jd_sync: [],
   };
 }
 
@@ -450,6 +511,11 @@ function numberConfigValue(value: string, fallback: number): number {
   return Number.isFinite(numeric) ? numeric : fallback;
 }
 
+function nullableNumberConfigValue(value: string): number | null {
+  const numeric = Number.parseFloat(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
 function recruitingPolicyPayloadFromDraft(draft: RecruitingPolicyDraft): RecruitingPolicyConfig {
   return {
     jdStandards: draft.jdStandards,
@@ -478,50 +544,39 @@ function recruitingPolicyPayloadFromDraft(draft: RecruitingPolicyDraft): Recruit
   };
 }
 
-const DEFAULT_AUTOMATION_SOP_STEPS = [
-  "确认本次运行选择的 JD 与对应策略版本。",
-  "按 JD 策略发现候选人，先写入候选人事实与来源证据。",
-  "完成在线简历事实采集，并按在线简历评分标准给出阶段结论。",
-  "对在线通过或需复核的候选人索取离线简历，附件到位后按离线简历标准评分。",
-  "汇总 JD 匹配、在线简历、离线简历、沟通证据和风险项，形成综合评分与建议动作。",
-  "触发停止规则、JD 下架或进入人工审批节点时，按工具权限策略处理。",
-];
-
-const DEFAULT_AUTOMATION_STOP_RULES = [
-  "JD 被人工下架后自动从可执行列表移除。",
-  "候选人缺少关键证据时不得进入综合通过状态。",
-  "外联、删除、归档、状态流转等关键业务工具按权限矩阵决定是否先审批。",
-].join("\n");
-
-const DEFAULT_AUTOMATION_START_CONDITIONS = [
-  "手动开始工作区后允许处理队列。",
-  "定时扫描发现可执行 JD 有候选人池缺口。",
-  "外部招聘网站同步到新候选人、新 IM、新简历或新联系方式。",
-  "未读消息、待在线评分或待离线评分积压超过阈值。",
-].join("\n");
-
-const DEFAULT_AUTOMATION_PRIORITY_WEIGHTS = [
-  "基础任务权重：发现候选人 40，未读消息 55，待评分 45，待审批 70。",
-  "JD 缺口权重：活跃合格候选人距离目标池水位越远，优先级越高。",
-  "消息等待时长权重：超过 SLA 后线性增加。",
-  "人工标记权重：运营标记高优先级时直接上浮。",
-  "冷却/频率限制惩罚：外部网站限频、失败重试冷却时降低优先级。",
-].join("\n");
-
 const DEFAULT_AUTOMATION_RESUME_SOURCES = [
-  "Run checkpoint",
-  "最近关键消息",
-  "历史摘要",
-  "业务事实：JD、候选人、简历、IM、联系方式、评分记录",
-  "已执行 tool call / tool result",
-  "待审批项 / 待执行项",
-  "本次 ActivationEvent / WakeupEvent",
+  "当前运行进度、最近一次已完成动作和下一步待办。",
+  "选中 JD 的招聘目标、硬性要求、候选人池水位和下架状态。",
+  "候选人的在线简历、离线简历、沟通记录、联系方式和评分记录。",
+  "已提交但未处理的人工审批、待补材料和异常阻塞。",
+  "最近同步到的新消息、新简历、新联系方式和外部状态变化。",
 ].join("\n");
 
 const DEFAULT_AUTOMATION_RUNTIME_INPUT_PREVIEW = [
-  "本次运行输入由 Adapter 根据结构化事件编译，不是用户随手输入的自然语言 prompt。",
-  "必须包含：为什么唤醒、恢复哪个 run、当前状态、业务事实、本轮目标、禁止重复动作。",
-  "运行输入进入 runtime user/context 层；高权威业务策略仍来自 developer/system 业务策略区。",
+  "恢复后先核对上次动作是否已经写入业务记录，避免重复外联、重复归档或重复推进状态。",
+  "继续执行前必须确认当前 JD 仍启用、候选人未被淘汰、审批未被拒绝。",
+  "恢复摘要需要说明本轮为什么继续、继续处理哪个 JD/候选人、预计产出和阻塞条件。",
+].join("\n");
+
+const DEFAULT_AUTOMATION_SOP_PROMPT = [
+  "你是自动化招聘 Agent。每次运行必须围绕已选 JD、已配置招聘入口 URL、JD 策略、评分标准、工具权限和人工审批规则执行，不得让临时用户说明覆盖这些业务策略。",
+  "",
+  "入口与浏览器会话：",
+  "- 只从配置的招聘入口 URL 进入招聘网站，并复用人工提前登录好的浏览器会话。",
+  "- 不处理登录、验证码、账号切换、绕过风控或新建账号；遇到这些情况立即暂停并交给人工。",
+  "- 站点页面、字段、按钮和路径必须以当前页面可见证据为准，不依赖产品代码内置的站点专属选择器或解析器。",
+  "",
+  "执行流程：",
+  "- 确认本次运行启用的 JD、候选人目标数量与对应策略版本。",
+  "- 进入职位/候选人入口，按 JD 策略发现候选人，先写入候选人事实与来源证据。",
+  "- 完成在线简历事实采集，并按在线简历评分标准给出阶段结论。",
+  "- 对在线通过或需复核的候选人索取离线简历，附件到位后按离线简历标准评分。",
+  "- 汇总 JD 匹配、在线简历、离线简历、沟通证据和风险项，形成综合评分与建议动作。",
+  "",
+  "恢复、同步与停止：",
+  "- 恢复后先核对上次动作是否已经写入业务记录，避免重复外联、重复归档或重复推进状态。",
+  "- 同步新消息、简历附件、联系方式和状态变化，并保留证据来源。",
+  "- JD 被下架、候选人缺少关键证据、入口不可访问、页面证据不足、触发审批节点或无可推进动作时，暂停并交给人工。",
 ].join("\n");
 
 function automationConfigDraftTemplate(): AutomationConfigDraft {
@@ -529,17 +584,40 @@ function automationConfigDraftTemplate(): AutomationConfigDraft {
     selectedRunJobIds: [],
     jobStrategies: {},
     executionSop: {
-      name: "标准招聘执行 SOP",
-      siteScope: "本次运行所有选中 JD",
-      stepsText: DEFAULT_AUTOMATION_SOP_STEPS.join("\n"),
-      stopRulesText: DEFAULT_AUTOMATION_STOP_RULES,
+      siteEntryUrl: "",
+      siteAccessRulesText: [
+        "只在配置的招聘入口 URL 和当前已登录浏览器会话内执行招聘动作。",
+        "登录、验证码、账号切换和风控处理都由人工提前完成；Agent 不处理这些环节。",
+        "进入职位列表、候选人列表、候选人详情、消息和简历入口时必须以页面可见证据为准。",
+        "站点字段、页面名称和导航路径可由 Agent 观察判断；不得依赖产品代码内置的站点专属选择器或解析器。",
+      ].join("\n"),
+      stepsText: DEFAULT_AUTOMATION_SOP_PROMPT,
+      stopRulesText: "",
     },
     activationPolicy: {
-      startConditionsText: DEFAULT_AUTOMATION_START_CONDITIONS,
-      stopConditionsText: DEFAULT_AUTOMATION_STOP_RULES,
-      priorityPreset: "balanced",
-      priorityWeightsText: DEFAULT_AUTOMATION_PRIORITY_WEIGHTS,
-      cooldownRulesText: "外部站点限频、连续异常、审批超时、当前 run 无可推进动作时进入冷却或暂停。",
+      manualStartEnabled: true,
+      scheduledScanEnabled: true,
+      scanIntervalMinutes: "30",
+      jdPoolGapEnabled: true,
+      candidatePoolTarget: "20",
+      externalEventWakeEnabled: true,
+      backlogWakeEnabled: true,
+      backlogThreshold: "5",
+      stopOnJdOffline: true,
+      pauseOnLoginRequired: true,
+      pauseOnEntryUnavailable: true,
+      pauseOnApprovalPending: true,
+      pauseOnNoProgress: true,
+      priorityDiscoveryWeight: "40",
+      priorityUnreadMessageWeight: "55",
+      priorityScoringBacklogWeight: "45",
+      priorityApprovalWeight: "70",
+      priorityJdGapWeight: "2",
+      messageSlaMinutes: "60",
+      siteCooldownMinutes: "30",
+      retryCooldownMinutes: "15",
+      maxActionsPerHour: "120",
+      maxConsecutiveErrors: "3",
     },
     resumePolicy: {
       resumeSourcesText: DEFAULT_AUTOMATION_RESUME_SOURCES,
@@ -563,11 +641,6 @@ function automationJobSubtitle(job: JobDescriptionSummaryRecord): string {
   return [job.companyName, job.department, job.location].filter(Boolean).join(" · ") || job.status || "未标注";
 }
 
-function statusAllowsDefaultRunSelection(status: string | null | undefined): boolean {
-  const normalized = (status ?? "").trim().toLowerCase();
-  return normalized === "" || normalized === "active" || normalized === "open" || normalized === "published";
-}
-
 function stringFromUnknown(value: unknown, fallback = ""): string {
   if (typeof value === "string") {
     return value;
@@ -576,6 +649,46 @@ function stringFromUnknown(value: unknown, fallback = ""): string {
     return String(value);
   }
   return fallback;
+}
+
+function booleanFromUnknown(value: unknown, fallback = false): boolean {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["true", "1", "yes", "on"].includes(normalized)) {
+      return true;
+    }
+    if (["false", "0", "no", "off"].includes(normalized)) {
+      return false;
+    }
+  }
+  if (typeof value === "number") {
+    return value !== 0;
+  }
+  return fallback;
+}
+
+function linesFromText(value: string): string[] {
+  return value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+}
+
+function textFromLines(lines: string[]): string {
+  return lines.map((line) => line.trim()).filter(Boolean).join("\n");
+}
+
+function readableUrlHost(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return "";
+  }
+  try {
+    const parsed = new URL(/^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`);
+    return parsed.hostname || trimmed;
+  } catch {
+    return trimmed.length > 32 ? `${trimmed.slice(0, 29)}...` : trimmed;
+  }
 }
 
 function recordField(record: Record<string, unknown>, ...keys: string[]): Record<string, unknown> | undefined {
@@ -600,47 +713,80 @@ function arrayStringField(record: Record<string, unknown>, ...keys: string[]): s
 
 function automationJobStrategyFromRaw(
   raw: Record<string, unknown> | undefined,
-  job: JobDescriptionSummaryRecord,
-  fallbackPolicy?: RecruitingPolicyConfig,
 ): AutomationJobStrategyDraft {
   const record = raw ?? {};
+  const resumeScoring = recordField(record, "resumeScoring", "resume_scoring") ?? {};
+  const onlineResume = recordField(resumeScoring, "online", "onlineResume", "online_resume") ?? {};
+  const offlineResume = recordField(resumeScoring, "offline", "offlineResume", "offline_resume") ?? {};
+  const compositeScoring = recordField(record, "compositeScoring", "composite_scoring") ?? {};
+  const compositeScoringText = typeof record.compositeScoring === "string"
+    ? record.compositeScoring
+    : typeof record.composite_scoring === "string"
+      ? record.composite_scoring
+      : undefined;
   return {
     screeningCriteria: stringFromUnknown(
       record.screeningCriteria ?? record.screening_criteria,
-      fallbackPolicy?.jdStandards || job.requirements || job.summary || "",
     ),
     onlineResumeCriteria: stringFromUnknown(
       record.onlineResumeCriteria ?? record.online_resume_criteria,
-      fallbackPolicy?.onlineResumeCriteria ?? "",
     ),
     offlineResumeCriteria: stringFromUnknown(
       record.offlineResumeCriteria ?? record.offline_resume_criteria,
-      fallbackPolicy?.offlineResumeCriteria ?? "",
     ),
     compositeScoring: stringFromUnknown(
-      record.compositeScoring ?? record.composite_scoring,
-      fallbackPolicy?.compositeScoring ?? "",
+      record.compositeScoringText ?? record.composite_scoring_text ?? compositeScoringText ?? compositeScoring.criteria,
     ),
     manualReviewRules: stringFromUnknown(
       record.manualReviewRules ?? record.manual_review_rules,
-      fallbackPolicy?.screeningRules ?? "",
     ),
-    onlineResumePass: stringFromUnknown(record.onlineResumePass ?? record.online_resume_pass, String(fallbackPolicy?.thresholds.onlinePass ?? 70)),
-    offlineResumePass: stringFromUnknown(record.offlineResumePass ?? record.offline_resume_pass, String(fallbackPolicy?.thresholds.offlinePass ?? 72)),
-    compositePass: stringFromUnknown(record.compositePass ?? record.composite_pass, String(fallbackPolicy?.thresholds.compositePass ?? 75)),
-    manualReviewMin: stringFromUnknown(record.manualReviewMin ?? record.manual_review_min, String(fallbackPolicy?.thresholds.manualReviewMin ?? 60)),
+    onlineResumePass: stringFromUnknown(record.onlineResumePass ?? record.online_resume_pass ?? onlineResume.passThreshold ?? onlineResume.pass_threshold),
+    offlineResumePass: stringFromUnknown(record.offlineResumePass ?? record.offline_resume_pass ?? offlineResume.passThreshold ?? offlineResume.pass_threshold),
+    compositePass: stringFromUnknown(record.compositePass ?? record.composite_pass ?? compositeScoring.passThreshold ?? compositeScoring.pass_threshold),
+    manualReviewMin: stringFromUnknown(record.manualReviewMin ?? record.manual_review_min ?? compositeScoring.manualReviewMin ?? compositeScoring.manual_review_min),
+  };
+}
+
+function recommendedAutomationJobStrategy(
+  job: JobDescriptionSummaryRecord,
+  fallbackPolicy?: RecruitingPolicyConfig,
+): AutomationJobStrategyDraft {
+  return {
+    screeningCriteria: fallbackPolicy?.jdStandards || job.requirements || job.summary || "围绕该 JD 的岗位目标、核心职责、硬性门槛、加分项和排除项筛选候选人；所有判断必须引用 JD 要求或候选人证据。",
+    onlineResumeCriteria: fallbackPolicy?.onlineResumeCriteria || "在线简历优先判断 JD 匹配度、最近岗位相关性、核心技能证据、项目深度、稳定性和明显风险；不足以判断时进入补充材料环节。",
+    offlineResumeCriteria: fallbackPolicy?.offlineResumeCriteria || "离线简历用于补齐在线资料缺失的信息，重点检查项目细节、影响指标、职责边界、联系方式和时间线一致性。",
+    compositeScoring: fallbackPolicy?.compositeScoring || "综合评分基于 JD 匹配、在线简历、离线简历、沟通记录和风险项生成，必须输出维度分、证据引用、通过/淘汰建议和下一步动作。",
+    manualReviewRules: fallbackPolicy?.screeningRules || "硬性条件不完整、证据冲突、综合分处于人工复核区间、或涉及关键外联/状态流转时进入人工复核。",
+    onlineResumePass: String(fallbackPolicy?.thresholds.onlinePass ?? 70),
+    offlineResumePass: String(fallbackPolicy?.thresholds.offlinePass ?? 72),
+    compositePass: String(fallbackPolicy?.thresholds.compositePass ?? 75),
+    manualReviewMin: String(fallbackPolicy?.thresholds.manualReviewMin ?? 60),
   };
 }
 
 function automationConfigDraftFromWorkspace(
   workspace: AgentWorkspaceRecord | null,
   jobs: JobDescriptionSummaryRecord[],
+  productKind: "autonomous" | "jd_sync" = "autonomous",
 ): AutomationConfigDraft {
   const template = automationConfigDraftTemplate();
   const runtimeMetadata = isRecord(workspace?.agentDefinition.config.runtimeMetadata)
     ? workspace?.agentDefinition.config.runtimeMetadata
     : {};
-  const rawConfig = recordField(runtimeMetadata, "automationRecruitingConfig", "automationConfig") ?? {};
+  const productConfig = isRecord(workspace?.agentDefinition.productConfig)
+    ? workspace?.agentDefinition.productConfig
+    : {};
+  const autonomousProductConfig = recordField(productConfig, productKind) ?? {};
+  const rawConfig =
+    recordField(
+      autonomousProductConfig,
+      productKind === "jd_sync" ? "jdSyncConfig" : "automationRecruitingConfig",
+      productKind === "jd_sync" ? "jd_sync_config" : "automation_recruiting_config",
+      "automationConfig",
+      "automation_config",
+    ) ??
+    recordField(runtimeMetadata, "automationRecruitingConfig", "automation_recruiting_config", "automationConfig") ??
+    {};
   const rawSop = recordField(rawConfig, "executionSop", "execution_sop") ?? {};
   const rawActivation = recordField(rawConfig, "activationPolicy", "activation_policy") ?? {};
   const rawResume = recordField(rawConfig, "resumePolicy", "resume_policy") ?? {};
@@ -648,7 +794,6 @@ function automationConfigDraftFromWorkspace(
   const rawStrategies = recordField(rawConfig, "jobStrategies", "job_strategies") ?? {};
   const rawToolPolicy = recordField(rawConfig, "toolApprovalPolicy", "tool_approval_policy") ?? {};
   const rawToolOverrides = recordField(rawToolPolicy, "overrides") ?? {};
-  const fallbackPolicy = workspace?.productAdapterConfig.recruitingPolicy;
   const jobStrategies: Record<string, AutomationJobStrategyDraft> = {};
 
   jobs.forEach((job) => {
@@ -657,17 +802,12 @@ function automationConfigDraftFromWorkspace(
       return;
     }
     const rawStrategy = isRecord(rawStrategies[id]) ? rawStrategies[id] : undefined;
-    jobStrategies[id] = automationJobStrategyFromRaw(rawStrategy, job, fallbackPolicy);
+    jobStrategies[id] = automationJobStrategyFromRaw(rawStrategy);
   });
 
   const knownJobIds = new Set(Object.keys(jobStrategies));
   const configuredSelection = arrayStringField(rawConfig, "defaultRunJobIds", "default_run_job_ids", "selectedRunJobIds", "selected_run_job_ids")
     .filter((id) => knownJobIds.has(id));
-  const defaultSelection = jobs
-    .filter((job) => statusAllowsDefaultRunSelection(job.status))
-    .map(automationJobId)
-    .filter((id): id is string => Boolean(id && knownJobIds.has(id)))
-    .slice(0, 5);
   const toolApprovalModes = Object.fromEntries(
     Object.entries(rawToolOverrides).map(([toolId, value]) => [
       toolId,
@@ -676,20 +816,38 @@ function automationConfigDraftFromWorkspace(
   ) as Record<string, AutomationToolApprovalMode>;
 
   return {
-    selectedRunJobIds: configuredSelection.length ? configuredSelection : defaultSelection,
+    selectedRunJobIds: configuredSelection,
     jobStrategies,
     executionSop: {
-      name: stringFromUnknown(rawSop.name, template.executionSop.name),
-      siteScope: stringFromUnknown(rawSop.siteScope ?? rawSop.site_scope, template.executionSop.siteScope),
+      siteEntryUrl: stringFromUnknown(rawSop.siteEntryUrl ?? rawSop.site_entry_url ?? rawSop.entryUrl ?? rawSop.entry_url, template.executionSop.siteEntryUrl),
+      siteAccessRulesText: stringFromUnknown(rawSop.siteAccessRulesText ?? rawSop.site_access_rules_text ?? rawSop.siteAccessRules ?? rawSop.site_access_rules, template.executionSop.siteAccessRulesText),
       stepsText: stringFromUnknown(rawSop.stepsText ?? rawSop.steps_text, template.executionSop.stepsText),
       stopRulesText: stringFromUnknown(rawSop.stopRulesText ?? rawSop.stop_rules_text, template.executionSop.stopRulesText),
     },
     activationPolicy: {
-      startConditionsText: stringFromUnknown(rawActivation.startConditionsText ?? rawActivation.start_conditions_text, template.activationPolicy.startConditionsText),
-      stopConditionsText: stringFromUnknown(rawActivation.stopConditionsText ?? rawActivation.stop_conditions_text, template.activationPolicy.stopConditionsText),
-      priorityPreset: stringFromUnknown(rawActivation.priorityPreset ?? rawActivation.priority_preset, template.activationPolicy.priorityPreset),
-      priorityWeightsText: stringFromUnknown(rawActivation.priorityWeightsText ?? rawActivation.priority_weights_text, template.activationPolicy.priorityWeightsText),
-      cooldownRulesText: stringFromUnknown(rawActivation.cooldownRulesText ?? rawActivation.cooldown_rules_text, template.activationPolicy.cooldownRulesText),
+      manualStartEnabled: booleanFromUnknown(rawActivation.manualStartEnabled ?? rawActivation.manual_start_enabled, template.activationPolicy.manualStartEnabled),
+      scheduledScanEnabled: booleanFromUnknown(rawActivation.scheduledScanEnabled ?? rawActivation.scheduled_scan_enabled, template.activationPolicy.scheduledScanEnabled),
+      scanIntervalMinutes: stringFromUnknown(rawActivation.scanIntervalMinutes ?? rawActivation.scan_interval_minutes, template.activationPolicy.scanIntervalMinutes),
+      jdPoolGapEnabled: booleanFromUnknown(rawActivation.jdPoolGapEnabled ?? rawActivation.jd_pool_gap_enabled, template.activationPolicy.jdPoolGapEnabled),
+      candidatePoolTarget: stringFromUnknown(rawActivation.candidatePoolTarget ?? rawActivation.candidate_pool_target, template.activationPolicy.candidatePoolTarget),
+      externalEventWakeEnabled: booleanFromUnknown(rawActivation.externalEventWakeEnabled ?? rawActivation.external_event_wake_enabled, template.activationPolicy.externalEventWakeEnabled),
+      backlogWakeEnabled: booleanFromUnknown(rawActivation.backlogWakeEnabled ?? rawActivation.backlog_wake_enabled, template.activationPolicy.backlogWakeEnabled),
+      backlogThreshold: stringFromUnknown(rawActivation.backlogThreshold ?? rawActivation.backlog_threshold, template.activationPolicy.backlogThreshold),
+      stopOnJdOffline: booleanFromUnknown(rawActivation.stopOnJdOffline ?? rawActivation.stop_on_jd_offline, template.activationPolicy.stopOnJdOffline),
+      pauseOnLoginRequired: booleanFromUnknown(rawActivation.pauseOnLoginRequired ?? rawActivation.pause_on_login_required, template.activationPolicy.pauseOnLoginRequired),
+      pauseOnEntryUnavailable: booleanFromUnknown(rawActivation.pauseOnEntryUnavailable ?? rawActivation.pause_on_entry_unavailable, template.activationPolicy.pauseOnEntryUnavailable),
+      pauseOnApprovalPending: booleanFromUnknown(rawActivation.pauseOnApprovalPending ?? rawActivation.pause_on_approval_pending, template.activationPolicy.pauseOnApprovalPending),
+      pauseOnNoProgress: booleanFromUnknown(rawActivation.pauseOnNoProgress ?? rawActivation.pause_on_no_progress, template.activationPolicy.pauseOnNoProgress),
+      priorityDiscoveryWeight: stringFromUnknown(rawActivation.priorityDiscoveryWeight ?? rawActivation.priority_discovery_weight, template.activationPolicy.priorityDiscoveryWeight),
+      priorityUnreadMessageWeight: stringFromUnknown(rawActivation.priorityUnreadMessageWeight ?? rawActivation.priority_unread_message_weight, template.activationPolicy.priorityUnreadMessageWeight),
+      priorityScoringBacklogWeight: stringFromUnknown(rawActivation.priorityScoringBacklogWeight ?? rawActivation.priority_scoring_backlog_weight, template.activationPolicy.priorityScoringBacklogWeight),
+      priorityApprovalWeight: stringFromUnknown(rawActivation.priorityApprovalWeight ?? rawActivation.priority_approval_weight, template.activationPolicy.priorityApprovalWeight),
+      priorityJdGapWeight: stringFromUnknown(rawActivation.priorityJdGapWeight ?? rawActivation.priority_jd_gap_weight, template.activationPolicy.priorityJdGapWeight),
+      messageSlaMinutes: stringFromUnknown(rawActivation.messageSlaMinutes ?? rawActivation.message_sla_minutes, template.activationPolicy.messageSlaMinutes),
+      siteCooldownMinutes: stringFromUnknown(rawActivation.siteCooldownMinutes ?? rawActivation.site_cooldown_minutes, template.activationPolicy.siteCooldownMinutes),
+      retryCooldownMinutes: stringFromUnknown(rawActivation.retryCooldownMinutes ?? rawActivation.retry_cooldown_minutes, template.activationPolicy.retryCooldownMinutes),
+      maxActionsPerHour: stringFromUnknown(rawActivation.maxActionsPerHour ?? rawActivation.max_actions_per_hour, template.activationPolicy.maxActionsPerHour),
+      maxConsecutiveErrors: stringFromUnknown(rawActivation.maxConsecutiveErrors ?? rawActivation.max_consecutive_errors, template.activationPolicy.maxConsecutiveErrors),
     },
     resumePolicy: {
       resumeSourcesText: stringFromUnknown(rawResume.resumeSourcesText ?? rawResume.resume_sources_text, template.resumePolicy.resumeSourcesText),
@@ -720,17 +878,17 @@ function automationConfigPayloadFromDraft(
           resumeScoring: {
             online: {
               criteria: strategy.onlineResumeCriteria,
-              passThreshold: numberConfigValue(strategy.onlineResumePass, 70),
+              passThreshold: nullableNumberConfigValue(strategy.onlineResumePass),
             },
             offline: {
               criteria: strategy.offlineResumeCriteria,
-              passThreshold: numberConfigValue(strategy.offlineResumePass, 72),
+              passThreshold: nullableNumberConfigValue(strategy.offlineResumePass),
             },
           },
           compositeScoring: {
             criteria: strategy.compositeScoring,
-            passThreshold: numberConfigValue(strategy.compositePass, 75),
-            manualReviewMin: numberConfigValue(strategy.manualReviewMin, 60),
+            passThreshold: nullableNumberConfigValue(strategy.compositePass),
+            manualReviewMin: nullableNumberConfigValue(strategy.manualReviewMin),
           },
           manualReviewRules: strategy.manualReviewRules,
         },
@@ -747,17 +905,35 @@ function automationConfigPayloadFromDraft(
     configKind: "multi_jd_recruiting_agent",
     defaultRunJobIds: draft.selectedRunJobIds.filter((jobId) => knownJobIds.has(jobId)),
     executionSop: {
-      name: draft.executionSop.name,
-      siteScope: draft.executionSop.siteScope,
+      siteEntryUrl: draft.executionSop.siteEntryUrl,
+      siteAccessRulesText: draft.executionSop.siteAccessRulesText,
       stepsText: draft.executionSop.stepsText,
       stopRulesText: draft.executionSop.stopRulesText,
     },
     activationPolicy: {
-      startConditionsText: draft.activationPolicy.startConditionsText,
-      stopConditionsText: draft.activationPolicy.stopConditionsText,
-      priorityPreset: draft.activationPolicy.priorityPreset,
-      priorityWeightsText: draft.activationPolicy.priorityWeightsText,
-      cooldownRulesText: draft.activationPolicy.cooldownRulesText,
+      manualStartEnabled: draft.activationPolicy.manualStartEnabled,
+      scheduledScanEnabled: draft.activationPolicy.scheduledScanEnabled,
+      scanIntervalMinutes: draft.activationPolicy.scanIntervalMinutes,
+      jdPoolGapEnabled: draft.activationPolicy.jdPoolGapEnabled,
+      candidatePoolTarget: draft.activationPolicy.candidatePoolTarget,
+      externalEventWakeEnabled: draft.activationPolicy.externalEventWakeEnabled,
+      backlogWakeEnabled: draft.activationPolicy.backlogWakeEnabled,
+      backlogThreshold: draft.activationPolicy.backlogThreshold,
+      stopOnJdOffline: draft.activationPolicy.stopOnJdOffline,
+      pauseOnLoginRequired: draft.activationPolicy.pauseOnLoginRequired,
+      pauseOnEntryUnavailable: draft.activationPolicy.pauseOnEntryUnavailable,
+      pauseOnApprovalPending: draft.activationPolicy.pauseOnApprovalPending,
+      pauseOnNoProgress: draft.activationPolicy.pauseOnNoProgress,
+      priorityDiscoveryWeight: draft.activationPolicy.priorityDiscoveryWeight,
+      priorityUnreadMessageWeight: draft.activationPolicy.priorityUnreadMessageWeight,
+      priorityScoringBacklogWeight: draft.activationPolicy.priorityScoringBacklogWeight,
+      priorityApprovalWeight: draft.activationPolicy.priorityApprovalWeight,
+      priorityJdGapWeight: draft.activationPolicy.priorityJdGapWeight,
+      messageSlaMinutes: draft.activationPolicy.messageSlaMinutes,
+      siteCooldownMinutes: draft.activationPolicy.siteCooldownMinutes,
+      retryCooldownMinutes: draft.activationPolicy.retryCooldownMinutes,
+      maxActionsPerHour: draft.activationPolicy.maxActionsPerHour,
+      maxConsecutiveErrors: draft.activationPolicy.maxConsecutiveErrors,
       programmaticAuthority: true,
     },
     resumePolicy: {
@@ -781,92 +957,146 @@ function automationConfigPayloadFromDraft(
   };
 }
 
-function buildAutomationLaunchPayload(
-  draft: AutomationConfigDraft,
-  jobs: JobDescriptionSummaryRecord[],
-  tools: AgentToolSummary[],
-): AutonomousRunStartRequest | null {
-  const jobById = new Map(jobs.map((job) => [automationJobId(job), job] as const).filter((entry): entry is [string, JobDescriptionSummaryRecord] => Boolean(entry[0])));
-  const selectedJobs = draft.selectedRunJobIds
-    .map((jobId) => {
-      const job = jobById.get(jobId);
-      const strategy = draft.jobStrategies[jobId];
-      if (!job || !strategy) {
-        return null;
-      }
-      return { jobId, job, strategy };
-    })
-    .filter((item): item is { jobId: string; job: JobDescriptionSummaryRecord; strategy: AutomationJobStrategyDraft } => Boolean(item));
-  if (!selectedJobs.length) {
+function buildJdSyncLaunchPayload(draft: AutomationConfigDraft): AutonomousRunStartRequest | null {
+  const configuredEntryUrl = draft.executionSop.siteEntryUrl.trim();
+  if (!configuredEntryUrl) {
     return null;
   }
-  const toolPolicy = automationConfigPayloadFromDraft(draft, jobs, tools).toolApprovalPolicy;
-  const jobPlans = selectedJobs.map((item) => ({
-    jobDescriptionId: item.jobId,
-    title: item.job.title,
-    companyName: item.job.companyName ?? null,
-    status: item.job.status ?? null,
-    screeningCriteria: item.strategy.screeningCriteria,
-    scoringStandards: {
-      onlineResume: {
-        criteria: item.strategy.onlineResumeCriteria,
-        passThreshold: numberConfigValue(item.strategy.onlineResumePass, 70),
-      },
-      offlineResume: {
-        criteria: item.strategy.offlineResumeCriteria,
-        passThreshold: numberConfigValue(item.strategy.offlineResumePass, 72),
-      },
-      composite: {
-        criteria: item.strategy.compositeScoring,
-        passThreshold: numberConfigValue(item.strategy.compositePass, 75),
-        manualReviewMin: numberConfigValue(item.strategy.manualReviewMin, 60),
-      },
-    },
-    manualReviewRules: item.strategy.manualReviewRules,
-  }));
   return {
-    title: `多 JD 自动化招聘 · ${selectedJobs.length} 个 JD`,
+    title: "同步招聘站点 JD",
     instruction: [
-      "按结构化启动计划运行自动化招聘 Agent。",
-      `本次运行覆盖 ${selectedJobs.length} 个可执行 JD。`,
-      "执行时必须使用配置页中的 JD 策略、评分标准、独立 SOP 与业务工具权限策略；不要让普通用户补充说明覆盖这些业务策略。",
+      "从已保存的招聘入口同步 JD。只发现和同步职位，不处理候选人筛选、评分、外联或投递推进。",
+      `招聘入口 URL：${configuredEntryUrl}`,
+      "同步完成后，再选择生效 JD 并配置 JD 策略、评分标准和完整执行 SOP。",
     ].join("\n"),
-    kind: "multi_jd_recruiting",
+    kind: "jd_sync",
     jdId: null,
     candidateCountTarget: null,
     constraints: {
       scope_kind: "global",
-      plan_kind: "multi_jd_recruiting",
-      selected_job_description_ids: selectedJobs.map((item) => item.jobId),
-      execution_sop: draft.executionSop,
-      activation_policy: draft.activationPolicy,
-      resume_policy: draft.resumePolicy,
-      sync_policy: draft.syncPolicy,
-      business_policy_overlay: {
-        job_plans: jobPlans,
+      plan_kind: "jd_sync",
+      target_recruiting_site: {
+        entry_url: configuredEntryUrl,
+        access_rules: linesFromText(draft.executionSop.siteAccessRulesText),
       },
-      tool_approval_policy: toolPolicy,
+      execution_sop: {
+        siteEntryUrl: configuredEntryUrl,
+        siteAccessRulesText: draft.executionSop.siteAccessRulesText,
+      },
+      sync_policy: draft.syncPolicy,
     },
     successCriteria: {
-      requiresOnlineResumeScore: true,
-      requiresOfflineResumeScoreForCompleteCandidates: true,
-      requiresCompositeScore: true,
-      passDecisionSource: "score_thresholds",
-      executableJobSource: "active_job_descriptions",
+      jobDescriptionsSyncedFromObservedSite: true,
+      noCandidateScreening: true,
+      noCandidateOutreach: true,
     },
     contextHints: {
       launch_plan: {
-        plan_kind: "multi_jd_recruiting",
-        jobs: jobPlans.map((plan) => ({
-          jobDescriptionId: plan.jobDescriptionId,
-          title: plan.title,
-          companyName: plan.companyName,
-          status: plan.status,
-        })),
-        activationPolicyPreset: draft.activationPolicy.priorityPreset,
+        plan_kind: "jd_sync",
+        targetEntryUrl: configuredEntryUrl,
+        nextStepAfterSuccess: "select_synced_jd_and_configure_strategy",
       },
     },
   };
+}
+
+function jdSyncConfigPayloadFromDraft(draft: AutomationConfigDraft): Record<string, unknown> {
+  return {
+    schemaVersion: 1,
+    configKind: "job_description_sync_agent",
+    executionSop: {
+      siteEntryUrl: draft.executionSop.siteEntryUrl,
+      siteAccessRulesText: draft.executionSop.siteAccessRulesText,
+    },
+    syncPolicy: {
+      jdSyncText: draft.syncPolicy.jdSyncText,
+    },
+  };
+}
+
+function validateAutomationLaunchReadiness(
+  draft: AutomationConfigDraft,
+  jobs: JobDescriptionSummaryRecord[],
+): string[] {
+  const blockers: string[] = [];
+  const entryUrl = draft.executionSop.siteEntryUrl.trim();
+  if (!entryUrl) {
+    blockers.push("配置招聘入口 URL");
+  } else {
+    try {
+      new URL(entryUrl);
+    } catch {
+      blockers.push("招聘入口 URL 必须是有效 URL");
+    }
+  }
+  if (!jobs.length) {
+    blockers.push("先同步 JD");
+  }
+  const jobById = new Map(jobs.map((job) => [automationJobId(job), job] as const).filter((entry): entry is [string, JobDescriptionSummaryRecord] => Boolean(entry[0])));
+  const selectedJobs = draft.selectedRunJobIds.filter((jobId) => jobById.has(jobId));
+  if (!selectedJobs.length) {
+    blockers.push("选择至少一个生效 JD");
+  }
+  selectedJobs.forEach((jobId) => {
+    const strategy = draft.jobStrategies[jobId];
+    if (
+      !strategy
+      || !strategy.screeningCriteria.trim()
+      || !strategy.onlineResumeCriteria.trim()
+      || !strategy.offlineResumeCriteria.trim()
+      || !strategy.compositeScoring.trim()
+      || !strategy.manualReviewRules.trim()
+      || !strategy.onlineResumePass.trim()
+      || !strategy.offlineResumePass.trim()
+      || !strategy.compositePass.trim()
+      || !strategy.manualReviewMin.trim()
+    ) {
+      blockers.push(`补全 JD 策略：${jobById.get(jobId)?.title ?? jobId}`);
+    }
+  });
+  if (!draft.executionSop.stepsText.trim()) {
+    blockers.push("配置执行 SOP");
+  }
+  const schedulerFields: Array<[keyof AutomationActivationPolicyDraft, string]> = [
+    ["scanIntervalMinutes", "扫描间隔"],
+    ["candidatePoolTarget", "候选人池目标"],
+    ["backlogThreshold", "积压阈值"],
+    ["priorityDiscoveryWeight", "发现候选人权重"],
+    ["priorityUnreadMessageWeight", "未读消息权重"],
+    ["priorityScoringBacklogWeight", "评分积压权重"],
+    ["priorityApprovalWeight", "审批权重"],
+    ["priorityJdGapWeight", "JD 缺口系数"],
+    ["messageSlaMinutes", "消息 SLA"],
+    ["siteCooldownMinutes", "站点冷却"],
+    ["retryCooldownMinutes", "重试冷却"],
+    ["maxActionsPerHour", "每小时动作上限"],
+    ["maxConsecutiveErrors", "连续错误上限"],
+  ];
+  schedulerFields.forEach(([field, label]) => {
+    const value = Number.parseFloat(String(draft.activationPolicy[field] ?? ""));
+    if (!Number.isFinite(value) || value < 0) {
+      blockers.push(`配置调度规则：${label}`);
+    }
+  });
+  return Array.from(new Set(blockers));
+}
+
+function validateJdSyncLaunchReadiness(draft: AutomationConfigDraft): string[] {
+  const blockers: string[] = [];
+  const entryUrl = draft.executionSop.siteEntryUrl.trim();
+  if (!entryUrl) {
+    blockers.push("配置招聘入口 URL");
+  } else {
+    try {
+      new URL(entryUrl);
+    } catch {
+      blockers.push("招聘入口 URL 必须是有效 URL");
+    }
+  }
+  if (!draft.syncPolicy.jdSyncText.trim()) {
+    blockers.push("配置 JD 同步策略");
+  }
+  return blockers;
 }
 
 function linesFromList(values: string[] | undefined): string {
@@ -965,6 +1195,22 @@ function agentConfigDraftTemplate(): Record<AgentKind, AgentConfigDraft> {
       recruitingPolicy: recruitingPolicyDraftFromConfig(),
     },
     autonomous: {
+      systemPrompt: "",
+      identityStatement: "",
+      dutiesText: "",
+      successCriteriaText: "",
+      boundariesText: "",
+      toolScopeJson: "{}",
+      permissionPolicyJson: "{}",
+      outputPolicyJson: "{}",
+      budgetPolicyJson: "{}",
+      modelConfigJson: "{}",
+      contextPolicyJson: "{}",
+      memoryPolicyJson: "{}",
+      scoringRubric: "",
+      recruitingPolicy: recruitingPolicyDraftFromConfig(),
+    },
+    jd_sync: {
       systemPrompt: "",
       identityStatement: "",
       dutiesText: "",
@@ -1169,6 +1415,169 @@ function messageAssociationValues(message: AgentConversationMessage): Set<string
   );
 }
 
+function recordFrom(value: unknown): Record<string, unknown> {
+  return isRecord(value) ? value : {};
+}
+
+function payloadDataFromMessage(message: AgentConversationMessage): Record<string, unknown> {
+  const metadata = recordFrom(message.metadata);
+  const payload = recordFrom(metadata.payload);
+  return recordFrom(payload.data);
+}
+
+function compactBusinessActionText(value: unknown, maxLength = 150): string {
+  const raw = typeof value === "string"
+    ? value
+    : value == null
+      ? ""
+      : JSON.stringify(value, null, 0);
+  const normalized = raw
+    .split(/\n+/)
+    .map((line) => line.replace(/^[-*]\s+/, "").trim())
+    .filter(Boolean)
+    .join(" · ");
+  return normalized.length > maxLength ? `${normalized.slice(0, maxLength)}...` : normalized;
+}
+
+function businessActionStatus(message: AgentConversationMessage): BusinessActionTimelineItem["status"] {
+  const source = `${message.status ?? ""} ${message.kind} ${message.title ?? ""} ${message.content}`.toLowerCase();
+  const data = payloadDataFromMessage(message);
+  if (data.is_error === true || /failed|error|异常|失败/.test(source)) {
+    return "error";
+  }
+  if (/blocked|waiting_human|permission|approval|待审批|等待确认|阻塞/.test(source)) {
+    return "warning";
+  }
+  if (/running|started|调用中|执行中|同步中|下载中/.test(source)) {
+    return "running";
+  }
+  if (/completed|success|ready|done|已完成|完成|成功|已写入|已更新|已发送|已同步/.test(source)) {
+    return "success";
+  }
+  return "neutral";
+}
+
+function classifyBusinessActionCategory(source: string): BusinessActionTimelineItem["category"] | null {
+  const text = source.toLowerCase();
+  if (/approval|permission|waiting_human|human|审批|确认|人工/.test(text)) {
+    return "approval";
+  }
+  if (/score|scor|rank|evaluate|assessment|screen|rubric|pass|reject|评估|评分|筛选|淘汰|通过|复核/.test(text)) {
+    return "evaluation";
+  }
+  if (/resume|cv|attachment|artifact|download|file|pdf|docx|简历|附件|下载|归档/.test(text)) {
+    return "resume";
+  }
+  if (/message|contact|communicat|outbound|email|chat|wecom|phone|send|reply|沟通|联系|外联|消息|发送|回复/.test(text)) {
+    return "communication";
+  }
+  if (/application|apply|submission|delivery|funnel|stage|interview|offer|投递|申请|流程|阶段|面试|录用/.test(text)) {
+    return "application";
+  }
+  if (/candidate|person|talent|profile|sourcing|候选|人才|人选|画像/.test(text)) {
+    return "candidate";
+  }
+  if (/\bjd\b|job_description|job description|position|职位|岗位|招聘需求/.test(text)) {
+    return "jd";
+  }
+  if (/sync|import|export|crawl|collect|同步|导入|采集|抓取/.test(text)) {
+    return "sync";
+  }
+  if (/write|upsert|create|update|delete|archive|state|status|写入|创建|更新|删除|归档|状态/.test(text)) {
+    return "state";
+  }
+  return null;
+}
+
+function businessActionLabel(category: BusinessActionTimelineItem["category"], copy: ReturnType<typeof useI18n>["copy"]): string {
+  switch (category) {
+    case "jd":
+      return copy("JD", "JD");
+    case "candidate":
+      return copy("Candidate", "候选人");
+    case "resume":
+      return copy("Resume", "简历");
+    case "communication":
+      return copy("Communication", "沟通");
+    case "application":
+      return copy("Application", "投递流程");
+    case "evaluation":
+      return copy("Evaluation", "评估");
+    case "sync":
+      return copy("Sync", "同步");
+    case "approval":
+      return copy("Approval", "审批");
+    case "state":
+      return copy("State", "状态变更");
+  }
+}
+
+function businessActionFromMessage(
+  message: AgentConversationMessage,
+  copy: ReturnType<typeof useI18n>["copy"],
+): BusinessActionTimelineItem | null {
+  const metadata = recordFrom(message.metadata);
+  const data = payloadDataFromMessage(message);
+  const source = [
+    message.title,
+    message.content,
+    stringField(metadata, "eventKind", "itemType", "traceKind", "payloadKind", "toolName"),
+    stringField(data, "kind", "tool_name", "name"),
+    compactBusinessActionText(data.input),
+    compactBusinessActionText(data.content),
+  ].filter(Boolean).join(" ");
+  const category = classifyBusinessActionCategory(source);
+  if (!category) {
+    return null;
+  }
+  const dataKind = stringField(data, "kind");
+  const eventType = stringField(metadata, "event_type", "itemType");
+  const isRuntimeToolEvent = eventType === "tool_event" || eventType === "runtime_event";
+  if (isRuntimeToolEvent && dataKind && /delta|input_streamed|call_started|use_completed/.test(dataKind)) {
+    return null;
+  }
+  const toolName = stringField(metadata, "toolName") ?? stringField(data, "tool_name", "name");
+  const title = compactBusinessActionText(
+    message.title
+      || stringField(data, "summary", "title", "status")
+      || toolName
+      || source,
+    72,
+  );
+  const detail = compactBusinessActionText(
+    data.content
+      ?? data.result
+      ?? data.output
+      ?? message.content
+      ?? toolName
+      ?? businessActionLabel(category, copy),
+  );
+  return {
+    key: `message-${message.id}`,
+    category,
+    label: businessActionLabel(category, copy),
+    title: title || businessActionLabel(category, copy),
+    detail: detail || copy("Business state changed.", "业务状态已变化。"),
+    time: message.createdAt,
+    status: businessActionStatus(message),
+  };
+}
+
+function businessActionFromApproval(
+  approval: ApprovalItem,
+  copy: ReturnType<typeof useI18n>["copy"],
+): BusinessActionTimelineItem {
+  return {
+    key: `approval-${approval.id}`,
+    category: "approval",
+    label: copy("Approval", "审批"),
+    title: cleanApprovalTitle(approval),
+    detail: describeApprovalIntent(approval, copy),
+    time: approval.createdAt,
+    status: approval.status === "pending" ? "warning" : approval.status === "approved" ? "success" : "error",
+  };
+}
+
 function isApprovalAnchorMessage(message: AgentConversationMessage): boolean {
   const metadata = isRecord(message.metadata) ? message.metadata : {};
   const tokens = [
@@ -1227,6 +1636,11 @@ function approvalStatusLabel(status: ApprovalItem["status"], copy: ReturnType<ty
 }
 
 function formatStreamMessage(event: AssistantTurnStreamEvent): string | null {
+  const runtimeData = event.data.data && typeof event.data.data === "object" && !Array.isArray(event.data.data)
+    ? event.data.data as Record<string, unknown>
+    : event.data;
+  const runtimeKind = String(runtimeData.kind ?? event.event);
+  const toolName = String(runtimeData.tool_name ?? runtimeData.name ?? "unknown");
   switch (event.event) {
     case "tool_call":
       return `调用工具 ${String(event.data.name ?? "unknown")}`;
@@ -1235,17 +1649,53 @@ function formatStreamMessage(event: AssistantTurnStreamEvent): string | null {
     case "tool_blocked":
       return `工具 ${String(event.data.tool_name ?? "unknown")} 被阻止：${String(event.data.reason ?? "需要人工处理")}`;
     case "turn.waiting_human":
-      return "Assistant 正在等待人工审批后继续。";
+      return "AI助手正在等待人工审批后继续。";
     case "turn.cancelled":
-      return `Assistant 已取消：${String(event.data.reason ?? "cancelled")}`;
+      return `AI助手已取消：${String(event.data.reason ?? "cancelled")}`;
     case "turn.failed":
-      return `Assistant 运行失败：${String(event.data.error ?? event.data.reason ?? "unknown error")}`;
+      return `AI助手运行失败：${String(event.data.error ?? event.data.reason ?? "unknown error")}`;
     default:
-      return null;
+      break;
   }
+  if (event.event === "tool_event") {
+    if (runtimeKind === "tool_use_delta") {
+      return String(runtimeData.delta ?? "").trim() ? `准备工具 ${toolName} 参数` : null;
+    }
+    if (runtimeKind === "tool_use_completed") {
+      return `工具 ${toolName} 参数已准备`;
+    }
+    if (runtimeKind === "tool_call_started") {
+      return `调用工具 ${toolName}`;
+    }
+    if (runtimeKind === "tool_result_ready") {
+      return `工具 ${toolName} 已返回结果`;
+    }
+    if (runtimeKind === "tool_error") {
+      return `工具 ${toolName} 返回异常`;
+    }
+  }
+  if (event.event === "permission_requested") {
+    return `工具 ${toolName} 需要人工确认`;
+  }
+  if (event.event === "turn_failed") {
+    return `AI助手运行失败：${String(runtimeData.error ?? runtimeData.reason ?? "unknown error")}`;
+  }
+  return null;
 }
 
 function extractAssistantText(event: AssistantTurnStreamEvent): string {
+  const runtimeData = event.data.data && typeof event.data.data === "object" && !Array.isArray(event.data.data)
+    ? event.data.data as Record<string, unknown>
+    : event.data;
+  if (typeof runtimeData.message === "string") {
+    return runtimeData.message;
+  }
+  if (typeof runtimeData.delta === "string") {
+    return runtimeData.delta;
+  }
+  if (typeof runtimeData.content === "string") {
+    return runtimeData.content;
+  }
   if (typeof event.data.content === "string") {
     return event.data.content;
   }
@@ -1259,21 +1709,37 @@ function extractAssistantText(event: AssistantTurnStreamEvent): string {
 }
 
 function streamEventTimelineMetadata(event: AssistantTurnStreamEvent): Record<string, unknown> {
+  const runtimeData = event.data.data && typeof event.data.data === "object" && !Array.isArray(event.data.data)
+    ? event.data.data as Record<string, unknown>
+    : event.data;
+  const payloadKind = String(runtimeData.kind ?? event.event);
+  const toolName = String(runtimeData.tool_name ?? runtimeData.name ?? "").trim();
   const eventKind =
-    event.event === "tool_call"
+    event.event === "tool_call" || event.event === "tool_event"
       ? "tool_call"
       : event.event === "tool_result"
         ? "execution_result"
-        : event.event === "tool_blocked" || event.event === "turn.waiting_human"
+        : event.event === "tool_blocked" || event.event === "turn.waiting_human" || event.event === "permission_requested"
           ? "confirmation"
-          : event.event === "llm_delta" || event.event === "llm_final"
+          : event.event === "llm_delta" || event.event === "llm_final" || event.event === "assistant_message_delta" || event.event === "assistant_message_completed" || event.event === "reasoning_delta"
             ? "thinking"
             : "execution_result";
+  const resolvedEventKind = payloadKind === "tool_result_ready" || payloadKind === "tool_error" ? "execution_result" : eventKind;
 
   return {
     ...event.data,
-    eventKind,
+    eventKind: resolvedEventKind,
     itemType: event.event,
+    traceKind: payloadKind,
+    payloadKind,
+    payload: {
+      data: runtimeData,
+    },
+    toolName: toolName || undefined,
+    toolUseId: runtimeData.tool_use_id,
+    toolCallId: runtimeData.tool_call_id,
+    turn_id: event.data.turn_id ?? runtimeData.turn_id,
+    seq: event.data.seq,
   };
 }
 
@@ -1329,6 +1795,39 @@ function metadataSummary(value: Record<string, unknown> | undefined, fallback: s
     .slice(0, 6)
     .map(([key, item]) => `${key}: ${typeof item === "object" && item !== null ? "[object]" : String(item)}`)
     .join(" · ");
+}
+
+function hasRecordEntries(value: Record<string, unknown> | undefined): boolean {
+  return Boolean(value && Object.keys(value).length);
+}
+
+function mcpStandardConfigSummary(mcp: McpServerRecord): string {
+  const servers = isRecord(mcp.standardConfig.mcpServers) ? mcp.standardConfig.mcpServers : {};
+  const byKey = servers[mcp.serverKey];
+  const firstConfig = Object.values(servers).find((value): value is Record<string, unknown> => isRecord(value));
+  const config: Record<string, unknown> = isRecord(byKey) ? byKey : (firstConfig || {});
+  const command = typeof config.command === "string" ? config.command : null;
+  const args = Array.isArray(config.args) ? config.args.map(String) : [];
+  const url = typeof config.url === "string" ? config.url : null;
+  const env = isRecord(config.env) ? Object.keys(config.env) : [];
+  const parts = [
+    command ? `command ${command}` : null,
+    args.length ? `args ${args.join(" ")}` : null,
+    url ? `url ${url}` : null,
+    env.length ? `env ${env.join(", ")}` : null,
+  ].filter((part): part is string => Boolean(part));
+  return parts.join(" · ");
+}
+
+function mcpStandardConfigJson(mcp: McpServerRecord): string {
+  const servers = isRecord(mcp.standardConfig.mcpServers) ? mcp.standardConfig.mcpServers : {};
+  const byKey = servers[mcp.serverKey];
+  const firstConfig = Object.values(servers).find((value): value is Record<string, unknown> => isRecord(value));
+  const config = isRecord(byKey) ? byKey : firstConfig;
+  if (!config) {
+    return prettyJson(mcp.standardConfig);
+  }
+  return JSON.stringify({ mcpServers: { [mcp.serverKey]: config } }, null, 2);
 }
 
 function capabilityStatusTone(status: string, enabled = true): "positive" | "neutral" | "warning" | "critical" {
@@ -1491,25 +1990,29 @@ export function ChatOverlay({
   const [loadingWorkspace, setLoadingWorkspace] = useState(false);
   const [loadingConversation, setLoadingConversation] = useState(false);
   const [sending, setSending] = useState(false);
+  const [listCollapsed, setListCollapsed] = useState(false);
   const [railCollapsed, setRailCollapsed] = useState(false);
   const [railRestoreTop, setRailRestoreTop] = useState(128);
   const [collapsedGroups, setCollapsedGroups] = useState<Record<AgentKind, boolean>>({
     assistant: false,
     autonomous: false,
+    jd_sync: false,
   });
   const [errorMessage, setErrorMessage] = useState<string>();
   const [settingsSnapshot, setSettingsSnapshot] = useState<SettingsSnapshot | null>(null);
   const [configDraft, setConfigDraft] = useState<ConfigDraft | null>(null);
   const [agentConfigDrafts, setAgentConfigDrafts] = useState<Record<AgentKind, AgentConfigDraft>>(agentConfigDraftTemplate);
   const [automationConfigDraft, setAutomationConfigDraft] = useState<AutomationConfigDraft>(automationConfigDraftTemplate);
+  const [jdSyncConfigDraft, setJdSyncConfigDraft] = useState<AutomationConfigDraft>(automationConfigDraftTemplate);
   const [selectedAutomationJobId, setSelectedAutomationJobId] = useState<string | null>(null);
-  const [selectedAutomationConfigPage, setSelectedAutomationConfigPage] = useState<AutomationConfigPageKey>("jd");
+  const [selectedAutomationConfigPage, setSelectedAutomationConfigPage] = useState<AutomationConfigPageKey>("entry");
   const [systemPromptExpanded, setSystemPromptExpanded] = useState(false);
   const [selectedConfigSection, setSelectedConfigSection] = useState<AgentConfigSectionKey>("identity");
   const [selectedCapabilityKey, setSelectedCapabilityKey] = useState<string | null>(null);
   const [loadingSettings, setLoadingSettings] = useState(false);
   const [savingConfig, setSavingConfig] = useState(false);
   const [startingAutomationPlan, setStartingAutomationPlan] = useState(false);
+  const [syncingAutomationJobs, setSyncingAutomationJobs] = useState(false);
   const [panelNotice, setPanelNotice] = useState<PanelNotice | null>(null);
   const [approvalNotes, setApprovalNotes] = useState<Record<string, string>>({});
   const [approvalSelections, setApprovalSelections] = useState<Record<string, string>>({});
@@ -1544,19 +2047,22 @@ export function ChatOverlay({
   const assistantStreamContentRef = useRef<Record<string, string>>({});
   const conversationLookupRef = useRef<Map<string, AgentConversationSummary>>(new Map());
 
+  useEffect(() => {
+    if (!pageMode) {
+      return;
+    }
+    setListCollapsed(activePanel !== "conversation");
+  }, [activePanel, pageMode]);
+
   const loadWorkspaces = useCallback(async (markLoading = true) => {
     if (markLoading) {
       setLoadingWorkspace(true);
     }
     try {
-      const [assistant, autonomous] = await Promise.all([
-        apiClient.getAgentWorkspace("assistant"),
-        apiClient.getAgentWorkspace("autonomous"),
-      ]);
-      setWorkspaces({
-        assistant,
-        autonomous,
-      });
+      const entries = await Promise.all(
+        AGENT_KINDS.map(async (kind) => [kind, await apiClient.getAgentWorkspace(kind)] as const),
+      );
+      setWorkspaces(Object.fromEntries(entries) as Record<AgentKind, AgentWorkspaceRecord | null>);
       setErrorMessage(undefined);
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : copy("Failed to load agent overlay.", "加载 Agent Overlay 失败。"));
@@ -1610,8 +2116,9 @@ export function ChatOverlay({
     setAgentConfigDrafts({
       assistant: agentConfigDraftFromWorkspace(workspaces.assistant),
       autonomous: agentConfigDraftFromWorkspace(workspaces.autonomous),
+      jd_sync: agentConfigDraftFromWorkspace(workspaces.jd_sync),
     });
-  }, [workspaces.assistant, workspaces.autonomous]);
+  }, [workspaces.assistant, workspaces.autonomous, workspaces.jd_sync]);
 
   useEffect(() => {
     if (visible) {
@@ -1633,13 +2140,17 @@ export function ChatOverlay({
         ...(localConversations.autonomous ?? []),
         ...(workspaces.autonomous?.conversations ?? []),
       ]),
+      jd_sync: dedupeConversations([
+        ...(localConversations.jd_sync ?? []),
+        ...(workspaces.jd_sync?.conversations ?? []),
+      ]),
     }),
     [localConversations, workspaces],
   );
 
   const conversationLookup = useMemo(() => {
     const lookup = new Map<string, AgentConversationSummary>();
-    (["assistant", "autonomous"] as AgentKind[]).forEach((kind) => {
+    AGENT_KINDS.forEach((kind) => {
       conversationsByAgent[kind].forEach((conversation) => {
         lookup.set(conversationKey(kind, conversation.id), conversation);
       });
@@ -1657,7 +2168,7 @@ export function ChatOverlay({
     }
     setSelectedConversation((current) => {
       const next = { ...current };
-      (["assistant", "autonomous"] as AgentKind[]).forEach((kind) => {
+      AGENT_KINDS.forEach((kind) => {
         if (!next[kind]) {
           next[kind] = conversationsByAgent[kind][0]?.id;
         }
@@ -1688,19 +2199,70 @@ export function ChatOverlay({
     () => automationJobDescriptions.map(automationJobId).filter((id): id is string => Boolean(id)),
     [automationJobDescriptions],
   );
+  const automationLaunchBlockers = useMemo(
+    () => validateAutomationLaunchReadiness(automationConfigDraft, automationJobDescriptions),
+    [automationConfigDraft, automationJobDescriptions],
+  );
+  const automationLaunchReady = automationLaunchBlockers.length === 0;
+  const jdSyncLaunchBlockers = useMemo(
+    () => validateJdSyncLaunchReadiness(jdSyncConfigDraft),
+    [jdSyncConfigDraft],
+  );
+  const jdSyncLaunchReady = jdSyncLaunchBlockers.length === 0;
   const autonomousWorkspace = workspaces.autonomous;
   const autonomousActiveRun = useMemo(
     () => autonomousWorkspace?.runs.find((run) => isOpenRunStatus(run.status)) ?? null,
     [autonomousWorkspace],
   );
+  const jdSyncWorkspace = workspaces.jd_sync;
+  const jdSyncActiveRun = useMemo(
+    () => jdSyncWorkspace?.runs.find((run) => isOpenRunStatus(run.status)) ?? null,
+    [jdSyncWorkspace],
+  );
   const autonomousStartBlocked = activeAgent === "autonomous" && autonomousActiveRun != null;
   const autonomousDraftEditable =
     activeAgent === "autonomous" && autonomousStartBlocked && activeDraftComposerKey != null;
+  const runtimeActiveRun = activeAgent === "jd_sync" ? jdSyncActiveRun : activeAgent === "autonomous" ? autonomousActiveRun : null;
+  const activeWorkspaceControlState = activeWorkspace?.workspaceControl?.state ?? "stopped";
+  const activeWorkspaceStartBlockers =
+    activeAgent === "autonomous"
+      ? automationLaunchBlockers
+      : activeAgent === "jd_sync"
+        ? jdSyncLaunchBlockers
+        : [];
+  const activeWorkspaceStartReady = activeWorkspaceStartBlockers.length === 0;
   const composerInputValue = activeDraftComposerKey != null ? draftComposerValues[activeDraftComposerKey] ?? "" : composerValue;
+  const automationConfigHydrationKey = useMemo(() => {
+    const definition = workspaces.autonomous?.agentDefinition;
+    return JSON.stringify({
+      productConfig: definition?.productConfig ?? null,
+      runtimeMetadata: definition?.config.runtimeMetadata ?? null,
+      jobIds: automationJobIds,
+    });
+  }, [
+    automationJobIds,
+    workspaces.autonomous?.agentDefinition.config.runtimeMetadata,
+    workspaces.autonomous?.agentDefinition.productConfig,
+  ]);
 
   useEffect(() => {
     setAutomationConfigDraft(automationConfigDraftFromWorkspace(workspaces.autonomous, automationJobDescriptions));
-  }, [automationJobDescriptions, workspaces.autonomous]);
+  }, [automationConfigHydrationKey]);
+
+  const jdSyncConfigHydrationKey = useMemo(() => {
+    const definition = workspaces.jd_sync?.agentDefinition;
+    return JSON.stringify({
+      productConfig: definition?.productConfig ?? null,
+      runtimeMetadata: definition?.config.runtimeMetadata ?? null,
+    });
+  }, [
+    workspaces.jd_sync?.agentDefinition.config.runtimeMetadata,
+    workspaces.jd_sync?.agentDefinition.productConfig,
+  ]);
+
+  useEffect(() => {
+    setJdSyncConfigDraft(automationConfigDraftFromWorkspace(workspaces.jd_sync, [], "jd_sync"));
+  }, [jdSyncConfigHydrationKey]);
 
   useEffect(() => {
     setSelectedAutomationJobId((current) => {
@@ -1797,7 +2359,7 @@ export function ChatOverlay({
     (kind: AgentKind): string => {
       const id = `draft-${kind}-${Date.now()}`;
       const title = kind === "assistant"
-        ? copy("New assistant chat", "新 Assistant 会话")
+        ? copy("New AI assistant chat", "新 AI助手会话")
         : copy("New automation run", "新自动化运行");
       upsertConversationSummary(kind, {
         id,
@@ -1829,7 +2391,7 @@ export function ChatOverlay({
           title: nextValue.trim()
             ? trimTitle(nextValue)
             : activeAgent === "assistant"
-              ? copy("New assistant chat", "新 Assistant 会话")
+              ? copy("New AI assistant chat", "新 AI助手会话")
               : copy("New automation run", "新自动化运行"),
           preview: nextValue.trim() ? nextValue.trim() : null,
           status: "draft",
@@ -2220,7 +2782,12 @@ export function ChatOverlay({
       userInput: string,
       event: AssistantTurnStreamEvent,
     ) => {
-      if (event.event === "llm_delta" || event.event === "llm_final") {
+      if (
+        event.event === "llm_delta"
+        || event.event === "llm_final"
+        || event.event === "assistant_message_delta"
+        || event.event === "assistant_message_completed"
+      ) {
         const nextChunk = extractAssistantText(event);
         const previous = assistantStreamContentRef.current[streamMessageId] ?? "";
         const merged = mergeStreamText(previous, nextChunk);
@@ -2232,7 +2799,7 @@ export function ChatOverlay({
           kind: "message",
           content: merged,
           createdAt: event.receivedAt,
-          status: event.event === "llm_final" ? "sent" : "streaming",
+          status: event.event === "llm_final" || event.event === "assistant_message_completed" ? "sent" : "streaming",
           metadata: streamEventTimelineMetadata(event),
         });
         if (merged.trim()) {
@@ -2249,11 +2816,15 @@ export function ChatOverlay({
       appendMessage("assistant", conversationId, {
         id: `${streamMessageId}-${event.event}-${event.receivedAt}`,
         conversationId,
-        role: event.event.startsWith("tool_") ? "tool" : "system",
-        kind: event.event === "tool_call" ? "tool_use" : event.event.startsWith("tool_") ? "tool_result" : "status",
+        role: event.event.startsWith("tool_") || event.event === "tool_event" ? "tool" : "system",
+        kind: event.event === "tool_call" || event.event === "tool_event"
+          ? "tool_use"
+          : event.event.startsWith("tool_")
+            ? "tool_result"
+            : "status",
         content: detail,
         createdAt: event.receivedAt,
-        status: event.event === "turn.failed" ? "failed" : "sent",
+        status: event.event === "turn.failed" || event.event === "turn_failed" ? "failed" : "sent",
         metadata: streamEventTimelineMetadata(event),
       });
     },
@@ -2265,27 +2836,11 @@ export function ChatOverlay({
     if (!text) {
       return;
     }
-
-    if (activeAgent === "autonomous" && autonomousActiveRun) {
+    if (activeAgent !== "assistant" && activeWorkspaceControlState !== "running") {
       setPanelNotice({
         panel: "conversation",
         tone: "info",
-        message: copy(
-          "Automation already has an open run. Wait for the current run to finish before starting the next one.",
-          "Automation 当前已有未结束的运行，请等待当前运行结束后再启动下一轮。",
-        ),
-      });
-      return;
-    }
-
-    if (activeAgent === "autonomous" && (workspaces.autonomous?.workspaceControl?.state ?? "stopped") !== "running") {
-      setPanelNotice({
-        panel: "conversation",
-        tone: "info",
-        message: copy(
-          "Start the automation workspace before submitting autonomous instructions.",
-          "提交自动化指令前，请先在工作区点击开始。",
-        ),
+        message: copy("Start the agent before sending messages.", "请先启动 Agent，再发送消息。"),
       });
       return;
     }
@@ -2369,7 +2924,7 @@ export function ChatOverlay({
             },
           });
         } catch (error) {
-          const message = error instanceof Error ? error.message : copy("Assistant request failed.", "Assistant 请求失败。");
+          const message = error instanceof Error ? error.message : copy("AI assistant request failed.", "AI助手请求失败。");
           if (!receivedStreamEvent && /:\s*(404|405)\b/.test(message)) {
             const result = await apiClient.sendAssistantMessage({ conversationId, message: text });
             appendMessage("assistant", conversationId, {
@@ -2379,8 +2934,8 @@ export function ChatOverlay({
               kind: "status",
               content:
                 result.status === "queued"
-                  ? copy("Assistant SSE endpoint is unavailable. The request has been queued instead.", "Assistant SSE 接口不可用，已改为排队提交。")
-                  : copy("Assistant accepted the request, but live streaming is unavailable.", "Assistant 已接收请求，但当前环境不支持实时流式展示。"),
+                  ? copy("AI assistant SSE endpoint is unavailable. The request has been queued instead.", "AI助手 SSE 接口不可用，已改为排队提交。")
+                  : copy("AI assistant accepted the request, but live streaming is unavailable.", "AI助手已接收请求，但当前环境不支持实时流式展示。"),
               createdAt: new Date().toISOString(),
               status: "sent",
               metadata: {
@@ -2391,8 +2946,8 @@ export function ChatOverlay({
               panel: "conversation",
               tone: "info",
               message: copy(
-                "Fell back to queued delivery because the live Assistant stream is unavailable.",
-                "当前环境没有可用的 Assistant 实时流，已自动降级为排队提交。",
+                "Fell back to queued delivery because the live AI assistant stream is unavailable.",
+                "当前环境没有可用的 AI助手实时流，已自动降级为排队提交。",
               ),
             });
           } else if (!receivedStreamEvent && /aborted|abort/i.test(message)) {
@@ -2401,7 +2956,7 @@ export function ChatOverlay({
               conversationId,
               role: "system",
               kind: "status",
-              content: copy("Assistant stream was cancelled.", "Assistant 流已取消。"),
+              content: copy("AI assistant stream was cancelled.", "AI助手流已取消。"),
               createdAt: new Date().toISOString(),
               status: "failed",
               metadata: {
@@ -2434,6 +2989,7 @@ export function ChatOverlay({
         }
 
         const timestamp = new Date().toISOString();
+        const normalizedConversationId = conversationId;
         appendMessage(activeAgent, conversationId, {
           id: `local-user-${timestamp}`,
           conversationId,
@@ -2448,24 +3004,80 @@ export function ChatOverlay({
         });
         syncConversationPreview(activeAgent, conversationId, text, trimTitle(text));
 
+        if (runtimeActiveRun) {
+          const backendConversationId =
+            runtimeActiveRun.refId && !runtimeActiveRun.refId.startsWith("draft-")
+              ? runtimeActiveRun.refId
+              : activeAgent === "jd_sync"
+                ? "jd-sync-primary"
+                : "autonomous-primary";
+          const result = await apiClient.queueAgentPendingUserInputAfterNextToolCall(activeAgent, {
+            conversationId: backendConversationId,
+            message: text,
+            priority: "next",
+          });
+          if (normalizedConversationId !== result.conversationId && normalizedConversationId.startsWith("draft-")) {
+            removeDraftConversation(activeAgent, normalizedConversationId);
+          }
+          await loadWorkspaces();
+          setSelectedConversation((current) => ({
+            ...current,
+            [activeAgent]: result.conversationId,
+          }));
+          if (normalizedConversationId !== result.conversationId) {
+            appendMessage(activeAgent, result.conversationId, {
+              id: `local-user-${timestamp}-${result.conversationId}`,
+              conversationId: result.conversationId,
+              role: "user",
+              kind: "message",
+              content: text,
+              createdAt: timestamp,
+              status: "sent",
+              metadata: {
+                eventKind: "human",
+              },
+            });
+            syncConversationPreview(activeAgent, result.conversationId, text, trimTitle(text));
+          }
+          appendMessage(activeAgent, result.conversationId, {
+            id: `runtime-user-input-queued-${result.requestId ?? Date.now()}`,
+            conversationId: result.conversationId,
+            role: "system",
+            kind: "status",
+            content: copy(
+              "The message will be applied after the next tool call.",
+              "这条消息会在下一次工具调用后注入。",
+            ),
+            createdAt: new Date().toISOString(),
+            status: result.status === "queued" ? "pending" : "sent",
+            metadata: {
+              eventKind: "thinking",
+              itemType: "pending_user_input_after_next_tool_call",
+              requestId: result.requestId,
+            },
+          });
+          return;
+        }
+
         const draftConversationId = conversationId;
-        const result = await apiClient.startAutonomousRun({
+        const result = await apiClient.startAgentRun(activeAgent, {
           title: trimTitle(text),
           instruction: text,
+          kind: activeAgent === "jd_sync" ? "jd_sync" : "automation_recruiting",
           conversationId: conversationId.startsWith("draft-") ? null : conversationId,
         });
-        removeDraftConversation("autonomous", draftConversationId);
+        removeDraftConversation(activeAgent, draftConversationId);
         await loadWorkspaces();
         setSelectedConversation((current) => ({
           ...current,
-          autonomous: result.conversationId,
+          [activeAgent]: result.conversationId,
         }));
-        appendMessage("autonomous", result.conversationId, {
-          id: `autonomous-status-${result.runId ?? Date.now()}`,
+        appendMessage(activeAgent, result.conversationId, {
+          id: `${activeAgent}-status-${result.runId ?? Date.now()}`,
           conversationId: result.conversationId,
           role: "system",
           kind: "status",
-          content: copy("Automation run has been submitted to the backend.", "自动化运行已提交到后端。"),
+          content: copy("Agent run has been submitted to the backend.", "Agent 运行已提交到后端。"),
           createdAt: new Date().toISOString(),
           status: "sent",
           metadata: {
@@ -2507,27 +3119,11 @@ export function ChatOverlay({
       });
       return;
     }
-    if ((workspaces.autonomous?.workspaceControl?.state ?? "stopped") !== "running") {
-      setPanelNotice({
-        panel: "config",
-        tone: "info",
-        message: copy(
-          "Start the automation workspace before submitting a run plan.",
-          "提交运行计划前，请先在工作区点击开始。",
-        ),
-      });
-      return;
-    }
-    const payload = buildAutomationLaunchPayload(
-      automationConfigDraft,
-      automationJobDescriptions,
-      workspaces.autonomous?.tools ?? [],
-    );
-    if (!payload) {
+    if (automationLaunchBlockers.length) {
       setPanelNotice({
         panel: "config",
         tone: "error",
-        message: copy("Select at least one JD before starting automation.", "启动前至少选择一个 JD。"),
+        message: `${copy("Complete configuration before starting automation:", "启动自动化前请先补全配置：")} ${automationLaunchBlockers.join("；")}`,
       });
       return;
     }
@@ -2536,37 +3132,70 @@ export function ChatOverlay({
     setPanelNotice(null);
     setErrorMessage(undefined);
     try {
-      const draftConversationId = createDraftConversation("autonomous");
-      appendMessage("autonomous", draftConversationId, {
-        id: `automation-plan-${Date.now()}`,
-        conversationId: draftConversationId,
-        role: "user",
-        kind: "message",
-        content: payload.instruction,
-        createdAt: new Date().toISOString(),
-        status: "sent",
-        metadata: {
-          eventKind: "human",
-          launchPlan: payload.contextHints,
-        },
+      const control = await apiClient.controlRuntimeWorkspace(
+        "autonomous",
+        "start",
+        copy("Started from saved automation recruiting configuration.", "按已保存的自动化招聘配置启动。"),
+      );
+      await loadWorkspaces();
+      setPanelNotice({
+        panel: "config",
+        tone: control.runStartBlocked ? "error" : "success",
+        message: control.runStartBlocked?.reason
+          ?? copy("Automation recruiting run has started from saved configuration.", "已按保存的配置启动自动化招聘运行。"),
       });
-      const result = await apiClient.startAutonomousRun({
-        ...payload,
-        conversationId: null,
+    } catch (error) {
+      setPanelNotice({
+        panel: "config",
+        tone: "error",
+        message: error instanceof Error ? error.message : copy("Failed to start automation run.", "启动自动化运行失败。"),
       });
-      removeDraftConversation("autonomous", draftConversationId);
+    } finally {
+      setStartingAutomationPlan(false);
+    }
+  };
+
+  const handleStartJdSync = async () => {
+    if (jdSyncActiveRun) {
+      setPanelNotice({
+        panel: "config",
+        tone: "info",
+        message: copy(
+          "JD Sync already has an open run. Wait for it to finish before syncing again.",
+          "JD 同步 Agent 当前已有未结束的运行，请等待完成后再同步。",
+        ),
+      });
+      return;
+    }
+    const payload = buildJdSyncLaunchPayload(jdSyncConfigDraft);
+    if (!payload) {
+      setPanelNotice({
+        panel: "config",
+        tone: "error",
+        message: copy("Configure and save the recruiting entry URL before syncing JD.", "请先配置并保存招聘入口 URL，再同步 JD。"),
+      });
+      return;
+    }
+    setSyncingAutomationJobs(true);
+    setPanelNotice(null);
+    setErrorMessage(undefined);
+    try {
+      const result = await apiClient.startAgentRun("jd_sync", payload);
+      if ((workspaces.jd_sync?.workspaceControl?.state ?? "stopped") !== "running") {
+        await apiClient.controlRuntimeWorkspace("jd_sync", "start", copy("Started for JD sync agent.", "为 JD 同步 Agent 启动工作区。"));
+      }
       await loadWorkspaces();
       setSelectedConversation((current) => ({
         ...current,
-        autonomous: result.conversationId,
+        jd_sync: result.conversationId,
       }));
       setActivePanel("conversation");
-      appendMessage("autonomous", result.conversationId, {
-        id: `autonomous-plan-status-${result.runId ?? Date.now()}`,
+      appendMessage("jd_sync", result.conversationId, {
+        id: `jd-sync-${result.runId ?? Date.now()}`,
         conversationId: result.conversationId,
         role: "system",
         kind: "status",
-        content: copy("Structured multi-JD automation run has been submitted.", "结构化多 JD 自动化运行已提交。"),
+        content: copy("JD sync run has started. After it finishes, return to JD strategy and select the synced JD.", "JD 同步运行已启动。完成后回到 JD 策略，选择已同步的 JD。"),
         createdAt: new Date().toISOString(),
         status: "sent",
         metadata: {
@@ -2578,10 +3207,10 @@ export function ChatOverlay({
       setPanelNotice({
         panel: "config",
         tone: "error",
-        message: error instanceof Error ? error.message : copy("Failed to start automation run.", "启动自动化运行失败。"),
+        message: error instanceof Error ? error.message : copy("Failed to start JD sync.", "启动 JD 同步失败。"),
       });
     } finally {
-      setStartingAutomationPlan(false);
+      setSyncingAutomationJobs(false);
     }
   };
 
@@ -2611,7 +3240,7 @@ export function ChatOverlay({
         kind: AgentKind,
         workspace: AgentWorkspaceRecord,
         draft: AgentConfigDraft,
-      ): { config: AgentWorkspaceRecord["agentDefinition"]["config"]; error?: string } => {
+      ): { config: AgentWorkspaceRecord["agentDefinition"]["config"]; productConfig?: Record<string, unknown>; error?: string } => {
         const jsonFields = [
           { key: "toolScope" as const, label: copy("Capability usage", "能力使用"), value: draft.toolScopeJson },
           { key: "permissionPolicy" as const, label: copy("Approval rules", "审批规则"), value: draft.permissionPolicyJson },
@@ -2630,6 +3259,7 @@ export function ChatOverlay({
         }
         const runtimeMetadata = { ...workspace.agentDefinition.config.runtimeMetadata };
         const permissionPolicy = { ...parsed.permissionPolicy.record };
+        let productConfig: Record<string, unknown> | undefined;
         if (kind === "autonomous") {
           runtimeMetadata.scoringRubric = draft.scoringRubric;
           runtimeMetadata.recruitingPolicy = recruitingPolicyPayloadFromDraft(draft.recruitingPolicy);
@@ -2638,10 +3268,35 @@ export function ChatOverlay({
             automationJobDescriptions,
             workspace.tools,
           );
-          runtimeMetadata.automationRecruitingConfig = automationRecruitingConfig;
+          delete runtimeMetadata.automationRecruitingConfig;
+          delete runtimeMetadata.automation_recruiting_config;
+          delete runtimeMetadata.automationConfig;
+          delete runtimeMetadata.automation_config;
+          const currentAutonomousConfig = recordField(
+            isRecord(workspace.agentDefinition.productConfig) ? workspace.agentDefinition.productConfig : {},
+            "autonomous",
+          ) ?? {};
+          productConfig = {
+            autonomous: {
+              ...currentAutonomousConfig,
+              automation_recruiting_config: automationRecruitingConfig,
+            },
+          };
           permissionPolicy.businessToolApprovalPolicy = isRecord(automationRecruitingConfig.toolApprovalPolicy)
             ? automationRecruitingConfig.toolApprovalPolicy
             : {};
+        } else if (kind === "jd_sync") {
+          const jdSyncConfig = jdSyncConfigPayloadFromDraft(jdSyncConfigDraft);
+          const currentJdSyncConfig = recordField(
+            isRecord(workspace.agentDefinition.productConfig) ? workspace.agentDefinition.productConfig : {},
+            "jd_sync",
+          ) ?? {};
+          productConfig = {
+            jd_sync: {
+              ...currentJdSyncConfig,
+              jd_sync_config: jdSyncConfig,
+            },
+          };
         } else {
           delete runtimeMetadata.scoringRubric;
           delete runtimeMetadata.scoring_rubric;
@@ -2668,10 +3323,11 @@ export function ChatOverlay({
             modelConfig: parsed.modelConfig.record,
             runtimeMetadata,
           },
+          productConfig,
         };
       };
 
-      const configPatches = (["assistant", "autonomous"] as AgentKind[]).map((kind) => {
+      const configPatches = [activeAgent].map((kind) => {
         const workspace = workspaces[kind];
         const draft = agentConfigDrafts[kind];
         if (!workspace) {
@@ -2693,6 +3349,7 @@ export function ChatOverlay({
           config: {
             ...patch.config,
           },
+          productConfig: patch.productConfig,
         }),
       );
       const [nextSettings] = await Promise.all([
@@ -2768,9 +3425,9 @@ export function ChatOverlay({
     setRunActionBusyId(run.id);
     try {
       if (action === "cancel") {
-        await apiClient.cancelAutonomousRun(run.id, copy("Cancelled from agent management page.", "在 Agent 管理页中手动中止。"));
+        await apiClient.cancelAgentRun(activeAgent, run.id, copy("Cancelled from agent management page.", "在 Agent 管理页中手动中止。"));
       } else {
-        await apiClient.resumeAutonomousRun(run.id, copy("Resumed from agent management page.", "在 Agent 管理页中手动恢复。"));
+        await apiClient.resumeAgentRun(activeAgent, run.id, copy("Resumed from agent management page.", "在 Agent 管理页中手动恢复。"));
       }
       await loadWorkspaces();
       setPanelNotice({
@@ -2792,7 +3449,88 @@ export function ChatOverlay({
     }
   };
 
+  const handleStopCurrentTurn = async () => {
+    if (activeAgent === "assistant") {
+      assistantAbortRef.current?.abort();
+      if (activeConversationId && !activeConversationId.startsWith("draft-")) {
+        try {
+          await apiClient.cancelAssistantTurn(activeConversationId);
+        } catch {
+          // The SSE abort path already interrupts the active assistant turn when connected.
+        }
+      }
+      if (activeConversationId) {
+        appendMessage("assistant", activeConversationId, {
+          id: `assistant-cancel-${Date.now()}`,
+          conversationId: activeConversationId,
+          role: "system",
+          kind: "status",
+          content: copy("Current turn cancellation was requested.", "已请求终止当前 turn。"),
+          createdAt: new Date().toISOString(),
+          status: "sent",
+          metadata: {
+            eventKind: "execution_result",
+            itemType: "turn_cancel_requested",
+          },
+        });
+      }
+      setSending(false);
+      return;
+    }
+
+    if (!runtimeActiveRun) {
+      return;
+    }
+    await handleRunAction(runtimeActiveRun, "cancel");
+  };
+
   const handleWorkspaceControl = async (action: "start" | "pause" | "continue" | "terminate") => {
+    if (activeAgent === "jd_sync" && action === "start") {
+      if (jdSyncActiveRun) {
+        setPanelNotice({
+          panel: "runs",
+          tone: "info",
+          message: copy("JD Sync already has an open run. Wait for it to finish before syncing again.", "JD 同步 Agent 当前已有未结束的运行，请等待完成后再同步。"),
+        });
+        return;
+      }
+      const payload = buildJdSyncLaunchPayload(jdSyncConfigDraft);
+      if (!payload || jdSyncLaunchBlockers.length) {
+        setPanelNotice({
+          panel: "runs",
+          tone: "error",
+          message: `${copy("Complete configuration before starting JD Sync:", "启动 JD 同步前请先补全配置：")} ${jdSyncLaunchBlockers.join("；")}`,
+        });
+        return;
+      }
+      setWorkspaceControlBusyAction(action);
+      try {
+        await apiClient.startAgentRun("jd_sync", payload);
+        await loadWorkspaces();
+        setPanelNotice({
+          panel: "runs",
+          tone: "success",
+          message: copy("JD Sync run has started from the saved site configuration.", "已按保存的网站配置启动 JD 同步运行。"),
+        });
+      } catch (error) {
+        setPanelNotice({
+          panel: "runs",
+          tone: "error",
+          message: error instanceof Error ? error.message : copy("Failed to start JD Sync.", "启动 JD 同步失败。"),
+        });
+      } finally {
+        setWorkspaceControlBusyAction(null);
+      }
+      return;
+    }
+    if (activeAgent === "autonomous" && action === "start" && !autonomousActiveRun && automationLaunchBlockers.length) {
+      setPanelNotice({
+        panel: "runs",
+        tone: "error",
+        message: `${copy("Complete configuration before starting automation:", "启动自动化前请先补全配置：")} ${automationLaunchBlockers.join("；")}`,
+      });
+      return;
+    }
     setWorkspaceControlBusyAction(action);
     try {
       const reasonMap: Record<"start" | "pause" | "continue" | "terminate", string> = {
@@ -2801,19 +3539,21 @@ export function ChatOverlay({
         continue: copy("Continued from agent workspace.", "在工作区手动继续。"),
         terminate: copy("Terminated from agent workspace.", "在工作区手动终止。"),
       };
-      await apiClient.controlAutonomousWorkspace(action, reasonMap[action]);
+      await apiClient.controlRuntimeWorkspace(activeAgent, action, reasonMap[action]);
       await loadWorkspaces();
       setPanelNotice({
         panel: "runs",
         tone: "success",
         message:
-          action === "start"
-            ? copy("Automation workspace started.", "自动化招聘 Agent 已开始。")
-            : action === "pause"
-              ? copy("Automation workspace paused.", "自动化招聘 Agent 已暂停。")
-              : action === "continue"
-                ? copy("Automation workspace continued.", "自动化招聘 Agent 已继续。")
-                : copy("Automation workspace terminated.", "自动化招聘 Agent 已终止。"),
+          `${agentDisplayName(activeAgent)} ${
+            action === "start"
+              ? copy("started.", "已开始。")
+              : action === "pause"
+                ? copy("paused.", "已暂停。")
+                : action === "continue"
+                  ? copy("continued.", "已继续。")
+                  : copy("terminated.", "已终止。")
+          }`,
       });
     } catch (error) {
       setPanelNotice({
@@ -2885,7 +3625,10 @@ export function ChatOverlay({
     window.addEventListener("mouseup", handleUp);
   };
 
-  const startRailRestoreDrag = (event: React.PointerEvent<HTMLButtonElement>) => {
+  const startRestoreDrag = (
+    event: React.PointerEvent<HTMLButtonElement>,
+    onRestore: () => void,
+  ) => {
     if (event.pointerType === "mouse" && event.button !== 0) {
       return;
     }
@@ -2926,13 +3669,21 @@ export function ChatOverlay({
       window.removeEventListener("pointerup", handleUp);
       window.removeEventListener("pointercancel", handleUp);
       if (!current.moved) {
-        setRailCollapsed(false);
+        onRestore();
       }
     };
 
     window.addEventListener("pointermove", handleMove);
     window.addEventListener("pointerup", handleUp);
     window.addEventListener("pointercancel", handleUp);
+  };
+
+  const startRailRestoreDrag = (event: React.PointerEvent<HTMLButtonElement>) => {
+    startRestoreDrag(event, () => setRailCollapsed(false));
+  };
+
+  const startListRestoreDrag = (event: React.PointerEvent<HTMLButtonElement>) => {
+    startRestoreDrag(event, () => setListCollapsed(false));
   };
 
   const renderEmptyPanel = (title: string, body: string) => (
@@ -3046,14 +3797,13 @@ export function ChatOverlay({
     );
   };
 
-  const renderCapabilitiesPanel = (tools: AgentToolSummary[], skills: SkillRecord[], memories: AgentMemorySummary[]) => {
+  const renderCapabilitiesPanel = (tools: AgentToolSummary[], skills: SkillRecord[], memories: AgentMemorySummary[], mcps: McpServerRecord[]) => {
     const memoryTools = tools.filter((tool) => tool.sourceKind === "memory_tool");
-    const mcpTools = tools.filter((tool) => tool.sourceKind === "mcp_tool" || (!memoryTools.includes(tool) && /mcp/i.test(tool.serverName)));
     const businessTools = tools
       .filter((tool) => tool.businessTool)
       .sort((left, right) => left.name.localeCompare(right.name));
     const systemTools = tools
-      .filter((tool) => !tool.businessTool && !mcpTools.includes(tool) && !memoryTools.includes(tool))
+      .filter((tool) => !tool.businessTool && tool.sourceKind !== "mcp_tool" && !/mcp/i.test(tool.serverName) && !memoryTools.includes(tool))
       .sort((left, right) => left.name.localeCompare(right.name));
     const toToolItem = (tool: AgentToolSummary, category: CapabilityCategoryKey): CapabilityItem => ({
       key: `tool:${tool.id}`,
@@ -3066,6 +3816,18 @@ export function ChatOverlay({
       status: tool.status,
       tone: capabilityStatusTone(tool.status, tool.enabled),
       tool,
+    });
+    const toMcpItem = (mcp: McpServerRecord): CapabilityItem => ({
+      key: `mcp:${mcp.id}`,
+      kind: "mcp",
+      category: "mcp",
+      label: mcp.name || mcp.serverKey,
+      description: mcp.healthError || `${mcp.transportKind} · ${mcp.protocol}`,
+      metaLabel: copy("Server", "服务"),
+      meta: mcp.serverKey,
+      status: mcp.enabled ? mcp.healthStatus : "disabled",
+      tone: capabilityStatusTone(mcp.enabled ? mcp.healthStatus : "disabled", mcp.enabled),
+      mcp,
     });
     const groups: Array<{ key: CapabilityCategoryKey; label: string; description: string; items: CapabilityItem[] }> = [
       {
@@ -3097,8 +3859,8 @@ export function ChatOverlay({
       {
         key: "mcp",
         label: copy("External MCP", "外部 MCP"),
-        description: copy("Enabled MCP tools and servers available to the agent as ordinary tool definitions.", "已启用的 MCP 工具和服务，进入 Agent 前会转换为普通工具定义。"),
-        items: mcpTools.sort((left, right) => left.name.localeCompare(right.name)).map((tool) => toToolItem(tool, "mcp")),
+        description: copy("Configured MCP servers. Tools are shown inside each server instead of counted as separate MCP entries.", "按 MCP 服务查看配置；工具收敛在对应 MCP 内，不再把每个工具当成一个 MCP。"),
+        items: mcps.slice().sort((left, right) => left.name.localeCompare(right.name)).map(toMcpItem),
       },
       {
         key: "memory",
@@ -3182,6 +3944,12 @@ export function ChatOverlay({
                       {item.tool?.resourceTargetKind ? <span>{copy("Resource", "资源")} · {item.tool.resourceTargetKind}</span> : null}
                       {item.tool?.capabilities.length ? <span>{copy("Tags", "标签")} · {item.tool.capabilities.join(", ")}</span> : null}
                       {item.tool?.endpoint ? <span>{copy("Endpoint", "地址")} · {item.tool.endpoint}</span> : null}
+                      {item.mcp ? <span>{copy("Key", "键")} · {item.mcp.serverKey}</span> : null}
+                      {item.mcp ? <span>{copy("Transport", "传输")} · {item.mcp.transportKind}</span> : null}
+                      {item.mcp ? <span>{copy("Protocol", "协议")} · {item.mcp.protocol}</span> : null}
+                      {item.mcp?.endpoint ? <span>{copy("Endpoint", "地址")} · {item.mcp.endpoint}</span> : null}
+                      {item.mcp?.presetKey ? <span>{copy("Preset", "预置")} · {item.mcp.presetKey}</span> : null}
+                      {item.mcp ? <span>{copy("Tools", "工具")} · {item.mcp.tools.length}</span> : null}
 	                      {item.skill ? <span>{copy("Version", "版本")} · {item.skill.version}</span> : null}
 	                      {item.skill ? <span>{copy("Stage", "阶段")} · {item.skill.boundStage}</span> : null}
 	                      {item.skill ? <span>{copy("Platform", "平台")} · {item.skill.platform}</span> : null}
@@ -3205,9 +3973,16 @@ export function ChatOverlay({
                     <div className="agent-capabilities__summary-grid">
                       {item.tool ? (
                         <>
-                          <div><span>{copy("Input schema", "输入 Schema")}</span><strong>{compactJsonSummary(item.tool.inputSchema, copy("Not provided", "未提供"))}</strong></div>
-                          <div><span>{copy("Output schema", "输出 Schema")}</span><strong>{compactJsonSummary(item.tool.outputSchema, copy("Not provided", "未提供"))}</strong></div>
-                          <div><span>{copy("Metadata", "元数据")}</span><strong>{metadataSummary(item.tool.toolMetadata, copy("Not provided", "未提供"))}</strong></div>
+                          {hasRecordEntries(item.tool.inputSchema) ? <div><span>{copy("Input schema", "输入 Schema")}</span><strong>{compactJsonSummary(item.tool.inputSchema, "")}</strong></div> : null}
+                          {hasRecordEntries(item.tool.outputSchema) ? <div><span>{copy("Output schema", "输出 Schema")}</span><strong>{compactJsonSummary(item.tool.outputSchema, "")}</strong></div> : null}
+                          {hasRecordEntries(item.tool.toolMetadata) ? <div><span>{copy("Metadata", "元数据")}</span><strong>{metadataSummary(item.tool.toolMetadata, "")}</strong></div> : null}
+                        </>
+                      ) : null}
+                      {item.mcp ? (
+                        <>
+                          {hasRecordEntries(item.mcp.standardConfig) ? <div><span>{copy("MCP config", "MCP 配置")}</span><strong>{mcpStandardConfigSummary(item.mcp)}</strong></div> : null}
+                          {hasRecordEntries(item.mcp.serverMetadata) ? <div><span>{copy("Server metadata", "服务元数据")}</span><strong>{metadataSummary(item.mcp.serverMetadata, "")}</strong></div> : null}
+                          {hasRecordEntries(item.mcp.authConfig) ? <div><span>{copy("Auth config", "认证配置")}</span><strong>{metadataSummary(item.mcp.authConfig, "")}</strong></div> : null}
                         </>
                       ) : null}
                       {item.skill ? (
@@ -3221,6 +3996,24 @@ export function ChatOverlay({
                         <div><span>{copy("Metadata", "元数据")}</span><strong>{metadataSummary(item.memory.metadata, copy("Not provided", "未提供"))}</strong></div>
                       ) : null}
                     </div>
+                    {item.mcp && hasRecordEntries(item.mcp.standardConfig) ? (
+                      <pre className="agent-capabilities__mcp-config">{mcpStandardConfigJson(item.mcp)}</pre>
+                    ) : null}
+                    {item.mcp?.tools.length ? (
+                      <div className="agent-capabilities__mcp-tool-list">
+                        {item.mcp.tools.map((tool) => (
+                          <div key={tool.id || `${item.mcp?.id}:${tool.name}`} className="agent-capabilities__mcp-tool">
+                            <strong>{tool.name}</strong>
+                            {tool.description ? <span>{tool.description}</span> : null}
+                            <small>
+                              {[tool.riskLevel, tool.capabilities.length ? tool.capabilities.join(", ") : ""].filter(Boolean).join(" · ")}
+                            </small>
+                            {hasRecordEntries(tool.parameters) ? <small>{copy("Input", "输入")} · {compactJsonSummary(tool.parameters, "")}</small> : null}
+                            {hasRecordEntries(tool.toolMetadata) ? <small>{copy("Metadata", "元数据")} · {metadataSummary(tool.toolMetadata, "")}</small> : null}
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
                   </section>
                 ))}
                 {!selectedItems.length ? (
@@ -3341,17 +4134,17 @@ export function ChatOverlay({
             detail: firstReadableText("-", draft.boundariesText, activeWorkspace.config.boundaries.join("\n")),
           },
           {
-            label: copy("Tool governance", "工具治理"),
+            label: copy("Tool boundaries", "工具使用边界"),
             detail: jsonDraftReadableSummary(
               draft.toolScopeJson,
-              copy("Tools are governed by the product adapter and business permission contracts.", "工具由产品适配器与业务权限契约治理。"),
+              copy("Tools are limited by product capabilities, business permissions, and configured approval gates.", "工具使用受产品能力、业务权限和已配置审批节点限制。"),
               "capability_usage",
               "tool_usage",
               "allowed_tools",
             ),
           },
           {
-            label: copy("Approval governance", "审批治理"),
+            label: copy("Human confirmation", "人工确认规则"),
             detail: jsonDraftReadableSummary(
               draft.permissionPolicyJson,
               copy("Approval is determined by business tool permissions, with auto-approval as the default unless a tool is gated.", "审批由业务工具权限决定；默认自动通过，关键工具可配置为审批节点。"),
@@ -3361,7 +4154,7 @@ export function ChatOverlay({
             ),
           },
           {
-            label: copy("Context policy", "上下文策略"),
+            label: copy("Run context", "运行上下文"),
             detail: jsonDraftReadableSummary(
               draft.contextPolicyJson,
               activeAgent === "autonomous"
@@ -3373,7 +4166,7 @@ export function ChatOverlay({
             ),
           },
           {
-            label: copy("Memory policy", "Memory 策略"),
+            label: copy("Context retention", "上下文留存"),
             detail: jsonDraftReadableSummary(
               draft.memoryPolicyJson,
               activeAgent === "autonomous"
@@ -3391,25 +4184,17 @@ export function ChatOverlay({
           {
             label: copy("Stable workflow boundary", "稳定流程边界"),
             detail: activeAgent === "autonomous"
-              ? copy("Base capability owns generic state-machine and tool-use constraints. Recruiting execution SOP is configured separately and applies to all selected JDs in a run.", "基础能力只负责通用状态机与工具使用约束；招聘执行 SOP 单独配置，并对一次运行内选中的所有 JD 生效。")
-              : copy("Assistant remains conversation-led: it explains, drafts, checks evidence, and hands off write actions through governed tools.", "Assistant 由对话驱动：负责解释、草拟、核对证据，并通过受治理工具交接写入动作。"),
+              ? copy("Daily recruiting policy is maintained in JD strategy, execution SOP, site scope, and tool permissions. Base capability only protects shared state, approvals, duplicate actions, and governed writes.", "日常招聘策略在 JD 策略、执行 SOP、站点范围和工具权限中维护；基础能力只保护共享状态、审批、重复动作和受控写入。")
+              : copy("AI assistant remains conversation-led: it explains, drafts, checks evidence, and hands off write actions through governed tools.", "AI助手由对话驱动：负责解释、草拟、核对证据，并通过受治理工具交接写入动作。"),
           },
           {
-            label: copy("Product binding", "产品绑定"),
-            detail: `${copy("Definition", "定义")} ${agentDefinition} · ${copy("Adapter", "适配器")} ${productAdapter}`,
+            label: copy("Configuration source", "配置来源"),
+            detail: `${copy("Definition", "定义")} ${agentDefinition} · ${copy("Product workflow", "产品流程")} ${productAdapter}`,
           },
         ];
 
         return (
           <div className="agent-config-base-readonly">
-            <div className="agent-config-panel-head">
-              <div>
-                <h4>{copy("Base capability", "基础能力")}</h4>
-                <p>{copy("Read-only stable capability managed by product releases. High-frequency business policy is configured in dedicated pages.", "产品版本管理的只读稳定能力；高频业务策略在独立页面配置。")}</p>
-              </div>
-              <StatusBadge tone="neutral">{copy("Read only", "只读")}</StatusBadge>
-            </div>
-
             <div className="agent-config-base-runtime">
               <div><span>{copy("Provider", "Provider")}</span><strong>{provider}</strong></div>
               <div><span>{copy("Model", "模型")}</span><strong>{model}</strong></div>
@@ -3428,8 +4213,8 @@ export function ChatOverlay({
 
             <div className="agent-config-readonly-block">
               <div>
-                <strong>{copy("System / developer instruction", "System / developer 指令")}</strong>
-                <span>{copy("Visible for inspection only. It is not user-editable and changes through product releases.", "仅用于查看；不可由用户编辑，只随产品版本迭代。")}</span>
+                <strong>{copy("Built-in behavior statement", "内置行为说明")}</strong>
+                <span>{copy("Visible for inspection only. It is not the daily recruiting policy entry and changes through product releases.", "仅用于审阅当前版本的基础行为，不作为日常招聘策略入口。")}</span>
               </div>
               <button type="button" className="chat-overlay__header-button" onClick={() => setSystemPromptExpanded((current) => !current)}>
                 {systemPromptExpanded ? copy("Hide", "收起") : copy("View", "查看")}
@@ -3440,10 +4225,104 @@ export function ChatOverlay({
         );
       };
 
+      if (String(activeAgent) === "jd_sync") {
+        const updateJdSyncSop = (field: keyof AutomationExecutionSopDraft, value: string) => {
+          setJdSyncConfigDraft((current) => ({
+            ...current,
+            executionSop: {
+              ...current.executionSop,
+              [field]: value,
+            },
+          }));
+        };
+        const updateJdSyncPolicy = (value: string) => {
+          setJdSyncConfigDraft((current) => ({
+            ...current,
+            syncPolicy: {
+              ...current.syncPolicy,
+              jdSyncText: value,
+            },
+          }));
+        };
+        const siteReady = Boolean(jdSyncConfigDraft.executionSop.siteEntryUrl.trim());
+        return (
+          <div className="agent-config agent-config--automation">
+            <div className="agent-config-automation-layout">
+              <div className="agent-config-automation-main">
+                <div className="agent-config-automation-actions">
+                  <button
+                    type="button"
+                    className="chat-overlay__header-button"
+                    disabled={savingConfig}
+                    onClick={() => {
+                      setAgentConfigDrafts((current) => ({
+                        ...current,
+                        jd_sync: agentConfigDraftFromWorkspace(workspaces.jd_sync),
+                      }));
+                      setJdSyncConfigDraft(automationConfigDraftFromWorkspace(workspaces.jd_sync, [], "jd_sync"));
+                    }}
+                  >
+                    {copy("Reset", "重置")}
+                  </button>
+                  <button type="button" className="chat-overlay__header-button" disabled={savingConfig} onClick={() => void handleSaveConfig()}>
+                    {savingConfig ? copy("Saving…", "保存中…") : copy("Save configuration", "保存配置")}
+                  </button>
+                </div>
+                <section className="agent-config-independent-panel agent-config-sop-panel">
+                  <div className="agent-config-sop-section">
+                    <div className="agent-config-panel-head">
+                      <div>
+                        <h4>{copy("JD sync site", "JD 同步网站")}</h4>
+                        <p>{copy("This agent only syncs job descriptions from a logged-in recruiting site.", "这个 Agent 只从已登录招聘网站同步 JD，不处理候选人。")}</p>
+                      </div>
+                    </div>
+                    <div className="agent-config-editor__fields">
+                      <label className="agent-config-editor__field agent-config-editor__field--wide">
+                        <span>{copy("Recruiting entry URL", "招聘入口 URL")}</span>
+                        <FormInput
+                          placeholder="https://..."
+                          value={jdSyncConfigDraft.executionSop.siteEntryUrl}
+                          onChange={(event) => updateJdSyncSop("siteEntryUrl", event.target.value)}
+                        />
+                      </label>
+                    </div>
+                    <label className="agent-config-editor__field">
+                      <span>{copy("Site execution boundaries", "站点执行边界")}</span>
+                      <FormTextarea
+                        value={jdSyncConfigDraft.executionSop.siteAccessRulesText}
+                        onChange={(event) => updateJdSyncSop("siteAccessRulesText", event.target.value)}
+                        className="chat-overlay-form-textarea--medium"
+                      />
+                    </label>
+                    <label className="agent-config-editor__field">
+                      <span>{copy("JD sync policy", "JD 同步策略")}</span>
+                      <FormTextarea
+                        value={jdSyncConfigDraft.syncPolicy.jdSyncText}
+                        onChange={(event) => updateJdSyncPolicy(event.target.value)}
+                        className="chat-overlay-form-textarea--medium"
+                      />
+                    </label>
+                    <div className="chat-empty-inline">
+                      {automationJobDescriptions.length
+                        ? copy(`${automationJobDescriptions.length} JD records are currently in the workspace.`, `当前工作区已有 ${automationJobDescriptions.length} 个 JD。`)
+                        : copy("No JD records yet. Save configuration, then run JD Sync.", "当前还没有 JD。请先保存配置，再运行 JD 同步。")}
+                    </div>
+                  </div>
+                </section>
+              </div>
+            </div>
+          </div>
+        );
+      }
+
       if (String(activeAgent) === "autonomous") {
         const activeAgentConfig = agentConfigDrafts.autonomous;
         const selectedJob = automationJobDescriptions.find((job) => automationJobId(job) === selectedAutomationJobId) ?? null;
         const selectedJobStrategy = selectedAutomationJobId ? automationConfigDraft.jobStrategies[selectedAutomationJobId] : undefined;
+        const selectedJobEnabled = selectedAutomationJobId ? automationConfigDraft.selectedRunJobIds.includes(selectedAutomationJobId) : false;
+        const selectedJobRecommendation = selectedJob
+          ? recommendedAutomationJobStrategy(selectedJob, recruitingPolicyPayloadFromDraft(activeAgentConfig.recruitingPolicy))
+          : null;
         const selectedLaunchJobs = automationConfigDraft.selectedRunJobIds
           .map((jobId) => {
             const job = automationJobDescriptions.find((item) => automationJobId(item) === jobId);
@@ -3452,47 +4331,76 @@ export function ChatOverlay({
           })
           .filter((item): item is { jobId: string; job: JobDescriptionSummaryRecord; strategy: AutomationJobStrategyDraft } => Boolean(item));
         const businessTools = activeWorkspace.tools.filter((tool) => tool.businessTool);
-        const approvalToolCount = businessTools.filter((tool) => automationConfigDraft.toolApprovalModes[tool.id] === "approval").length;
         const selectedJobsHaveStrategy = selectedLaunchJobs.every((item) =>
           item.strategy.screeningCriteria.trim()
           && item.strategy.onlineResumeCriteria.trim()
           && item.strategy.offlineResumeCriteria.trim()
-          && item.strategy.compositeScoring.trim(),
+          && item.strategy.compositeScoring.trim()
+          && item.strategy.manualReviewRules.trim()
+          && item.strategy.onlineResumePass.trim()
+          && item.strategy.offlineResumePass.trim()
+          && item.strategy.compositePass.trim()
+          && item.strategy.manualReviewMin.trim(),
         );
+        const siteReady = Boolean(
+          automationConfigDraft.executionSop.siteEntryUrl.trim(),
+        );
+        const siteAndJdReady = siteReady && automationJobDescriptions.length > 0;
         const sopReady = Boolean(automationConfigDraft.executionSop.stepsText.trim());
-        const validationItems = [
+        const schedulerReady = Boolean(
+          automationConfigDraft.activationPolicy.scanIntervalMinutes.trim()
+          && automationConfigDraft.activationPolicy.candidatePoolTarget.trim()
+          && automationConfigDraft.activationPolicy.backlogThreshold.trim()
+          && automationConfigDraft.activationPolicy.priorityDiscoveryWeight.trim()
+          && automationConfigDraft.activationPolicy.priorityUnreadMessageWeight.trim()
+          && automationConfigDraft.activationPolicy.priorityScoringBacklogWeight.trim()
+          && automationConfigDraft.activationPolicy.priorityApprovalWeight.trim()
+          && automationConfigDraft.activationPolicy.priorityJdGapWeight.trim()
+          && automationConfigDraft.activationPolicy.messageSlaMinutes.trim()
+          && automationConfigDraft.activationPolicy.siteCooldownMinutes.trim()
+          && automationConfigDraft.activationPolicy.retryCooldownMinutes.trim()
+          && automationConfigDraft.activationPolicy.maxActionsPerHour.trim()
+          && automationConfigDraft.activationPolicy.maxConsecutiveErrors.trim(),
+        );
+        const automationConfigPages: Array<{ key: AutomationConfigPageKey; label: string; meta: string; passed: boolean }> = [
           {
-            label: copy("Selected JDs", "已选择 JD"),
-            passed: selectedLaunchJobs.length > 0,
-            detail: `${selectedLaunchJobs.length} / ${automationJobDescriptions.length}`,
+            key: "entry",
+            label: copy("Recruiting site", "招聘网站"),
+            meta: siteReady
+              ? `${readableUrlHost(automationConfigDraft.executionSop.siteEntryUrl)} · ${automationJobDescriptions.length} JD`
+              : copy("Required", "必填"),
+            passed: siteAndJdReady,
           },
           {
-            label: copy("Per-JD strategies", "逐 JD 策略"),
-            passed: selectedJobsHaveStrategy,
-            detail: selectedJobsHaveStrategy ? copy("Screening and scoring are configured.", "筛选与评分已配置。") : copy("Selected JDs need screening, resume, and composite rules.", "选中 JD 需要补齐筛选、简历与综合规则。"),
+            key: "jd",
+            label: copy("JD strategy", "JD 策略"),
+            meta: selectedLaunchJobs.length ? `${selectedLaunchJobs.length}/${automationJobDescriptions.length} JD` : copy("Required", "必填"),
+            passed: selectedLaunchJobs.length > 0 && selectedJobsHaveStrategy,
           },
           {
+            key: "sop",
             label: copy("Execution SOP", "执行 SOP"),
+            meta: `${linesFromText(automationConfigDraft.executionSop.stepsText).length}`,
             passed: sopReady,
-            detail: sopReady ? automationConfigDraft.executionSop.name : copy("Add SOP steps.", "需要填写 SOP 步骤。"),
           },
           {
-            label: copy("Tool permissions", "工具权限"),
-            passed: true,
-            detail: copy(`${approvalToolCount} approval gates`, `${approvalToolCount} 个审批节点`),
+            key: "activation",
+            label: copy("Scheduling rules", "调度规则"),
+            meta: copy("Rules", "规则"),
+            passed: schedulerReady,
           },
-        ];
-        const passedValidationCount = validationItems.filter((item) => item.passed).length;
-        const validationProgressPercent = Math.round((passedValidationCount / validationItems.length) * 100);
-        const automationConfigPages: Array<{ key: AutomationConfigPageKey; label: string; description: string }> = [
-          { key: "jd", label: copy("JD strategy", "JD 策略"), description: copy("Per-JD screening, resume scoring, composite thresholds, and acceptance output.", "逐 JD 配置筛选、简历评分、综合阈值和验收产出。") },
-          { key: "sop", label: copy("Execution SOP", "执行 SOP"), description: copy("Shared execution method selected by a run plan.", "运行计划选择的共享执行方法。") },
-          { key: "activation", label: copy("Activation", "激活与优先级"), description: copy("Programmatic start, stop, priority, cooldown, and queue policy.", "程序化启动、停止、优先级、冷却和队列策略。") },
-          { key: "resume", label: copy("Resume", "恢复策略"), description: copy("State resume sources and runtime input preview.", "配置状态恢复来源和本次运行输入预览。") },
-          { key: "sync", label: copy("Sync", "同步策略"), description: copy("External JD, IM, resume, contact, and evidence sync boundaries.", "外部 JD、IM、简历、联系方式和证据同步边界。") },
-          { key: "run", label: copy("Run plan", "运行计划"), description: copy("Choose executable JDs for the next autonomous run.", "选择下一次自动化运行的可执行 JD。") },
-          { key: "tools", label: copy("Tool permissions", "工具权限"), description: copy("Approval gates bound to business tools.", "绑定业务工具的审批节点。") },
-          { key: "base", label: copy("Base capability", "基础能力"), description: copy("Read-only stable system/developer instruction.", "只读查看稳定 system/developer 设定。") },
+          {
+            key: "tools",
+            label: copy("Tool permissions", "工具权限"),
+            meta: `${businessTools.length}`,
+            passed: true,
+          },
+          {
+            key: "base",
+            label: copy("Base capability", "基础能力"),
+            meta: copy("Read-only", "只读"),
+            passed: true,
+          },
         ];
         const updateAutomationSop = (field: keyof AutomationExecutionSopDraft, value: string) => {
           setAutomationConfigDraft((current) => ({
@@ -3503,29 +4411,14 @@ export function ChatOverlay({
             },
           }));
         };
-        const updateAutomationActivationPolicy = (field: keyof AutomationActivationPolicyDraft, value: string) => {
+        const updateAutomationActivationPolicy = <K extends keyof AutomationActivationPolicyDraft>(
+          field: K,
+          value: AutomationActivationPolicyDraft[K],
+        ) => {
           setAutomationConfigDraft((current) => ({
             ...current,
             activationPolicy: {
               ...current.activationPolicy,
-              [field]: value,
-            },
-          }));
-        };
-        const updateAutomationResumePolicy = (field: keyof AutomationResumePolicyDraft, value: string) => {
-          setAutomationConfigDraft((current) => ({
-            ...current,
-            resumePolicy: {
-              ...current.resumePolicy,
-              [field]: value,
-            },
-          }));
-        };
-        const updateAutomationSyncPolicy = (field: keyof AutomationSyncPolicyDraft, value: string) => {
-          setAutomationConfigDraft((current) => ({
-            ...current,
-            syncPolicy: {
-              ...current.syncPolicy,
               [field]: value,
             },
           }));
@@ -3555,6 +4448,33 @@ export function ChatOverlay({
           }));
           setSelectedAutomationJobId(jobId);
         };
+        const selectAllAutomationJobs = () => {
+          const allJobIds = automationJobDescriptions.map(automationJobId).filter((id): id is string => Boolean(id));
+          setAutomationConfigDraft((current) => ({
+            ...current,
+            selectedRunJobIds: allJobIds,
+          }));
+          setSelectedAutomationJobId((current) => current ?? allJobIds[0] ?? null);
+        };
+        const clearAllAutomationJobs = () => {
+          setAutomationConfigDraft((current) => ({
+            ...current,
+            selectedRunJobIds: [],
+          }));
+        };
+        const applyRecommendedAutomationStrategy = (job: JobDescriptionSummaryRecord) => {
+          const jobId = automationJobId(job);
+          if (!jobId) {
+            return;
+          }
+          setAutomationConfigDraft((current) => ({
+            ...current,
+            jobStrategies: {
+              ...current.jobStrategies,
+              [jobId]: recommendedAutomationJobStrategy(job, recruitingPolicyPayloadFromDraft(activeAgentConfig.recruitingPolicy)),
+            },
+          }));
+        };
         const updateToolApprovalMode = (toolId: string, mode: AutomationToolApprovalMode) => {
           setAutomationConfigDraft((current) => ({
             ...current,
@@ -3564,6 +4484,45 @@ export function ChatOverlay({
             },
           }));
         };
+        const renderLineEditor = (
+          value: string,
+          onChange: (next: string) => void,
+          addLabel: string,
+        ) => {
+          const rows = linesFromText(value);
+          const normalizedRows = rows.length ? rows : [""];
+          const setRows = (nextRows: string[]) => {
+            onChange(textFromLines(nextRows));
+          };
+          return (
+            <div className="agent-config-line-editor">
+              {normalizedRows.map((line, index) => (
+                <div key={`${index}-${normalizedRows.length}`} className="agent-config-line-editor__row">
+                  <span>{index + 1}</span>
+                  <FormInput
+                    value={line}
+                    onChange={(event) => {
+                      const nextRows = [...normalizedRows];
+                      nextRows[index] = event.target.value;
+                      setRows(nextRows);
+                    }}
+                  />
+                  <button
+                    type="button"
+                    className="agent-config-line-editor__icon-button"
+                    onClick={() => setRows(normalizedRows.filter((_, rowIndex) => rowIndex !== index))}
+                    aria-label={copy("Remove row", "删除此条")}
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+              <button type="button" className="agent-config-line-editor__add" onClick={() => setRows([...normalizedRows, ""])}>
+                + {addLabel}
+              </button>
+            </div>
+          );
+        };
         const renderStrategyTextarea = (
           field: keyof AutomationJobStrategyDraft,
           label: string,
@@ -3572,135 +4531,134 @@ export function ChatOverlay({
           <label className="agent-config-editor__field">
             <span>{label}</span>
             <small>{description}</small>
-            <FormTextarea
-              value={selectedJobStrategy ? String(selectedJobStrategy[field]) : ""}
-              disabled={!selectedAutomationJobId || !selectedJobStrategy}
-              onChange={(event) => {
+            {renderLineEditor(
+              selectedJobStrategy ? String(selectedJobStrategy[field]) : "",
+              (next) => {
                 if (selectedAutomationJobId) {
-                  updateAutomationStrategy(selectedAutomationJobId, field, event.target.value);
+                  updateAutomationStrategy(selectedAutomationJobId, field, next);
                 }
-              }}
-              className="chat-overlay-form-textarea--medium"
+              },
+              copy("Add rule", "添加规则"),
+            )}
+          </label>
+        );
+        const renderStrategyRecommendation = () => {
+          if (!selectedJob || !selectedJobRecommendation) {
+            return null;
+          }
+          const scoreItems: Array<[string, string]> = [
+            [copy("Online pass", "在线通过线"), selectedJobRecommendation.onlineResumePass],
+            [copy("Offline pass", "离线通过线"), selectedJobRecommendation.offlineResumePass],
+            [copy("Composite pass", "综合通过线"), selectedJobRecommendation.compositePass],
+            [copy("Manual review", "人工复核线"), selectedJobRecommendation.manualReviewMin],
+          ];
+          const policyItems: Array<[string, string]> = [
+            [copy("JD screening standard", "基于 JD 的候选人筛选标准"), selectedJobRecommendation.screeningCriteria],
+            [copy("Online resume scoring", "在线简历评分标准"), selectedJobRecommendation.onlineResumeCriteria],
+            [copy("Offline resume scoring", "离线简历评分标准"), selectedJobRecommendation.offlineResumeCriteria],
+            [copy("Composite scoring standard", "综合评分标准"), selectedJobRecommendation.compositeScoring],
+            [copy("Manual review rules", "人工复核规则"), selectedJobRecommendation.manualReviewRules],
+          ];
+          return (
+            <section className="agent-config-strategy-recommendation">
+              <div className="agent-config-strategy-recommendation__head">
+                <strong>{copy("Recommended strategy template", "推荐策略模板")}</strong>
+                <button type="button" className="chat-overlay__header-button" onClick={() => applyRecommendedAutomationStrategy(selectedJob)}>
+                  {copy("Use this template", "使用此模板")}
+                </button>
+              </div>
+              <div className="agent-config-strategy-recommendation__scores">
+                {scoreItems.map(([label, value]) => (
+                  <div key={label}>
+                    <span>{label}</span>
+                    <strong>{value}</strong>
+                  </div>
+                ))}
+              </div>
+              <div className="agent-config-strategy-recommendation__body">
+                {policyItems.map(([label, value]) => (
+                  <article key={label}>
+                    <span>{label}</span>
+                    <p>{value}</p>
+                  </article>
+                ))}
+              </div>
+            </section>
+          );
+        };
+        const renderSchedulerToggle = (field: AutomationActivationBooleanField, label: string) => (
+          <label className="agent-config-scheduler-toggle">
+            <FormCheckbox
+              type="checkbox"
+              checked={Boolean(automationConfigDraft.activationPolicy[field])}
+              onChange={(event) => updateAutomationActivationPolicy(field, event.target.checked)}
             />
+            <span>{label}</span>
+          </label>
+        );
+        const renderSchedulerNumber = (
+          field: AutomationActivationNumberField,
+          label: string,
+          suffix: string,
+        ) => (
+          <label className="agent-config-score">
+            <span>{label}</span>
+            <div className="agent-config-number-with-unit">
+              <FormInput
+                type="number"
+                min={0}
+                value={String(automationConfigDraft.activationPolicy[field] ?? "")}
+                onChange={(event) => updateAutomationActivationPolicy(field, event.target.value)}
+              />
+              <small>{suffix}</small>
+            </div>
           </label>
         );
 
         return (
           <div className="agent-config agent-config--automation">
-            <section className="agent-config__header">
-              <div>
-                <span className="agent-config__eyebrow">{activeWorkspace.agentDefinition.key}</span>
-                <h3>{copy("Recruiting automation configuration", "自动化招聘配置")}</h3>
-                <p>
-                  {copy(
-                    "Manage frequently changing business policy here: per-JD screening, resume scoring, composite scoring, execution SOP, run selection, and business tool approvals.",
-                    "这里维护高频变化的业务策略：逐 JD 筛选、简历评分、综合评分、独立执行 SOP、运行选择和业务工具审批。",
-                  )}
-                </p>
-              </div>
-              <div className="agent-config__actions">
-                <button
-                  type="button"
-                  className="chat-overlay__header-button"
-                  disabled={savingConfig || startingAutomationPlan}
-                  onClick={() => {
-                    setConfigDraft(configDraftFromSettings(settingsSnapshot));
-                    setAgentConfigDrafts((current) => ({
-                      ...current,
-                      autonomous: agentConfigDraftFromWorkspace(workspaces.autonomous),
-                    }));
-                    setAutomationConfigDraft(automationConfigDraftFromWorkspace(workspaces.autonomous, automationJobDescriptions));
-                  }}
-                >
-                  {copy("Reset", "重置")}
-                </button>
-                <button type="button" className="chat-overlay__header-button" disabled={savingConfig} onClick={() => void handleSaveConfig()}>
-                  {savingConfig ? copy("Saving…", "保存中…") : copy("Save policy", "保存策略")}
-                </button>
-                <button
-                  type="button"
-                  className="chat-composer__submit"
-                  disabled={startingAutomationPlan || autonomousStartBlocked || !selectedLaunchJobs.length}
-                  onClick={() => void handleStartAutomationPlan()}
-                >
-                  {startingAutomationPlan ? copy("Starting…", "启动中…") : copy("Start selected JDs", "启动选中 JD")}
-                </button>
-              </div>
-            </section>
-
-            <nav className="agent-config-page-tabs" aria-label={copy("Automation configuration pages", "自动化配置页面")}>
-              {automationConfigPages.map((page) => (
-                <button
-                  key={page.key}
-                  type="button"
-                  data-active={selectedAutomationConfigPage === page.key}
-                  onClick={() => setSelectedAutomationConfigPage(page.key)}
-                >
-                  <strong>{page.label}</strong>
-                  <span>{page.description}</span>
-                </button>
-              ))}
-            </nav>
-
-            {selectedAutomationConfigPage === "run" ? (
-            <section className="agent-config-launch-status">
-              <div className="agent-config-launch-status__head">
-                <div>
-                  <span>{copy("Configuration readiness", "配置完整度")}</span>
-                  <strong>{passedValidationCount}/{validationItems.length}</strong>
+            <div className="agent-config-automation-layout">
+              <div className="agent-config-automation-main">
+                <div className="agent-config-automation-actions">
+                  <button
+                    type="button"
+                    className="chat-overlay__header-button"
+                    disabled={savingConfig}
+                    onClick={() => {
+                      setConfigDraft(configDraftFromSettings(settingsSnapshot));
+                      setAgentConfigDrafts((current) => ({
+                        ...current,
+                        autonomous: agentConfigDraftFromWorkspace(workspaces.autonomous),
+                      }));
+                      setAutomationConfigDraft(automationConfigDraftFromWorkspace(workspaces.autonomous, automationJobDescriptions));
+                    }}
+                  >
+                    {copy("Reset", "重置")}
+                  </button>
+                  <button type="button" className="chat-overlay__header-button" disabled={savingConfig} onClick={() => void handleSaveConfig()}>
+                    {savingConfig ? copy("Saving…", "保存中…") : copy("Save configuration", "保存配置")}
+                  </button>
                 </div>
-                <div className="agent-config-launch-status__meta">
-                  <span>{copy("JDs", "JD")} {selectedLaunchJobs.length}</span>
-                  <span>{copy("Approvals", "审批")} {approvalToolCount}</span>
-                </div>
-              </div>
-              <div className="agent-config-timeline" aria-label={copy("Configuration readiness", "配置完整度")}>
-                <div className="agent-config-timeline__line" aria-hidden="true">
-                  <span style={{ width: `${validationProgressPercent}%` }} />
-                </div>
-                {validationItems.map((item) => (
-                  <div key={item.label} data-pass={item.passed}>
-                    <span>{item.passed ? "✓" : "!"}</span>
-                    <div>
-                      <strong>{item.label}</strong>
-                      <small>{item.detail}</small>
-                    </div>
+                <section className="agent-config-step-panel">
+                  <div className="agent-config-sop-timeline agent-config-step-timeline" role="tablist" aria-label={copy("Automation configuration steps", "自动化配置节点")}>
+                    <div className="agent-config-sop-timeline__line" aria-hidden="true" />
+                    {automationConfigPages.map((node, index) => (
+                      <button
+                        key={node.key}
+                        type="button"
+                        role="tab"
+                        aria-selected={selectedAutomationConfigPage === node.key}
+                        data-active={selectedAutomationConfigPage === node.key}
+                        data-pass={node.passed}
+                        onClick={() => setSelectedAutomationConfigPage(node.key)}
+                      >
+                        <span>{node.passed ? "✓" : index + 1}</span>
+                        <strong>{node.label}</strong>
+                        <small>{node.meta}</small>
+                      </button>
+                    ))}
                   </div>
-                ))}
-              </div>
-              <div className="agent-config-run-selection">
-                <div className="agent-config-panel-head">
-                  <div>
-                    <h4>{copy("Executable JD list", "可执行 JD 列表")}</h4>
-                    <p>{copy("Active JDs are selected here for the next run. When a JD is taken offline by an operator, it leaves this list.", "下一次运行在这里选择启用 JD；JD 被人工下架后会离开可执行列表。")}</p>
-                  </div>
-                </div>
-                <div className="agent-config-run-selection__list">
-                  {automationJobDescriptions.map((job) => {
-                    const jobId = automationJobId(job);
-                    if (!jobId) {
-                      return null;
-                    }
-                    const selectedForRun = automationConfigDraft.selectedRunJobIds.includes(jobId);
-                    return (
-                      <label key={jobId} className="agent-config-run-selection__row">
-                        <FormCheckbox
-                          type="checkbox"
-                          checked={selectedForRun}
-                          onChange={(event) => toggleAutomationRunJob(jobId, event.target.checked)}
-                        />
-                        <span>
-                          <strong>{job.title}</strong>
-                          <small>{automationJobSubtitle(job)}</small>
-                        </span>
-                      </label>
-                    );
-                  })}
-                </div>
-              </div>
-            </section>
-            ) : null}
-
+                </section>
             {selectedAutomationConfigPage === "base" ? (
               <section className="agent-config-system-preview">
                 {renderBaseCapabilityReadOnly(activeAgentConfig)}
@@ -3709,13 +4667,14 @@ export function ChatOverlay({
 
             {selectedAutomationConfigPage === "jd" ? (
             <section className="agent-config-automation-shell">
-              <aside className="agent-config-jobs-panel">
-                <div className="agent-config-panel-head">
-                  <div>
-                    <h4>{copy("JD strategy library", "JD 策略库")}</h4>
-                    <p>{copy("Each JD keeps its own business policy. The workflow stays shared.", "每个 JD 独立维护业务策略，执行工作流保持共享。")}</p>
-                  </div>
-                  <StatusBadge tone={selectedLaunchJobs.length ? "positive" : "warning"}>{selectedLaunchJobs.length}</StatusBadge>
+              <aside className="agent-config-jobs-panel" aria-label={copy("JD strategy list", "JD 策略列表")}>
+                <div className="agent-config-job-actions">
+                  <button type="button" className="chat-overlay__header-button" onClick={selectAllAutomationJobs}>
+                    {copy("Select all", "全选")}
+                  </button>
+                  <button type="button" className="chat-overlay__header-button" onClick={clearAllAutomationJobs}>
+                    {copy("Clear", "取消全选")}
+                  </button>
                 </div>
                 <div className="agent-config-job-selector">
                   {automationJobDescriptions.map((job) => {
@@ -3723,17 +4682,24 @@ export function ChatOverlay({
                     if (!jobId) {
                       return null;
                     }
+                    const selectedForRun = automationConfigDraft.selectedRunJobIds.includes(jobId);
                     return (
-                      <div key={jobId} className="agent-config-job-row" data-active={jobId === selectedAutomationJobId}>
+                      <div key={jobId} className="agent-config-job-row agent-config-job-row--selectable" data-active={jobId === selectedAutomationJobId} data-selected={selectedForRun}>
+                        <FormCheckbox
+                          type="checkbox"
+                          checked={selectedForRun}
+                          onChange={(event) => toggleAutomationRunJob(jobId, event.target.checked)}
+                          aria-label={copy("Enable JD for this run", "选择此 JD 生效")}
+                        />
                         <button type="button" onClick={() => setSelectedAutomationJobId(jobId)}>
                           <strong>{job.title}</strong>
-                          <span>{automationJobSubtitle(job)}</span>
+                          <small>{selectedForRun ? automationJobSubtitle(job) : copy("Not selected for automation", "未选择，不需要配置策略")}</small>
                         </button>
                       </div>
                     );
                   })}
                   {!automationJobDescriptions.length ? (
-                    <div className="chat-empty-inline">{copy("No JD records available.", "当前没有可配置的 JD。")}</div>
+                    <div className="chat-empty-inline">{copy("Configure the entry URL and sync JD first.", "请先配置入口 URL 并同步 JD。")}</div>
                   ) : null}
                 </div>
               </aside>
@@ -3742,13 +4708,13 @@ export function ChatOverlay({
                 <section className="agent-config-strategy-section">
                   <div className="agent-config-panel-head">
                     <div>
-                      <h4>{selectedJob ? selectedJob.title : copy("Select a JD", "选择一个 JD")}</h4>
-                      <p>{selectedJob ? automationJobSubtitle(selectedJob) : copy("Pick a JD from the left to edit its screening and scoring policy.", "从左侧选择 JD 后编辑筛选与评分策略。")}</p>
+                      <h4>{selectedJob ? selectedJob.title : copy("Select an effective JD", "选择生效 JD")}</h4>
+                      <p>{selectedJob ? automationJobSubtitle(selectedJob) : copy("Enable a JD on the left, then edit its screening and scoring policy.", "先在左侧选择生效 JD，再编辑该 JD 的筛选与评分策略。")}</p>
                     </div>
-                    {selectedJob ? <StatusBadge tone="neutral">{selectedJob.status || "JD"}</StatusBadge> : null}
                   </div>
-                  {selectedJob && selectedJobStrategy ? (
+                  {selectedJob && selectedJobStrategy && selectedJobEnabled ? (
                     <div className="agent-config-editor__fields">
+                      {renderStrategyRecommendation()}
                       <div className="agent-config-score-grid agent-config-score-grid--four">
                         {([
                           ["onlineResumePass", copy("Online pass", "在线通过线")],
@@ -3793,7 +4759,11 @@ export function ChatOverlay({
                       {renderStrategyTextarea("manualReviewRules", copy("Manual review rules", "人工复核规则"), copy("When the candidate should be marked for review instead of pass/reject.", "候选人何时进入复核，而不是直接通过或淘汰。"))}
                     </div>
                   ) : (
-                    <div className="chat-empty-inline">{copy("Select a JD to edit its strategy.", "请选择一个 JD 编辑策略。")}</div>
+                    <div className="chat-empty-inline">
+                      {selectedJob
+                        ? copy("This JD is not selected for automation, so no strategy is required.", "该 JD 未选择生效，不需要配置策略。")
+                        : copy("Select an effective JD to edit its strategy.", "请选择一个生效 JD 编辑策略。")}
+                    </div>
                   )}
                 </section>
 
@@ -3801,156 +4771,112 @@ export function ChatOverlay({
             </section>
             ) : null}
 
+            {selectedAutomationConfigPage === "entry" ? (
+            <section className="agent-config-independent-panel agent-config-sop-panel">
+              <div className="agent-config-sop-section">
+                <div className="agent-config-panel-head">
+                  <div>
+                    <h4>{copy("Recruiting site used by automation", "自动化招聘网站")}</h4>
+                  </div>
+                  <button
+                    type="button"
+                    className="chat-overlay__header-button"
+                    onClick={() => focusAgent("jd_sync", "config")}
+                  >
+                    {copy("Open JD Sync Agent", "打开 JD 同步 Agent")}
+                  </button>
+                </div>
+                <div className="agent-config-editor__fields">
+                  <label className="agent-config-editor__field agent-config-editor__field--wide">
+                    <span>{copy("Recruiting entry URL", "招聘入口 URL")}</span>
+                    <FormInput
+                      placeholder="https://..."
+                      value={automationConfigDraft.executionSop.siteEntryUrl}
+                      onChange={(event) => updateAutomationSop("siteEntryUrl", event.target.value)}
+                    />
+                  </label>
+                </div>
+                <div className="chat-empty-inline">
+                  {automationJobDescriptions.length
+                    ? copy(`${automationJobDescriptions.length} JD records are available for strategy configuration.`, `当前已有 ${automationJobDescriptions.length} 个 JD 可配置策略。`)
+                    : copy("No synced JD yet. Run the JD Sync Agent first, then return to select effective JD.", "尚未同步 JD。请先运行 JD 同步 Agent，再回来选择生效 JD。")}
+                </div>
+                <label className="agent-config-editor__field">
+                  <span>{copy("Site execution boundaries", "站点执行边界")}</span>
+                  {renderLineEditor(
+                    automationConfigDraft.executionSop.siteAccessRulesText,
+                    (next) => updateAutomationSop("siteAccessRulesText", next),
+                    copy("Add boundary", "添加边界"),
+                  )}
+                </label>
+              </div>
+            </section>
+            ) : null}
+
             {selectedAutomationConfigPage === "sop" ? (
             <section className="agent-config-independent-panel agent-config-sop-panel">
-              <div className="agent-config-panel-head">
-                <div>
-                  <h4>{copy("Execution SOP", "招聘执行 SOP")}</h4>
-                  <p>{copy("Independent capability shared by all selected JDs in the current run.", "独立能力配置，对本次运行选中的所有 JD 统一生效。")}</p>
-                </div>
-                <StatusBadge tone="neutral">{copy("Global", "全局")}</StatusBadge>
-              </div>
-              <div className="agent-config-editor__fields agent-config-editor__fields--two">
-                <label className="agent-config-editor__field">
-                  <span>{copy("SOP name", "SOP 名称")}</span>
-                  <FormInput value={automationConfigDraft.executionSop.name} onChange={(event) => updateAutomationSop("name", event.target.value)} />
-                </label>
-                <label className="agent-config-editor__field">
-                  <span>{copy("Scope", "生效范围")}</span>
-                  <FormInput value={automationConfigDraft.executionSop.siteScope} onChange={(event) => updateAutomationSop("siteScope", event.target.value)} />
-                </label>
-                <label className="agent-config-editor__field">
-                  <span>{copy("SOP steps", "SOP 步骤")}</span>
-                  <small>{copy("One production step per line.", "每行一个生产执行步骤。")}</small>
-                  <FormTextarea
-                    value={automationConfigDraft.executionSop.stepsText}
-                    onChange={(event) => updateAutomationSop("stepsText", event.target.value)}
-                    className="chat-overlay-form-textarea--medium"
-                  />
-                </label>
-                <label className="agent-config-editor__field">
-                  <span>{copy("Stop and handoff rules", "停止与交接规则")}</span>
-                  <small>{copy("When to stop, wait, escalate, or hand off.", "何时停止、等待、升级或交接。")}</small>
-                  <FormTextarea
-                    value={automationConfigDraft.executionSop.stopRulesText}
-                    onChange={(event) => updateAutomationSop("stopRulesText", event.target.value)}
-                    className="chat-overlay-form-textarea--medium"
-                  />
-                </label>
-              </div>
+              <FormTextarea
+                value={automationConfigDraft.executionSop.stepsText}
+                onChange={(event) => updateAutomationSop("stepsText", event.target.value)}
+                className="agent-config-sop-prompt-textarea"
+              />
             </section>
             ) : null}
 
             {selectedAutomationConfigPage === "activation" ? (
             <section className="agent-config-independent-panel">
-              <div className="agent-config-panel-head">
-                <div>
-                  <h4>{copy("Activation and priority policy", "激活与优先级策略")}</h4>
-                  <p>{copy("These rules are programmatic scheduling inputs. Prompt only explains the policy to the agent; it is not the scheduler.", "这些规则是程序化调度输入。Prompt 只解释策略，不承担真正调度裁决。")}</p>
-                </div>
-                <StatusBadge tone="positive">{copy("Programmatic", "程序化")}</StatusBadge>
-              </div>
-              <div className="agent-config-score-grid agent-config-score-grid--four">
-                {[
-                  { key: "balanced", label: copy("Balanced", "平衡推进") },
-                  { key: "discovery_first", label: copy("Discovery first", "发现优先") },
-                  { key: "response_first", label: copy("Response first", "沟通优先") },
-                ].map((preset) => (
-                  <button
-                    key={preset.key}
-                    type="button"
-                    className="agent-config-priority-preset"
-                    data-active={automationConfigDraft.activationPolicy.priorityPreset === preset.key}
-                    onClick={() => updateAutomationActivationPolicy("priorityPreset", preset.key)}
-                  >
-                    {preset.label}
-                  </button>
-                ))}
-              </div>
-              <div className="agent-config-editor__fields agent-config-editor__fields--two">
-                <label className="agent-config-editor__field">
-                  <span>{copy("Start conditions", "启动条件")}</span>
-                  <small>{copy("External events, timers, low JD pool, unread messages, and scoring backlog.", "外部事件、定时、JD 池水位不足、未读消息和评分积压。")}</small>
-                  <FormTextarea value={automationConfigDraft.activationPolicy.startConditionsText} onChange={(event) => updateAutomationActivationPolicy("startConditionsText", event.target.value)} className="chat-overlay-form-textarea--medium" />
-                </label>
-                <label className="agent-config-editor__field">
-                  <span>{copy("Stop conditions", "停止条件")}</span>
-                  <small>{copy("JD taken offline, pool target reached, no valid candidates, budget/frequency limit, approval timeout, or no progress.", "JD 下架、池水位达标、连续无有效候选人、预算/限频、审批超时或无可推进动作。")}</small>
-                  <FormTextarea value={automationConfigDraft.activationPolicy.stopConditionsText} onChange={(event) => updateAutomationActivationPolicy("stopConditionsText", event.target.value)} className="chat-overlay-form-textarea--medium" />
-                </label>
-                <label className="agent-config-editor__field">
-                  <span>{copy("Priority scoring model", "优先级评分模型")}</span>
-                  <small>{copy("Base task weight + JD gap + message wait + interview proximity + operator mark - cooldown penalty.", "基础任务权重 + JD 缺口 + 消息等待 + 面试临近 + 人工标记 - 冷却惩罚。")}</small>
-                  <FormTextarea value={automationConfigDraft.activationPolicy.priorityWeightsText} onChange={(event) => updateAutomationActivationPolicy("priorityWeightsText", event.target.value)} className="chat-overlay-form-textarea--medium" />
-                </label>
-                <label className="agent-config-editor__field">
-                  <span>{copy("Cooldown and frequency limits", "冷却与频率限制")}</span>
-                  <small>{copy("Protect external sites and prevent duplicate actions.", "保护外部站点，避免重复动作。")}</small>
-                  <FormTextarea value={automationConfigDraft.activationPolicy.cooldownRulesText} onChange={(event) => updateAutomationActivationPolicy("cooldownRulesText", event.target.value)} className="chat-overlay-form-textarea--medium" />
-                </label>
-              </div>
-            </section>
-            ) : null}
-
-            {selectedAutomationConfigPage === "resume" ? (
-            <section className="agent-config-independent-panel">
-              <div className="agent-config-panel-head">
-                <div>
-                  <h4>{copy("Run-state resume policy", "运行状态恢复策略")}</h4>
-                  <p>{copy("The agent is resumed by structured ActivationEvent/WakeupEvent plus state and summary, not by a plain 'continue' prompt.", "Agent 通过结构化 ActivationEvent/WakeupEvent 加状态和摘要恢复，不是一句“继续”。")}</p>
-                </div>
-                <StatusBadge tone="neutral">{copy("State + Summary", "状态 + 摘要")}</StatusBadge>
-              </div>
-              <div className="agent-config-editor__fields agent-config-editor__fields--two">
-                <label className="agent-config-editor__field">
-                  <span>{copy("Resume sources", "恢复来源")}</span>
-                  <small>{copy("What the Adapter should load before compiling runtime input.", "Adapter 编译运行输入前需要加载的来源。")}</small>
-                  <FormTextarea value={automationConfigDraft.resumePolicy.resumeSourcesText} onChange={(event) => updateAutomationResumePolicy("resumeSourcesText", event.target.value)} className="chat-overlay-form-textarea--medium" />
-                </label>
-                <label className="agent-config-editor__field">
-                  <span>{copy("Run input preview", "本次运行输入预览")}</span>
-                  <small>{copy("Human-readable preview of the controlled runtime input shape.", "受控运行输入结构的人类可读预览。")}</small>
-                  <FormTextarea value={automationConfigDraft.resumePolicy.runtimeInputPreviewText} onChange={(event) => updateAutomationResumePolicy("runtimeInputPreviewText", event.target.value)} className="chat-overlay-form-textarea--medium" />
-                </label>
-              </div>
-            </section>
-            ) : null}
-
-            {selectedAutomationConfigPage === "sync" ? (
-            <section className="agent-config-independent-panel">
-              <div className="agent-config-panel-head">
-                <div>
-                  <h4>{copy("External data sync policy", "外部数据同步策略")}</h4>
-                  <p>{copy("Defines what is synchronized with recruiting sites and what is retained as local business facts.", "定义外部招聘网站同步内容，以及本系统保留的业务事实。")}</p>
-                </div>
-                <StatusBadge tone="neutral">{copy("Boundary", "边界")}</StatusBadge>
-              </div>
-              <div className="agent-config-editor__fields">
-                <label className="agent-config-editor__field">
-                  <span>{copy("JD sync", "JD 同步")}</span>
-                  <FormTextarea value={automationConfigDraft.syncPolicy.jdSyncText} onChange={(event) => updateAutomationSyncPolicy("jdSyncText", event.target.value)} className="chat-overlay-form-textarea--medium" />
-                </label>
-                <label className="agent-config-editor__field">
-                  <span>{copy("IM bidirectional sync", "IM 双向同步")}</span>
-                  <FormTextarea value={automationConfigDraft.syncPolicy.imSyncText} onChange={(event) => updateAutomationSyncPolicy("imSyncText", event.target.value)} className="chat-overlay-form-textarea--medium" />
-                </label>
-                <label className="agent-config-editor__field">
-                  <span>{copy("Resume and contact sync", "简历与联系方式同步")}</span>
-                  <FormTextarea value={automationConfigDraft.syncPolicy.resumeContactSyncText} onChange={(event) => updateAutomationSyncPolicy("resumeContactSyncText", event.target.value)} className="chat-overlay-form-textarea--medium" />
-                </label>
+              <div className="agent-config-scheduler-grid">
+                <section className="agent-config-scheduler-section">
+                  <strong>{copy("Wake triggers", "唤醒触发")}</strong>
+                  <div className="agent-config-scheduler-toggle-grid">
+                    {renderSchedulerToggle("manualStartEnabled", copy("Manual workspace start", "手动启动工作区"))}
+                    {renderSchedulerToggle("scheduledScanEnabled", copy("Scheduled scan", "定时扫描"))}
+                    {renderSchedulerToggle("jdPoolGapEnabled", copy("JD pool gap", "JD 候选人池缺口"))}
+                    {renderSchedulerToggle("externalEventWakeEnabled", copy("External site events", "外部站点事件"))}
+                    {renderSchedulerToggle("backlogWakeEnabled", copy("Backlog threshold", "积压阈值"))}
+                  </div>
+                  <div className="agent-config-score-grid agent-config-score-grid--three">
+                    {renderSchedulerNumber("scanIntervalMinutes", copy("Scan interval", "扫描间隔"), copy("min", "分钟"))}
+                    {renderSchedulerNumber("candidatePoolTarget", copy("Pool target", "候选人池目标"), copy("candidates", "人"))}
+                    {renderSchedulerNumber("backlogThreshold", copy("Backlog threshold", "积压阈值"), copy("items", "项"))}
+                  </div>
+                </section>
+                <section className="agent-config-scheduler-section">
+                  <strong>{copy("Pause and stop guards", "暂停与停止保护")}</strong>
+                  <div className="agent-config-scheduler-toggle-grid">
+                    {renderSchedulerToggle("stopOnJdOffline", copy("Stop when JD is offline", "JD 下架时停止"))}
+                    {renderSchedulerToggle("pauseOnLoginRequired", copy("Pause on login required", "需要登录时暂停"))}
+                    {renderSchedulerToggle("pauseOnEntryUnavailable", copy("Pause on unavailable entry", "入口不可用时暂停"))}
+                    {renderSchedulerToggle("pauseOnApprovalPending", copy("Pause on pending approval", "等待审批时暂停"))}
+                    {renderSchedulerToggle("pauseOnNoProgress", copy("Pause on no progress", "无进展时暂停"))}
+                  </div>
+                </section>
+                <section className="agent-config-scheduler-section">
+                  <strong>{copy("Priority weights", "优先级权重")}</strong>
+                  <div className="agent-config-score-grid agent-config-score-grid--four">
+                    {renderSchedulerNumber("priorityDiscoveryWeight", copy("Discovery", "发现候选人"), copy("pts", "分"))}
+                    {renderSchedulerNumber("priorityUnreadMessageWeight", copy("Unread message", "未读消息"), copy("pts", "分"))}
+                    {renderSchedulerNumber("priorityScoringBacklogWeight", copy("Scoring backlog", "评分积压"), copy("pts", "分"))}
+                    {renderSchedulerNumber("priorityApprovalWeight", copy("Approval", "待审批"), copy("pts", "分"))}
+                    {renderSchedulerNumber("priorityJdGapWeight", copy("JD gap multiplier", "JD 缺口系数"), copy("x", "倍"))}
+                    {renderSchedulerNumber("messageSlaMinutes", copy("Message SLA", "消息 SLA"), copy("min", "分钟"))}
+                  </div>
+                </section>
+                <section className="agent-config-scheduler-section">
+                  <strong>{copy("Cooldown and limits", "冷却与频率限制")}</strong>
+                  <div className="agent-config-score-grid agent-config-score-grid--four">
+                    {renderSchedulerNumber("siteCooldownMinutes", copy("Site cooldown", "站点冷却"), copy("min", "分钟"))}
+                    {renderSchedulerNumber("retryCooldownMinutes", copy("Retry cooldown", "重试冷却"), copy("min", "分钟"))}
+                    {renderSchedulerNumber("maxActionsPerHour", copy("Max actions/hour", "每小时动作上限"), copy("actions", "次"))}
+                    {renderSchedulerNumber("maxConsecutiveErrors", copy("Error limit", "连续错误上限"), copy("errors", "次"))}
+                  </div>
+                </section>
               </div>
             </section>
             ) : null}
 
             {selectedAutomationConfigPage === "tools" ? (
             <section className="agent-config-independent-panel">
-              <div className="agent-config-panel-head">
-                <div>
-                  <h4>{copy("Business tool permissions", "业务工具权限")}</h4>
-                  <p>{copy("Default is auto-approved. Mark only key business actions as approval gates.", "默认自动通过，只把关键业务动作设为审批节点。")}</p>
-                </div>
-                <StatusBadge tone={approvalToolCount ? "warning" : "positive"}>{approvalToolCount}</StatusBadge>
-              </div>
               <div className="agent-config-tool-policy-list">
                 {businessTools.map((tool) => {
                   const mode = automationConfigDraft.toolApprovalModes[tool.id] ?? "auto";
@@ -3978,6 +4904,8 @@ export function ChatOverlay({
               </div>
             </section>
             ) : null}
+              </div>
+            </div>
           </div>
         );
       }
@@ -3995,13 +4923,13 @@ export function ChatOverlay({
       const configSections: Array<{ key: AgentConfigSectionKey; label: string; description: string }> = [
         ...(activeAgent === "assistant"
           ? [
-              { key: "identity" as const, label: copy("Assistant positioning", "助手定位"), description: copy("Conversation-facing identity, collaboration scope, and tone.", "配置对话助手的身份、协作范围和表达方式。") },
-              { key: "responsibilities" as const, label: copy("Service scope", "服务范围"), description: copy("What the assistant can help with during a human-led recruiting workflow.", "配置人工主导招聘流程中，Assistant 能协助的事项。") },
+              { key: "identity" as const, label: copy("AI assistant positioning", "AI助手定位"), description: copy("Conversation-facing identity, collaboration scope, and tone.", "配置对话助手的身份、协作范围和表达方式。") },
+              { key: "responsibilities" as const, label: copy("Service scope", "服务范围"), description: copy("What the AI assistant can help with during a human-led recruiting workflow.", "配置人工主导招聘流程中，AI助手能协助的事项。") },
               { key: "output" as const, label: copy("Response standard", "回答标准"), description: copy("How the assistant should answer, cite evidence, and hand off next steps.", "配置回答方式、证据引用和下一步交接标准。") },
-              { key: "tools" as const, label: copy("Capability usage", "能力使用"), description: copy("Which business tools the assistant may suggest or call in collaboration.", "配置 Assistant 可建议或调用哪些业务能力。") },
+              { key: "tools" as const, label: copy("Capability usage", "能力使用"), description: copy("Which business tools the AI assistant may suggest or call in collaboration.", "配置 AI助手可建议或调用哪些业务能力。") },
               { key: "memory" as const, label: copy("Context scope", "上下文范围"), description: copy("What context can be used in a chat turn and what can be retained.", "配置对话轮次可使用和可沉淀的上下文。") },
               { key: "governance" as const, label: copy("Approval rules", "审批规则"), description: copy("Human confirmation rules for writes, outbound messages, and risky actions.", "配置写入、外联和高风险动作的人类确认规则。") },
-              { key: "basePrompt" as const, label: copy("Base capability", "基础能力"), description: copy("Read-only stable identity and system/developer instructions.", "只读查看稳定身份与 system/developer 指令。") },
+              { key: "basePrompt" as const, label: copy("Base capability", "基础能力"), description: copy("Read-only stable identity and built-in behavior boundaries.", "只读查看稳定身份与内置行为边界。") },
             ]
           : [
               { key: "identity" as const, label: copy("Recruiting objective", "招聘目标"), description: copy("What the automation agent is expected to achieve for each JD.", "配置自动化招聘 Agent 针对每个 JD 要达成的目标。") },
@@ -4010,7 +4938,7 @@ export function ChatOverlay({
               { key: "responsibilities" as const, label: copy("Workflow", "工作流程"), description: copy("Production workflow from discovery to resume/contact completion and handoff.", "配置从发现候选人到简历/联系方式补齐和交接的生产流程。") },
               { key: "memory" as const, label: copy("Evidence context", "证据上下文"), description: copy("JD, resume, communication, score, and reusable recruiting context injected into the run.", "配置运行时注入的 JD、简历、沟通、评分和可复用招聘上下文。") },
               { key: "governance" as const, label: copy("Approval and handoff", "审批与交接"), description: copy("Approval gates, retry policy, human screening, interview, and offer handoff.", "配置审批门槛、重试策略、人工筛选、面试和 Offer 交接。") },
-              { key: "basePrompt" as const, label: copy("Base prompt", "基础 Prompt"), description: copy("Reusable system prompt fragment for recruiting automation behavior.", "配置招聘自动化行为的可复用系统提示词片段。") },
+              { key: "basePrompt" as const, label: copy("Base capability", "基础能力"), description: copy("Read-only foundation for recruiting automation behavior.", "只读查看招聘自动化基础能力。") },
             ]),
       ];
       const selectedSection = configSections.find((section) => section.key === selectedConfigSection) ?? configSections[0];
@@ -4075,7 +5003,7 @@ export function ChatOverlay({
             ["工作流程", activeAgentConfig.dutiesText],
             ["沟通证据", recruitingPolicy.communicationEvidence],
             ["人工筛选/交接", [recruitingPolicy.screeningRules, recruitingPolicy.interviewScheduling, recruitingPolicy.offerHandoff].filter(Boolean).join("\n")],
-            ["基础 Prompt", activeAgentConfig.systemPrompt],
+            ["基础行为说明", activeAgentConfig.systemPrompt],
           ].map(([label, value]) => `## ${label}\n${value.trim() || "-"}`).join("\n\n");
       const updateAgentDraft = (field: keyof Omit<AgentConfigDraft, "recruitingPolicy">, value: string) => {
         setAgentConfigDrafts((current) => ({
@@ -4188,7 +5116,7 @@ export function ChatOverlay({
           <section className="agent-config__header">
             <div>
               <span className="agent-config__eyebrow">{activeWorkspace.agentDefinition.key}</span>
-              <h3>{activeAgent === "assistant" ? copy("Assistant configuration", "Assistant 配置") : copy("Recruiting automation configuration", "自动化招聘配置")}</h3>
+              <h3>{activeAgent === "assistant" ? copy("AI assistant configuration", "AI助手配置") : copy("Recruiting automation configuration", "自动化招聘配置")}</h3>
               <p>
                 {activeAgent === "assistant"
                   ? copy("Configure the conversational assistant for human-led recruiting work: what it can answer, what context it may use, and when it must ask for confirmation.", "配置人工主导招聘工作中的对话助手：能回答什么、使用哪些上下文、什么动作必须确认。")
@@ -4222,10 +5150,10 @@ export function ChatOverlay({
               <div className="agent-config-editor__bar">
                 <div><span>{copy("Editing", "正在配置")}</span><strong>{normalizeAgentTitle(activeAgent, activeWorkspace.agent.name)}</strong></div>
                 <div><span>Definition</span><strong>{activeWorkspace.agentDefinition.key}</strong></div>
-                <div><span>{copy("Adapter", "Adapter")}</span><strong>{activeWorkspace.productBinding.productAdapterKey || activeAgent}</strong></div>
+                <div><span>{copy("Product workflow", "产品流程")}</span><strong>{activeWorkspace.productBinding.productAdapterKey || activeAgent}</strong></div>
               </div>
 
-              <div className="agent-config-section-tabs" role="tablist" aria-label={copy("Prompt sections", "Prompt 分区")}>
+              <div className="agent-config-section-tabs" role="tablist" aria-label={copy("Configuration sections", "配置分区")}>
                 {configSections.map((section) => (
                   <button key={section.key} type="button" data-active={section.key === selectedSection.key} onClick={() => setSelectedConfigSection(section.key)}>
                     {section.label}
@@ -4245,9 +5173,9 @@ export function ChatOverlay({
                   <div className="agent-config-editor__fields">
                     {renderTextArea(
                       "identityStatement",
-                      activeAgent === "assistant" ? copy("Assistant role", "助手身份") : copy("Recruiting objective", "招聘目标"),
+                      activeAgent === "assistant" ? copy("AI assistant role", "AI助手身份") : copy("Recruiting objective", "招聘目标"),
                       activeAgent === "assistant"
-                        ? copy("Define how the assistant should collaborate with the recruiter in chat.", "定义 Assistant 在对话中如何与招聘员协作。")
+                        ? copy("Define how the AI assistant should collaborate with the recruiter in chat.", "定义 AI助手在对话中如何与招聘员协作。")
                         : copy("Define the autonomous goal for each JD, including what counts as a qualified candidate.", "定义每个 JD 下的自动化目标，以及什么算合格候选人。"),
                       {
                         medium: true,
@@ -4263,7 +5191,7 @@ export function ChatOverlay({
                   <div className="agent-config-editor__fields">
                     {activeAgent === "assistant" ? (
                       <>
-                        {renderTextArea("dutiesText", copy("Assistant service scope", "Assistant 服务范围"), copy("One supported collaboration job per line.", "每行一条可协作事项。"), { medium: true })}
+                        {renderTextArea("dutiesText", copy("AI assistant service scope", "AI助手服务范围"), copy("One supported collaboration job per line.", "每行一条可协作事项。"), { medium: true })}
                         {renderTextArea("successCriteriaText", copy("Answer success standard", "回答成功标准"), copy("Describe what makes a chat answer acceptable.", "描述什么样的对话回答才算可接受。"), { medium: true })}
                       </>
                     ) : (
@@ -4293,7 +5221,7 @@ export function ChatOverlay({
                   <div className="agent-config-editor__fields">
                     {activeAgent === "assistant" ? (
                       <>
-                        {renderJsonTextArea("toolScopeJson", "capability_usage", copy("Assistant capability usage", "Assistant 能力使用"), copy("Describe which business tools can be suggested or used during human collaboration.", "描述人工协作时可建议或调用哪些业务能力。"), { medium: true })}
+                        {renderJsonTextArea("toolScopeJson", "capability_usage", copy("AI assistant capability usage", "AI助手能力使用"), copy("Describe which business tools can be suggested or used during human collaboration.", "描述人工协作时可建议或调用哪些业务能力。"), { medium: true })}
                         {renderTextArea("boundariesText", copy("Tool boundaries", "工具边界"), copy("One boundary per line. Include write, delete, outbound, and cross-candidate restrictions.", "每行一条边界，包括写入、删除、外联、跨候选人限制。"), { medium: true })}
                       </>
                     ) : (
@@ -4309,7 +5237,7 @@ export function ChatOverlay({
                   <div className="agent-config-editor__fields">
                     {activeAgent === "assistant" ? (
                       <>
-                        {renderJsonTextArea("contextPolicyJson", "context_scope", copy("Chat context scope", "对话上下文范围"), copy("Describe what the assistant may use from current JD, candidate, application, and conversation context.", "描述 Assistant 可使用哪些当前 JD、候选人、投递和对话上下文。"), { medium: true })}
+                        {renderJsonTextArea("contextPolicyJson", "context_scope", copy("Chat context scope", "对话上下文范围"), copy("Describe what the AI assistant may use from current JD, candidate, application, and conversation context.", "描述 AI助手可使用哪些当前 JD、候选人、投递和对话上下文。"), { medium: true })}
                         {renderJsonTextArea("memoryPolicyJson", "retention_rules", copy("Retention rules", "沉淀规则"), copy("Describe what can be retained as reusable knowledge and what must stay temporary.", "描述哪些内容可沉淀为可复用知识，哪些只能作为临时上下文。"), { medium: true })}
                       </>
                     ) : (
@@ -4373,7 +5301,7 @@ export function ChatOverlay({
                         {renderRecruitingTextArea("onlineResumeCriteria", copy("Online resume scoring standard", "在线简历评分标准"), copy("Define what can be judged from public profile and online resume evidence.", "定义可基于公开资料和在线简历证据判断的内容。"), { medium: true })}
                         {renderRecruitingTextArea("offlineResumeCriteria", copy("Offline resume scoring standard", "离线简历评分标准"), copy("Define what must be checked after PDF/DOC/DOCX resume acquisition.", "定义获取 PDF/DOC/DOCX 简历后必须检查的内容。"), { medium: true })}
                         {renderRecruitingTextArea("compositeScoring", copy("Composite scoring standard", "综合评分标准"), copy("Define how JD, resume, communication, stability, and hard filters produce the final decision.", "定义 JD、简历、沟通、稳定性和硬性条件如何形成最终结论。"), { medium: true })}
-                        {renderTextArea("scoringRubric", copy("Detailed scoring rubric", "详细评分 Rubric"), copy("Free-form rubric injected into the recruiting adapter.", "注入招聘 adapter 的详细评分规则。"), { medium: true })}
+                        {renderTextArea("scoringRubric", copy("Detailed scoring rubric", "详细评分 Rubric"), copy("Detailed scoring rules used when producing candidate evidence and recommendations.", "生成候选人证据与建议时使用的详细评分规则。"), { medium: true })}
                       </>
                     )}
                   </div>
@@ -4405,7 +5333,7 @@ export function ChatOverlay({
                     </div>
                     {activeAgent === "assistant" ? (
                       <>
-                        {renderJsonTextArea("permissionPolicyJson", "approval_rules", copy("Assistant approval rules", "Assistant 审批规则"), copy("Describe when the assistant must ask before writing, sending, deleting, or changing business state.", "描述 Assistant 在写入、发送、删除或变更业务状态前何时必须确认。"), { medium: true })}
+                        {renderJsonTextArea("permissionPolicyJson", "approval_rules", copy("AI assistant approval rules", "AI助手审批规则"), copy("Describe when the AI assistant must ask before writing, sending, deleting, or changing business state.", "描述 AI助手在写入、发送、删除或变更业务状态前何时必须确认。"), { medium: true })}
                         {renderJsonTextArea("budgetPolicyJson", "interaction_limits", copy("Interaction limits", "交互限制"), copy("Describe expected turn length, escalation, and when to stop asking the model.", "描述单轮长度、升级路径和停止继续调用模型的条件。"), { medium: true })}
                       </>
                     ) : (
@@ -4454,17 +5382,17 @@ export function ChatOverlay({
 
               <section>
                 <div className="agent-config-inspector__head">
-                  <span>{copy("Adapter context", "Adapter 上下文")}</span>
+                  <span>{copy("Business context", "业务上下文")}</span>
                 </div>
                 <div className="agent-config-context-note">
                   {activeAgent === "assistant"
                     ? copy(
-                        "Current JD, candidate, application, and conversation facts are injected by the assistant adapter as chat context. The assistant configuration controls how it uses that context.",
-                        "当前 JD、候选人、投递记录和对话事实由 Assistant adapter 按需注入；Assistant 配置只控制它如何使用这些上下文。",
+                        "Current JD, candidate, application, and conversation facts are attached to the chat when relevant. The AI assistant configuration controls how that context is used.",
+                        "当前 JD、候选人、投递记录和对话事实会在相关场景下进入对话上下文；AI助手配置控制这些上下文如何使用。",
                       )
                     : copy(
-                        "JD standards, candidate facts, resume artifacts, communication evidence, and score records are injected by the recruiting adapter or JD module for each autonomous run.",
-                        "JD 标准、候选人事实、简历附件、沟通证据和评分记录由招聘 adapter 或 JD 模块按每次自动化运行注入。",
+                        "Each autonomous run receives the selected JD standards, candidate facts, resume artifacts, communication evidence, score records, and configured recruiting entry URL.",
+                        "每次自动化运行都会带入选中的 JD 标准、候选人事实、简历附件、沟通证据、评分记录和已配置的招聘入口 URL。",
                       )}
                 </div>
               </section>
@@ -4511,7 +5439,7 @@ export function ChatOverlay({
             ],
             rows: [
               `${copy("Model", "模型")} · ${activeWorkspace.config.modelLabel || activeWorkspace.agent.defaultModel || "-"}`,
-              `${copy("Adapter", "Adapter")} · ${activeWorkspace.productBinding.productAdapterKey || activeAgent}`,
+              `${copy("Product workflow", "产品流程")} · ${activeWorkspace.productBinding.productAdapterKey || activeAgent}`,
               `${copy("Scoring rubric", "评分规则")} · ${activeWorkspace.config.scoringRubric ? copy("Configured", "已配置") : copy("Empty", "未配置")}`,
             ],
           };
@@ -4519,7 +5447,7 @@ export function ChatOverlay({
         if (activePanel === "capabilities") {
           return {
             title: copy("Capability details", "能力详情"),
-            description: copy("Tool, skill and memory inventory exposed by the current product adapter.", "展示当前产品 adapter 暴露的工具、技能和记忆来源。"),
+            description: copy("Tool, skill and memory inventory available to the selected product workflow.", "展示当前产品流程可用的工具、技能和记忆来源。"),
             metrics: [
               { label: copy("Business", "业务工具"), value: businessTools },
               { label: copy("System", "系统工具"), value: systemTools },
@@ -4761,8 +5689,8 @@ export function ChatOverlay({
             <div className="chat-list-item__title">{copy("Agent boundary", "Agent 边界")}</div>
             <p>
               {copy(
-                "The agent core only owns turns, tools, permissions, and transcript. Product semantics stay in adapters, prompts, and business tools.",
-                "Agent core 只负责 turn、工具、权限和 transcript；产品语义保留在 adapter、prompt 和业务工具中。",
+                "The agent core only owns turns, tools, permissions, and transcript. Recruiting semantics stay in product configuration, SOPs, business tools, and evidence records.",
+                "Agent core 只负责轮次、工具、权限和记录；招聘语义保留在产品配置、SOP、业务工具和证据记录中。",
               )}
             </p>
           </div>
@@ -4818,15 +5746,25 @@ export function ChatOverlay({
           <div>
             <h3>{copy("Run queue", "运行队列")}</h3>
           </div>
-          <button
-            type="button"
-            onClick={() => {
-              createDraftConversation(activeAgent);
-              focusAgent(activeAgent, "conversation");
-            }}
-          >
-            + {activeAgent === "assistant" ? copy("New chat", "新会话") : copy("New run", "新任务")}
-          </button>
+          <div className="agent-management-list__title-actions">
+            <button
+              className="agent-management-list__collapse"
+              type="button"
+              onClick={() => setListCollapsed(true)}
+            >
+              <span aria-hidden="true">‹</span>
+              <strong>{copy("Collapse", "收起")}</strong>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                createDraftConversation(activeAgent);
+                focusAgent(activeAgent, "conversation");
+              }}
+            >
+              + {activeAgent === "assistant" ? copy("New chat", "新会话") : copy("New run", "新任务")}
+            </button>
+          </div>
         </div>
 
         <div className="agent-management-list__filters">
@@ -4859,7 +5797,7 @@ export function ChatOverlay({
               }}
             >
               <div className="agent-management-list__card-main">
-                <span className="agent-management-list__bot" aria-hidden="true">{activeAgent === "assistant" ? "AS" : "AU"}</span>
+                <span className="agent-management-list__bot" aria-hidden="true">{agentShortCode(activeAgent)}</span>
                 <div>
                   <strong>{normalizeAgentTitle(activeAgent, conversation.title)}</strong>
                   <span>{copy("ID", "ID")}：{conversation.refId || conversation.id}</span>
@@ -4898,7 +5836,7 @@ export function ChatOverlay({
     const failedRuns = activeWorkspace.runs.filter((run) => run.status === "failed" || run.status === "cancelled").length;
     const enabledTools = activeWorkspace.tools.filter((tool) => tool.enabled).length;
     const healthySkills = activeWorkspace.skills.filter((skill) => skill.health === "healthy").length;
-    const workspaceTitle = activeAgent === "assistant" ? "Assistant Agent" : "自动化招聘 Agent";
+    const workspaceTitle = agentDisplayName(activeAgent);
     const workspaceControl = activeWorkspace.workspaceControl;
     const controlState = workspaceControl?.state ?? "stopped";
     const controlLabel =
@@ -4911,6 +5849,13 @@ export function ChatOverlay({
             : copy("Stopped", "未开始");
     const controlTone =
       controlState === "running" ? "positive" : controlState === "paused" ? "warning" : "neutral";
+    const workspaceStartBlockers =
+      activeAgent === "autonomous"
+        ? automationLaunchBlockers
+        : activeAgent === "jd_sync"
+          ? jdSyncLaunchBlockers
+          : [];
+    const workspaceStartReady = workspaceStartBlockers.length === 0;
 
     return (
       <section className="agent-management-workbench-head">
@@ -4921,11 +5866,11 @@ export function ChatOverlay({
               {describeConversationStatus(activeWorkspace.agent.status)}
             </StatusBadge>
           </div>
-          {activeAgent === "autonomous" ? (
+          {activeAgent !== "assistant" ? (
             <div className="agent-workspace-control">
               <div className="agent-workspace-control__status">
                 <StatusBadge tone={controlTone}>{controlLabel}</StatusBadge>
-                <span>{copy("Automation recruiting agent. Configuration is inactive until this workspace is started.", "自动化招聘 Agent；配置完成后必须在这里手动开始才会执行。")}</span>
+                <span>{activeAgent === "jd_sync" ? copy("JD sync agent. Run it manually after saving its site configuration.", "JD 同步 Agent；保存网站配置后手动运行。") : copy("Recruiting automation agent. Configuration is inactive until this workspace is started.", "自动化招聘 Agent；配置完成后必须在这里手动开始才会执行。")}</span>
               </div>
               <div className="agent-workspace-control__actions">
                 {controlState === "running" ? (
@@ -4970,13 +5915,23 @@ export function ChatOverlay({
                   <button
                     type="button"
                     className="agent-workspace-control__button agent-workspace-control__button--primary"
-                    disabled={workspaceControlBusyAction !== null || controlState === "terminating"}
+                    disabled={
+                      workspaceControlBusyAction !== null
+                      || controlState === "terminating"
+                      || ((activeAgent === "autonomous" || activeAgent === "jd_sync") && !workspaceStartReady)
+                    }
                     onClick={() => void handleWorkspaceControl("start")}
+                    title={!workspaceStartReady ? workspaceStartBlockers.join("；") : undefined}
                   >
-                    {workspaceControlBusyAction === "start" ? copy("Starting", "开始中") : copy("Start", "开始")}
+                    {workspaceControlBusyAction === "start" ? copy("Starting agent", "启动中") : copy("Start agent", "启动 Agent")}
                   </button>
                 )}
               </div>
+              {!workspaceStartReady && controlState !== "running" ? (
+                <div className="agent-workspace-control__blockers">
+                  {copy("Complete before start:", "启动前需要补全：")} {workspaceStartBlockers.join("；")}
+                </div>
+              ) : null}
             </div>
           ) : null}
         </div>
@@ -5100,17 +6055,69 @@ export function ChatOverlay({
     [activeWorkspace?.approvals, approvalActionId, approvalNotes, approvalSelections, copy],
   );
 
+  const renderBusinessActionsColumn = () => {
+    const approvalItems = (activeWorkspace?.approvals ?? [])
+      .filter((approval) => approval.status === "pending")
+      .map((approval) => businessActionFromApproval(approval, copy));
+    const messageItems = (activeConversation?.messages ?? [])
+      .map((message) => businessActionFromMessage(message, copy))
+      .filter((item): item is BusinessActionTimelineItem => Boolean(item));
+    const uniqueItems = new Map<string, BusinessActionTimelineItem>();
+    [...approvalItems, ...messageItems]
+      .sort((left, right) => new Date(left.time).getTime() - new Date(right.time).getTime())
+      .forEach((item) => {
+        uniqueItems.set(item.key, item);
+      });
+    const visibleItems = Array.from(uniqueItems.values()).slice(-12);
+    return (
+      <aside className="agent-business-actions" aria-label={copy("Business actions", "业务动作")}>
+        <div className="agent-business-actions__head">
+          <strong>{copy("Business actions", "业务动作")}</strong>
+          <span>{copy("Timeline", "Timeline")} · {visibleItems.length}</span>
+        </div>
+        <div className="agent-business-actions__list">
+          {visibleItems.map((item) => (
+            <div key={item.key} className="agent-business-actions__item" data-category={item.category} data-status={item.status}>
+              <div className="agent-business-actions__node" aria-hidden="true" />
+              <div className="agent-business-actions__body">
+                <div className="agent-business-actions__meta">
+                  <span>{item.label}</span>
+                  <time dateTime={item.time}>{formatDateTime(item.time)}</time>
+                </div>
+                <p>{item.title}</p>
+                <small>{item.detail}</small>
+              </div>
+            </div>
+          ))}
+          {!visibleItems.length ? (
+            <div className="agent-business-actions__empty">
+              {copy(
+                "Business actions from the agent will appear here as an independent timeline: JD sync, candidate discovery and screening, resume acquisition, scoring, communication, application-stage changes, approvals, blockers, and external-system sync.",
+                "Agent 的业务动作会在这里以独立 timeline 展示：JD 同步、候选人发现与筛选、简历获取、评分、沟通、投递阶段变化、审批、阻塞和外部系统同步等。",
+              )}
+            </div>
+          ) : null}
+        </div>
+      </aside>
+    );
+  };
+
   const renderPanelContent = () => {
     if (activePanel === "conversation") {
       return (
         <div className="chat-stream chat-stream--management">
           {pageMode ? null : renderAgentCommandCenter()}
-          <ChatMessageStream
-            loading={loadingWorkspace || loadingConversation}
-            messages={activeConversation?.messages ?? []}
-            renderTimelineAttachment={pageMode ? renderTimelineApprovalAttachment : undefined}
-            variant={pageMode ? "timeline" : "cards"}
-          />
+          <div className="agent-workspace-conversation-grid">
+            <div className="agent-workspace-conversation-main">
+              <ChatMessageStream
+                loading={loadingWorkspace || loadingConversation}
+                messages={activeConversation?.messages ?? []}
+                renderTimelineAttachment={pageMode ? renderTimelineApprovalAttachment : undefined}
+                variant={pageMode ? "timeline" : "cards"}
+              />
+            </div>
+            {pageMode ? renderBusinessActionsColumn() : null}
+          </div>
         </div>
       );
     }
@@ -5123,7 +6130,7 @@ export function ChatOverlay({
       case "config":
         return renderConfigPanel();
       case "capabilities":
-        return renderCapabilitiesPanel(activeWorkspace.tools, activeWorkspace.skills, activeWorkspace.memories);
+        return renderCapabilitiesPanel(activeWorkspace.tools, activeWorkspace.skills, activeWorkspace.memories, activeWorkspace.mcps);
       case "outputs":
         return renderOutputsPanel(activeWorkspace);
       case "runs":
@@ -5131,6 +6138,66 @@ export function ChatOverlay({
       default:
         return null;
     }
+  };
+
+  const renderComposerControlActions = () => {
+    if (activeAgent === "assistant") {
+      return null;
+    }
+    if (activeWorkspaceControlState === "running") {
+      return (
+        <button
+          type="button"
+          className="chat-composer__control-button"
+          disabled={workspaceControlBusyAction !== null}
+          onClick={() => void handleWorkspaceControl("pause")}
+        >
+          {workspaceControlBusyAction === "pause" ? copy("Pausing", "暂停中") : copy("Pause", "暂停")}
+        </button>
+      );
+    }
+    if (activeWorkspaceControlState === "paused") {
+      return (
+        <button
+          type="button"
+          className="chat-composer__control-button"
+          disabled={workspaceControlBusyAction !== null || !activeWorkspaceStartReady}
+          onClick={() => void handleWorkspaceControl("continue")}
+        >
+          {workspaceControlBusyAction === "continue" ? copy("Starting", "启动中") : copy("Start", "启动")}
+        </button>
+      );
+    }
+    return (
+      <button
+        type="button"
+        className="chat-composer__control-button chat-composer__control-button--primary"
+        disabled={workspaceControlBusyAction !== null || !activeWorkspaceStartReady}
+        onClick={() => void handleWorkspaceControl("start")}
+        title={!activeWorkspaceStartReady ? activeWorkspaceStartBlockers.join("；") : undefined}
+      >
+        {workspaceControlBusyAction === "start" ? copy("Starting", "启动中") : copy("Start agent", "启动 Agent")}
+      </button>
+    );
+  };
+
+  const renderComposerExecutionAction = () => {
+    const hasActiveTurn = (activeAgent === "assistant" && sending) || (activeAgent !== "assistant" && runtimeActiveRun != null);
+    if (!hasActiveTurn) {
+      return null;
+    }
+    return (
+      <button
+        type="button"
+        className="chat-composer__run-stop"
+        disabled={runActionBusyId != null}
+        onClick={() => void handleStopCurrentTurn()}
+        aria-label={copy("Stop current turn", "终止当前 turn")}
+        title={copy("Stop current turn", "终止当前 turn")}
+      >
+        <span aria-hidden="true" />
+      </button>
+    );
   };
 
   if (!visible) {
@@ -5148,7 +6215,7 @@ export function ChatOverlay({
                 <strong>{copy("Agent management", "Agent 管理")}</strong>
               </div>
               <div className="agent-management-agent-switch" role="tablist" aria-label={copy("Agent type", "Agent 类型")}>
-                {(["autonomous", "assistant"] as AgentKind[]).map((kind) => (
+                {AGENT_KINDS.map((kind) => (
                   <button
                     key={kind}
                     type="button"
@@ -5156,7 +6223,7 @@ export function ChatOverlay({
                     data-active={kind === activeAgent}
                     onClick={() => focusAgent(kind, activePanel)}
                   >
-                    <span>{kind === "assistant" ? "Assistant" : copy("Automation", "自动化招聘")}</span>
+                    <span>{agentTabLabel(kind)}</span>
                     <small>{conversationsByAgent[kind].length}</small>
                   </button>
                 ))}
@@ -5202,7 +6269,7 @@ export function ChatOverlay({
             </div>
             <div className="chat-overlay__header-actions">
               {transport !== "http" ? <StatusBadge tone="critical">{copy("offline", "离线")}</StatusBadge> : null}
-              {(["assistant", "autonomous"] as AgentKind[]).map((kind) => (
+              {AGENT_KINDS.map((kind) => (
                 <button
                   key={kind}
                   type="button"
@@ -5210,7 +6277,7 @@ export function ChatOverlay({
                   data-active={kind === activeAgent}
                   onClick={() => focusAgent(kind, activePanel)}
                 >
-                  {kind === "assistant" ? "Assistant" : "Automation"}
+                  {agentTabLabel(kind)}
                 </button>
               ))}
               <button type="button" className="chat-overlay__header-button" onClick={() => setRailCollapsed((current) => !current)}>
@@ -5226,8 +6293,9 @@ export function ChatOverlay({
         <div
           className={pageMode ? "agent-management-layout" : "chat-overlay__body"}
           data-context-collapsed={pageMode && railCollapsed ? "true" : undefined}
+          data-list-collapsed={pageMode && listCollapsed ? "true" : undefined}
         >
-          <aside className={pageMode ? "agent-management-list-pane" : "chat-overlay__sidebar"}>
+          {!pageMode || !listCollapsed ? <aside className={pageMode ? "agent-management-list-pane" : "chat-overlay__sidebar"}>
             {pageMode ? renderAgentListPane() : (
               <>
                 <button
@@ -5241,7 +6309,7 @@ export function ChatOverlay({
                   + {copy("New conversation", "新对话")}
                 </button>
 
-            {(["assistant", "autonomous"] as AgentKind[]).map((kind) => {
+            {AGENT_KINDS.map((kind) => {
               const groupSummary = summarizeConversationGroup(conversationsByAgent[kind]);
               return (
                 <section key={kind} className="chat-overlay__section" data-agent-kind={kind}>
@@ -5258,7 +6326,7 @@ export function ChatOverlay({
                       </span>
                       <span className="chat-overlay__section-copy">
                         <span className="chat-overlay__section-label">
-                          {kind === "assistant" ? copy("Assistant", "Assistant") : copy("Automation", "Automation")}
+                          {agentTabLabel(kind)}
                         </span>
                         <span className="chat-overlay__section-summary">{groupSummary.summary}</span>
                       </span>
@@ -5310,10 +6378,10 @@ export function ChatOverlay({
             })}
               </>
             )}
-          </aside>
+          </aside> : null}
 
           <main className={pageMode ? "agent-management-main-pane" : "chat-overlay__main"}>
-            {pageMode ? renderAgentWorkspaceHeader() : null}
+            {pageMode && activePanel === "conversation" ? renderAgentWorkspaceHeader() : null}
             <div className="chat-overlay__tabs">
               {panelItems.map((item) => (
                 <button
@@ -5357,21 +6425,29 @@ export function ChatOverlay({
             {activePanel === "conversation" ? (
               <ChatComposer
                 agentKind={activeAgent}
-                inputDisabled={sending || loadingWorkspace || (autonomousStartBlocked && !autonomousDraftEditable)}
-                submitDisabled={sending || loadingWorkspace || (activeAgent === "autonomous" && autonomousStartBlocked)}
+                inputDisabled={
+                  sending
+                  || loadingWorkspace
+                  || (activeAgent !== "assistant" && activeWorkspaceControlState !== "running")
+                  || (autonomousStartBlocked && !autonomousDraftEditable)
+                }
+                submitDisabled={
+                  loadingWorkspace
+                  || (activeAgent === "assistant" && sending)
+                  || (activeAgent !== "assistant" && activeWorkspaceControlState !== "running")
+                }
+                submitRequiresValue
                 modelLabel={activeWorkspace?.config.modelLabel ?? activeWorkspace?.agent.defaultModel}
                 contextLabel={
-                  activeAgent === "autonomous"
-                    ? copy("Automation run", "自动化运行")
+                  activeAgent !== "assistant"
+                    ? activeAgent === "jd_sync" ? copy("JD sync run", "JD 同步运行") : copy("Automation run", "自动化运行")
                     : copy("Current workspace", "当前工作区")
                 }
                 submitLabel={
-                  activeAgent === "autonomous"
-                    ? autonomousStartBlocked
-                      ? copy("Running…", "已有运行中")
-                      : copy("Start", "启动")
-                    : copy("Send", "发送")
+                  copy("Send", "发送")
                 }
+                controlActions={renderComposerControlActions()}
+                executionAction={renderComposerExecutionAction()}
                 value={composerInputValue}
                 onChange={handleComposerChange}
                 onSubmit={() => void handleSubmit()}
@@ -5379,6 +6455,23 @@ export function ChatOverlay({
             ) : null}
           </main>
 
+          {pageMode && listCollapsed ? (
+            <button
+              type="button"
+              className="agent-list-restore"
+              aria-label={copy("Show run queue", "展开运行队列")}
+              style={{ top: `${railRestoreTop}px` }}
+              onPointerDown={startListRestoreDrag}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  setListCollapsed(false);
+                }
+              }}
+            >
+              <span className="agent-list-restore__icon" aria-hidden="true" />
+            </button>
+          ) : null}
           {!railCollapsed ? <aside className={pageMode ? "agent-management-runtime-pane" : "chat-overlay__rail"}>{renderRailContent()}</aside> : null}
           {pageMode && railCollapsed ? (
             <button

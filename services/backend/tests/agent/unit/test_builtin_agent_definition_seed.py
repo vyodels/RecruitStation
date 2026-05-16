@@ -41,7 +41,7 @@ def test_seed_builtin_definitions_normalizes_memory_writeback_policy(tmp_path: P
         assert set(definition.memory_policy) == {"writeback"}
         assert definition.memory_policy["writeback"]["auto_write_min_confidence"] == 0.9
         assert definition.memory_policy["writeback"]["max_stable_facts"] == 3
-        assert set(definition.product_bindings) == {"assistant", "autonomous"}
+        assert set(definition.product_bindings) == {"assistant", "autonomous", "jd_sync"}
 
 
 def test_seed_builtin_definitions_do_not_backfill_legacy_instruction_templates(tmp_path: Path) -> None:
@@ -75,3 +75,65 @@ def test_seed_builtin_definitions_do_not_backfill_legacy_instruction_templates(t
         assert "instructionTemplate" not in prompt_config
         assert "automation_instruction" not in role_definition
         assert "automationInstruction" not in role_definition
+
+
+def test_seed_builtin_definitions_preserves_saved_product_config(tmp_path: Path) -> None:
+    settings = AppSettings(
+        data_dir=str(tmp_path / "data"),
+        database_url=f"sqlite:///{tmp_path / 'builtin-agent-product-config.db'}",
+    )
+    engine = create_engine_from_settings(settings)
+    initialize_database(engine)
+    session_factory = create_session_factory(engine)
+
+    with session_factory() as session:
+        session.add(
+            AgentDefinition(
+                definition_key="recruit-station",
+                name="RecruitStation",
+                is_primary=True,
+                prompt_config={},
+                memory_policy={},
+                product_bindings={
+                    "autonomous": {"session_key": "custom-autonomous-session"},
+                },
+                product_config={
+                    "jd_sync": {
+                        "jd_sync_config": {
+                            "executionSop": {
+                                "siteEntryUrl": "https://mock-recruiting.local/jobs",
+                                "siteAccessRulesText": "用户保存的入口边界",
+                            },
+                        },
+                    },
+                    "autonomous": {
+                        "automation_recruiting_config": {
+                            "executionSop": {
+                                "siteEntryUrl": "https://mock-recruiting.local/jobs",
+                                "stepsText": "用户保存的执行 SOP",
+                            },
+                            "defaultRunJobIds": ["jd-user"],
+                        },
+                    },
+                },
+                product_projections={
+                    "autonomous": {"name": "用户命名的自动化招聘"},
+                },
+            )
+        )
+        session.commit()
+
+    _seed_builtin_agent_definitions(session_factory)
+
+    with session_factory() as session:
+        definition = session.query(AgentDefinition).filter_by(definition_key="recruit-station").one()
+        assert definition.product_bindings["autonomous"]["session_key"] == "custom-autonomous-session"
+        assert "assistant" in definition.product_bindings
+        assert definition.product_config["jd_sync"]["jd_sync_config"]["executionSop"]["siteEntryUrl"] == "https://mock-recruiting.local/jobs"
+        assert definition.product_config["jd_sync"]["jd_sync_config"]["executionSop"]["siteAccessRulesText"] == "用户保存的入口边界"
+        assert definition.product_config["autonomous"]["automation_recruiting_config"]["executionSop"]["siteEntryUrl"] == "https://mock-recruiting.local/jobs"
+        assert definition.product_config["autonomous"]["automation_recruiting_config"]["executionSop"]["stepsText"] == "用户保存的执行 SOP"
+        assert definition.product_config["autonomous"]["automation_recruiting_config"]["defaultRunJobIds"] == ["jd-user"]
+        assert definition.product_config["assistant"]["prompt_config"]
+        assert definition.product_projections["autonomous"]["name"] == "用户命名的自动化招聘"
+        assert "assistant" in definition.product_projections

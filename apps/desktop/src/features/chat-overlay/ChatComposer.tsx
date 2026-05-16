@@ -7,9 +7,12 @@ interface ChatComposerProps {
   agentKind: AgentKind;
   inputDisabled?: boolean;
   submitDisabled?: boolean;
+  submitRequiresValue?: boolean;
   modelLabel?: string | null;
   contextLabel?: string | null;
   submitLabel?: string | null;
+  controlActions?: React.ReactNode;
+  executionAction?: React.ReactNode;
   value: string;
   onChange(value: string): void;
   onSubmit(): void;
@@ -19,9 +22,12 @@ export function ChatComposer({
   agentKind,
   inputDisabled,
   submitDisabled,
+  submitRequiresValue = true,
   modelLabel,
   contextLabel,
   submitLabel,
+  controlActions,
+  executionAction,
   value,
   onChange,
   onSubmit,
@@ -30,10 +36,15 @@ export function ChatComposer({
 
   return (
     <div className="chat-composer">
-      <div className="chat-composer__chips">
-        <span className="chat-chip">{agentKind === "assistant" ? copy("Assistant", "Assistant") : copy("Automation", "Automation")}</span>
-        {modelLabel ? <span className="chat-chip">{modelLabel}</span> : null}
-        {contextLabel ? <span className="chat-chip">{contextLabel}</span> : null}
+      <div className="chat-composer__bar">
+        <div className="chat-composer__chips">
+          <span className="chat-chip">
+            {agentKind === "assistant" ? copy("AI assistant", "AI助手") : agentKind === "jd_sync" ? copy("JD sync", "JD 同步") : copy("Recruiting automation", "自动化招聘")}
+          </span>
+          {modelLabel ? <span className="chat-chip">{modelLabel}</span> : null}
+          {contextLabel ? <span className="chat-chip">{contextLabel}</span> : null}
+        </div>
+        {controlActions ? <div className="chat-composer__controls">{controlActions}</div> : null}
       </div>
 
       <div className="chat-composer__box">
@@ -44,8 +55,10 @@ export function ChatComposer({
           className="chat-composer__input"
           placeholder={
             agentKind === "assistant"
-              ? copy("Ask Assistant to inspect or summarize the workspace…", "让 Assistant 帮你分析或总结当前工作区…")
-              : copy("Describe the next automation task…", "输入本轮自动化任务要处理的事项…")
+              ? copy("Ask the AI assistant to inspect or summarize the workspace…", "让 AI助手帮你分析或总结当前工作区…")
+              : agentKind === "jd_sync"
+                ? copy("Start the agent, then send JD sync follow-up instructions…", "启动 Agent 后，可发送 JD 同步后续指令…")
+              : copy("Start the agent, then send the next automation instruction…", "启动 Agent 后，可发送下一条自动化指令…")
           }
           value={value}
           onChange={(event) => onChange(event.target.value)}
@@ -57,11 +70,12 @@ export function ChatComposer({
           }}
           disabled={inputDisabled}
         />
+        {executionAction}
         <button
           type="button"
           className="chat-composer__submit"
           onClick={onSubmit}
-          disabled={submitDisabled || !value.trim()}
+          disabled={submitDisabled || (submitRequiresValue && !value.trim())}
         >
           {submitLabel || copy("Send", "发送")}
         </button>

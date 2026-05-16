@@ -290,6 +290,7 @@ def test_browser_hid_preflight_requires_browser_and_virtualhid_tools(tmp_path, m
         return []
 
     monkeypatch.setattr("recruit_station.services.mcp_registry._mcp_list_tools", fake_list_tools)
+    monkeypatch.setattr("recruit_station.services.mcp_registry._mcp_call_tool", lambda _server, _tool_name, _arguments: {"ok": True})
     settings = AppSettings(
         data_dir=str(tmp_path / "data"),
         database_url=f"sqlite:///{tmp_path / 'mcp-browser-hid-preflight.db'}",

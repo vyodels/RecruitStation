@@ -25,6 +25,8 @@ import type {
   AgentKind,
   AgentMemorySummary,
   AgentDefinitionSummary,
+  AgentPendingUserInputAfterNextToolCallRequest,
+  AgentPendingUserInputAfterNextToolCallRequestResult,
   AgentQueueItem,
   AgentRunRecord,
   AgentSnapshot,
@@ -93,7 +95,12 @@ import type {
 } from "./types";
 
 const AUTONOMOUS_PRIMARY_CONVERSATION_ID = "autonomous-primary";
+const JD_SYNC_PRIMARY_CONVERSATION_ID = "jd-sync-primary";
 const AGENT_MEMORY_OVERVIEW_SCOPES = ["global", "candidate", "job"] as const;
+
+function primaryConversationId(kind: AgentKind): string {
+  return kind === "jd_sync" ? JD_SYNC_PRIMARY_CONVERSATION_ID : AUTONOMOUS_PRIMARY_CONVERSATION_ID;
+}
 
 export interface DesktopApiClient {
   checkHealth(): Promise<boolean>;
@@ -227,16 +234,23 @@ export interface DesktopApiClient {
   approveItem(id: string, reason?: string): Promise<void>;
   rejectItem(id: string, reason?: string): Promise<void>;
   updateSettings(settings: Partial<SettingsSnapshot>): Promise<SettingsSnapshot>;
-  runAgentOnce(): Promise<AgentRunResult>;
+  processNextAgentTask(): Promise<AgentRunResult>;
   queueTask(task: AgentTaskRequest): Promise<AgentTaskEnqueueResult>;
   getAgentWorkspace(kind: AgentKind): Promise<AgentWorkspaceRecord>;
   controlAutonomousWorkspace(
     action: "start" | "pause" | "continue" | "terminate",
     reason?: string,
   ): Promise<AgentWorkspaceControl>;
+  controlRuntimeWorkspace(
+    kind: AgentKind,
+    action: "start" | "pause" | "continue" | "terminate",
+    reason?: string,
+  ): Promise<AgentWorkspaceControl>;
   getAgentConversation(kind: AgentKind, conversationId: string): Promise<AgentConversationRecord>;
   cancelAutonomousRun(runId: string, reason?: string): Promise<AgentRunRecord>;
   resumeAutonomousRun(runId: string, reason?: string): Promise<AgentRunRecord>;
+  cancelAgentRun(kind: AgentKind, runId: string, reason?: string): Promise<AgentRunRecord>;
+  resumeAgentRun(kind: AgentKind, runId: string, reason?: string): Promise<AgentRunRecord>;
   createAssistantConversation(payload: { userId: string; title?: string | null }): Promise<AssistantConversationRecord>;
   streamAssistantTurn(
     payload: {
@@ -246,8 +260,14 @@ export interface DesktopApiClient {
     },
     onEvent: (event: AssistantTurnStreamEvent) => void,
   ): Promise<void>;
+  cancelAssistantTurn(conversationId: string): Promise<{ conversationId: string; cancelled: boolean; active?: boolean }>;
   sendAssistantMessage(payload: AssistantMessageRequest): Promise<AssistantMessageRequestResult>;
+  queueAgentPendingUserInputAfterNextToolCall(
+    kind: AgentKind,
+    payload: AgentPendingUserInputAfterNextToolCallRequest,
+  ): Promise<AgentPendingUserInputAfterNextToolCallRequestResult>;
   startAutonomousRun(payload: AutonomousRunStartRequest): Promise<AutonomousRunStartResult>;
+  startAgentRun(kind: AgentKind, payload: AutonomousRunStartRequest): Promise<AutonomousRunStartResult>;
 }
 
 export interface ApiDescription {
@@ -581,13 +601,17 @@ function normalizeAgentDefinition(raw: unknown, fallbackKind: AgentKind, fallbac
     description: nullableString(record.description ?? fallbackDefinition?.description),
     status: String(record.status ?? fallbackDefinition?.status ?? "active"),
     config: normalizeAgentDefinitionConfig(record.config ?? record.definitionConfig ?? record.definition_config ?? fallbackConfig),
+    productConfig: asRecord(record.productConfig ?? record.product_config ?? fallbackDefinition?.productConfig),
     createdAt: nullableString(record.createdAt ?? record.created_at ?? fallbackDefinition?.createdAt),
     updatedAt: nullableString(record.updatedAt ?? record.updated_at ?? fallbackDefinition?.updatedAt),
   };
 }
 
 function agentDefinitionFallbackName(kind: AgentKind): string {
-  return kind === "assistant" ? "Assistant Definition" : "Autonomous Definition";
+  if (kind === "assistant") {
+    return "AI助手定义";
+  }
+  return kind === "jd_sync" ? "JD 同步定义" : "自动化招聘定义";
 }
 
 function normalizeAgentProductBinding(
@@ -641,6 +665,7 @@ function agentDefinitionPatchPayload(payload: Partial<AgentDefinitionRecord>): R
         }
       : undefined,
     memory_policy: config ? runtimeMetadata.memoryPolicy ?? runtimeMetadata.memory_policy : undefined,
+    product_config: payload.productConfig,
   };
 }
 
@@ -811,6 +836,7 @@ function normalizeMcpServer(raw: unknown): McpServerRecord {
     presetKey: record.presetKey ? String(record.presetKey) : record.preset_key ? String(record.preset_key) : null,
     authConfig: asRecord(record.authConfig ?? record.auth_config),
     serverMetadata: asRecord(record.serverMetadata ?? record.server_metadata),
+    standardConfig: asRecord(record.standardConfig ?? record.standard_config),
     healthStatus: String(record.healthStatus ?? record.health_status ?? "unknown"),
     healthError: record.healthError ? String(record.healthError) : record.health_error ? String(record.health_error) : null,
     lastHealthAt: record.lastHealthAt ? String(record.lastHealthAt) : record.last_health_at ? String(record.last_health_at) : null,
@@ -1087,6 +1113,7 @@ function normalizeAgentWorkspace(raw: unknown, fallbackKind: AgentKind): AgentWo
     memories: asArray(record.memories).map(normalizeAgentMemorySummary),
     skills: asArray(record.skills).map(normalizeSkillRecord),
     tools: asArray(record.tools).map(normalizeAgentToolSummary),
+    mcps: asArray(record.mcps ?? record.mcpServers ?? record.mcp_servers).map(normalizeMcpServer),
     workspaceControl,
     agentDefinition: definition,
     productBinding,
@@ -1104,7 +1131,7 @@ function normalizeAgentWorkspace(raw: unknown, fallbackKind: AgentKind): AgentWo
 }
 
 function normalizeAgentWorkspaceControl(raw: unknown, fallbackKind: AgentKind): AgentWorkspaceControl | null {
-  if (fallbackKind !== "autonomous") {
+  if (fallbackKind !== "autonomous" && fallbackKind !== "jd_sync") {
     return null;
   }
   const record = asRecord(raw);
@@ -1118,6 +1145,22 @@ function normalizeAgentWorkspaceControl(raw: unknown, fallbackKind: AgentKind): 
     updatedAt: nullableString(record.updatedAt ?? record.updated_at),
     autonomousPaused: Boolean(record.autonomousPaused ?? record.autonomous_paused ?? state !== "running"),
     terminatedRunIds: stringListFrom(record.terminatedRunIds ?? record.terminated_run_ids),
+    runStartBlocked: normalizeRunStartBlocked(record.runStartBlocked ?? record.run_start_blocked),
+  };
+}
+
+function normalizeRunStartBlocked(raw: unknown): AgentWorkspaceControl["runStartBlocked"] {
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+  const record = asRecord(raw);
+  const reason = nullableString(record.reason) ?? "";
+  if (!reason.trim()) {
+    return null;
+  }
+  return {
+    reason,
+    missingFields: stringListFrom(record.missingFields ?? record.missing_fields),
   };
 }
 
@@ -1158,7 +1201,9 @@ function buildAgentConfig(
   const defaultPrompt =
     kind === "assistant"
       ? "Respond inside the desktop workspace and keep actions reviewable."
-      : "Run autonomous recruiting tasks while surfacing approvals in time.";
+      : kind === "jd_sync"
+        ? "Sync job descriptions from configured recruiting sites without screening candidates."
+        : "Run autonomous recruiting tasks while surfacing approvals in time.";
   return {
     systemPrompt: extractPromptText(definition) || defaultPrompt,
     scoringRubric: extractScoringRubric(definition),
@@ -1215,12 +1260,16 @@ function buildAgentSummary(
     kind,
     name:
       kind === "assistant"
-        ? "Assistant Agent"
-        : definition?.name || "Autonomous Agent",
+        ? "AI助手"
+        : kind === "jd_sync"
+          ? definition?.name || "JD 同步"
+          : definition?.name || "自动化招聘",
     description:
       kind === "assistant"
         ? "桌面内联协作与问答入口。"
-        : definition?.description || "负责自主 sourcing、审批与执行编排。",
+        : kind === "jd_sync"
+          ? definition?.description || "负责从招聘网站同步 JD 到本地职位库。"
+          : definition?.description || "负责自主 sourcing、审批与执行编排。",
     definitionKey: definition?.key ?? `${kind}-definition`,
     productAdapterKey: kind,
     status: snapshot.status,
@@ -1249,7 +1298,7 @@ function runToConversationStatus(status: string): AgentConversationSummary["stat
 function runToConversation(run: AgentRunRecord): AgentConversationSummary {
   return {
     id: run.id,
-    agentKind: "autonomous",
+    agentKind: run.agentKind,
     title: run.title,
     preview: run.summary ?? null,
     status: runToConversationStatus(run.status),
@@ -1259,16 +1308,17 @@ function runToConversation(run: AgentRunRecord): AgentConversationSummary {
   };
 }
 
-function buildAutonomousPrimaryConversation(
+function buildRuntimePrimaryConversation(
+  kind: AgentKind,
   runs: AgentRunRecord[],
   snapshot?: AgentSnapshot | null,
   definition?: AgentDefinitionRecord | null,
 ): AgentConversationSummary {
   const latestRun = runs[0] ?? null;
   return {
-    id: AUTONOMOUS_PRIMARY_CONVERSATION_ID,
-    agentKind: "autonomous",
-    title: definition?.name || "Autonomous Agent",
+    id: primaryConversationId(kind),
+    agentKind: kind,
+    title: definition?.name || (kind === "jd_sync" ? "JD 同步" : "自动化招聘"),
     preview:
       latestRun?.summary
       || snapshot?.activeTask
@@ -1318,7 +1368,7 @@ function classifyTraceTimelineEvent(trace: ExecutionTraceRecord): string {
   if (/approval|confirm|permission|human|waiting_human/.test(source)) {
     return "confirmation";
   }
-  if (/tool[_\s-]?use|tool[_\s-]?call|mcp|browser|hid|command|web_search|call/.test(source)) {
+  if (/tool[_\s-]?use|tool[_\s-]?call|mcp|browser|hid|command|pending_user_input|web_search|call/.test(source)) {
     return "tool_call";
   }
   if (/reasoning|thinking|thought|plan/.test(source)) {
@@ -3665,9 +3715,9 @@ function createFetchClient(baseUrl: string): DesktopApiClient {
         }),
       );
     },
-    runAgentOnce: async () =>
+    processNextAgentTask: async () =>
       normalizeAgentRunResult(
-        await requestJson<unknown>(baseUrl, "/api/agents/run-once", {
+        await requestJson<unknown>(baseUrl, "/api/agents/task-queue/process-next", {
           method: "POST",
         }),
       ),
@@ -3726,11 +3776,11 @@ function createFetchClient(baseUrl: string): DesktopApiClient {
         ]);
       const memories = memoriesByScope.flat();
 
-      const conversations =
-        kind === "autonomous"
-          ? [buildAutonomousPrimaryConversation(agentRuns, snapshot, definition)]
-          : [buildAssistantConversationSummary(snapshot)];
-      const runs = kind === "autonomous" ? agentRuns.slice(0, 8) : queueItems.slice(0, 8).map(queueItemToRun);
+      const isRuntimeAgent = kind === "autonomous" || kind === "jd_sync";
+      const conversations = isRuntimeAgent
+        ? [buildRuntimePrimaryConversation(kind, agentRuns, snapshot, definition)]
+        : [buildAssistantConversationSummary(snapshot)];
+      const runs = isRuntimeAgent ? agentRuns.slice(0, 8) : queueItems.slice(0, 8).map(queueItemToRun);
       const tools = (servers as McpServerRecord[]).flatMap((server: McpServerRecord) =>
         server.tools.map((tool: McpToolRecord) =>
           normalizeAgentToolSummary({
@@ -3760,7 +3810,8 @@ function createFetchClient(baseUrl: string): DesktopApiClient {
         memories,
         skills,
         tools,
-        workspaceControl: kind === "autonomous" ? normalizeAgentWorkspaceControl(undefined, "autonomous") : null,
+        mcps: servers as McpServerRecord[],
+        workspaceControl: isRuntimeAgent ? normalizeAgentWorkspaceControl(undefined, kind) : null,
         agentDefinition,
         productBinding,
         definitionConfig: agentDefinition.config,
@@ -3769,6 +3820,26 @@ function createFetchClient(baseUrl: string): DesktopApiClient {
       };
     },
     controlAutonomousWorkspace: async (action, reason) => {
+      return createFetchClient(baseUrl).controlRuntimeWorkspace("autonomous", action, reason);
+    },
+    controlRuntimeWorkspace: async (kind, action, reason) => {
+      if (kind === "jd_sync" && action !== "terminate") {
+        await requestJson<unknown>(
+          baseUrl,
+          action === "pause" ? "/api/agents/heartbeat/pause" : "/api/agents/heartbeat/resume",
+          { method: "POST" },
+        );
+        const control = await requestOptionalJson<unknown>(baseUrl, "/api/agents/autonomous/workspace-control");
+        return normalizeAgentWorkspaceControl(control, kind) ?? {
+          state: action === "pause" ? "paused" : "running",
+          reason: reason ?? null,
+          updatedBy: "desktop-user",
+          updatedAt: null,
+          autonomousPaused: action === "pause",
+          terminatedRunIds: [],
+          runStartBlocked: null,
+        };
+      }
       const payload = await requestJson<unknown>(
         baseUrl,
         `/api/agents/autonomous/workspace-control/${encodeURIComponent(action)}`,
@@ -3777,13 +3848,14 @@ function createFetchClient(baseUrl: string): DesktopApiClient {
           body: JSON.stringify({ reviewer: "desktop-user", reason }),
         },
       );
-      return normalizeAgentWorkspaceControl(payload, "autonomous") ?? {
+      return normalizeAgentWorkspaceControl(payload, kind) ?? {
         state: "stopped",
         reason: null,
         updatedBy: null,
         updatedAt: null,
         autonomousPaused: true,
         terminatedRunIds: [],
+        runStartBlocked: null,
       };
     },
     getAgentConversation: async (kind, conversationId) => {
@@ -3812,7 +3884,7 @@ function createFetchClient(baseUrl: string): DesktopApiClient {
         const run = traceRunId ? (runs.find((item) => item.id === traceRunId) ?? null) : null;
         const fallbackConversation =
           conversationId === AUTONOMOUS_PRIMARY_CONVERSATION_ID
-            ? buildAutonomousPrimaryConversation(runs)
+            ? buildRuntimePrimaryConversation("autonomous", runs)
             : run
               ? runToConversation(run)
               : {
@@ -3876,22 +3948,28 @@ function createFetchClient(baseUrl: string): DesktopApiClient {
       };
     },
     cancelAutonomousRun: async (runId, reason) => {
-      const payload = asRecord(
-        await requestJson<unknown>(baseUrl, `/api/agents/autonomous/runs/${encodeURIComponent(runId)}/cancel`, {
-          method: "POST",
-          body: JSON.stringify({ reviewer: "desktop-user", reason }),
-        }),
-      );
-      return normalizeAgentRunRecord(payload.run ?? {}, "autonomous");
+      return createFetchClient(baseUrl).cancelAgentRun("autonomous", runId, reason);
     },
     resumeAutonomousRun: async (runId, reason) => {
+      return createFetchClient(baseUrl).resumeAgentRun("autonomous", runId, reason);
+    },
+    cancelAgentRun: async (kind, runId, reason) => {
       const payload = asRecord(
-        await requestJson<unknown>(baseUrl, `/api/agents/autonomous/runs/${encodeURIComponent(runId)}/resume`, {
+        await requestJson<unknown>(baseUrl, `/api/agents/${kind}/runs/${encodeURIComponent(runId)}/cancel`, {
           method: "POST",
           body: JSON.stringify({ reviewer: "desktop-user", reason }),
         }),
       );
-      return normalizeAgentRunRecord(payload.run ?? {}, "autonomous");
+      return normalizeAgentRunRecord(payload.run ?? {}, kind);
+    },
+    resumeAgentRun: async (kind, runId, reason) => {
+      const payload = asRecord(
+        await requestJson<unknown>(baseUrl, `/api/agents/${kind}/runs/${encodeURIComponent(runId)}/resume`, {
+          method: "POST",
+          body: JSON.stringify({ reviewer: "desktop-user", reason }),
+        }),
+      );
+      return normalizeAgentRunRecord(payload.run ?? {}, kind);
     },
     createAssistantConversation: async ({ userId, title }) => {
       const payload = await requestJson<unknown>(baseUrl, "/api/assistant/conversations", {
@@ -3926,7 +4004,19 @@ function createFetchClient(baseUrl: string): DesktopApiClient {
         onEvent,
       );
     },
-    sendAssistantMessage: async ({ conversationId, message }) => {
+    cancelAssistantTurn: async (conversationId) => {
+      const payload = asRecord(
+        await requestJson<unknown>(baseUrl, `/api/assistant/conversations/${encodeURIComponent(conversationId)}/cancel`, {
+          method: "POST",
+        }),
+      );
+      return {
+        conversationId: String(payload.conversation_id ?? payload.conversationId ?? conversationId),
+        cancelled: Boolean(payload.cancelled),
+        active: payload.active == null ? undefined : Boolean(payload.active),
+      };
+    },
+    sendAssistantMessage: async ({ conversationId, message, priority }) => {
       const payload = await requestOptionalJson<unknown>(
         baseUrl,
         `/api/agents/assistant/conversations/${encodeURIComponent(conversationId)}/messages`,
@@ -3934,6 +4024,7 @@ function createFetchClient(baseUrl: string): DesktopApiClient {
           method: "POST",
           body: JSON.stringify({
             message,
+            priority,
           }),
         },
       );
@@ -3965,8 +4056,34 @@ function createFetchClient(baseUrl: string): DesktopApiClient {
         status: "queued",
       };
     },
+    queueAgentPendingUserInputAfterNextToolCall: async (kind, { conversationId, message, userId, title, priority }) => {
+      const response = await requestJson<unknown>(
+        baseUrl,
+        `/api/agents/${kind}/conversations/${encodeURIComponent(conversationId)}/pending-user-input-after-next-tool-call`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            message,
+            user_id: userId,
+            title,
+            priority,
+          }),
+        },
+      );
+      const record = asRecord(response);
+      return {
+        conversationId: String(record.conversationId ?? record.conversation_id ?? conversationId),
+        inputId: record.inputId ? String(record.inputId) : record.input_id ? String(record.input_id) : null,
+        requestId: record.requestId ? String(record.requestId) : record.request_id ? String(record.request_id) : null,
+        runId: record.runId ? String(record.runId) : record.run_id ? String(record.run_id) : null,
+        status: String(record.status ?? "accepted"),
+      };
+    },
     startAutonomousRun: async (payload) => {
-      const response = await requestJson<unknown>(baseUrl, "/api/agents/autonomous/runs", {
+      return createFetchClient(baseUrl).startAgentRun("autonomous", payload);
+    },
+    startAgentRun: async (kind, payload) => {
+      const response = await requestJson<unknown>(baseUrl, `/api/agents/${kind}/runs`, {
         method: "POST",
         body: JSON.stringify({
           title: payload.title,
@@ -3983,7 +4100,7 @@ function createFetchClient(baseUrl: string): DesktopApiClient {
       });
       const record = asRecord(response);
       return {
-        conversationId: String(record.conversationId ?? record.conversation_id ?? AUTONOMOUS_PRIMARY_CONVERSATION_ID),
+        conversationId: String(record.conversationId ?? record.conversation_id ?? primaryConversationId(kind)),
         runId: record.runId ? String(record.runId) : record.run_id ? String(record.run_id) : null,
         status: String(record.status ?? "queued"),
       };

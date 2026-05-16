@@ -24,10 +24,12 @@ from recruit_station.models.domain import (
     ConversationTurn,
     OperatorInteraction,
     AgentDefinition,
+    AgentPendingUserInput,
     Skill,
     TaskQueueItem,
 )
 from recruit_station.repositories.domain import (
+    AgentPendingUserInputRepository,
     AgentDefinitionRepository,
     SkillRepository,
     TaskQueueRepository,
@@ -48,10 +50,12 @@ from recruit_station.services.container import AppContainer
 from recruit_station.services.recruit_station import normalize_prompt_config, resolve_context_policy, resolve_memory_policy
 
 
-AgentKind = Literal["assistant", "autonomous"]
+AgentKind = Literal["assistant", "autonomous", "jd_sync"]
 MemoryScope = Literal["candidate", "job", "global"]
-BUILTIN_AGENT_KINDS: tuple[AgentKind, ...] = ("assistant", "autonomous")
+BUILTIN_AGENT_KINDS: tuple[AgentKind, ...] = ("assistant", "autonomous", "jd_sync")
+RUNTIME_AGENT_KINDS: tuple[AgentKind, ...] = ("autonomous", "jd_sync")
 AUTONOMOUS_PRIMARY_CONVERSATION_ID = "autonomous-primary"
+JD_SYNC_PRIMARY_CONVERSATION_ID = "jd-sync-primary"
 SHARED_WORKSPACE_SCOPE_REF = "workspace:shared"
 AUTONOMOUS_OPEN_RUN_STATUSES: tuple[str, ...] = (
     "queued",
@@ -63,6 +67,33 @@ AUTONOMOUS_OPEN_RUN_STATUSES: tuple[str, ...] = (
     "paused",
     "resumable",
 )
+AUTOMATION_RECRUITING_RUN_KINDS: set[str] = {
+    "recruiting",
+    "automation_recruiting",
+    "multi_jd_recruiting",
+}
+JD_SYNC_RUN_KINDS: set[str] = {
+    "jd_sync",
+    "job_description_sync",
+    "recruiting_jd_sync",
+}
+AUTOMATION_REQUIRED_SCHEDULER_FIELDS: tuple[str, ...] = (
+    "scanIntervalMinutes",
+    "candidatePoolTarget",
+    "backlogThreshold",
+    "priorityDiscoveryWeight",
+    "priorityUnreadMessageWeight",
+    "priorityScoringBacklogWeight",
+    "priorityApprovalWeight",
+    "priorityJdGapWeight",
+    "messageSlaMinutes",
+    "siteCooldownMinutes",
+    "retryCooldownMinutes",
+    "maxActionsPerHour",
+    "maxConsecutiveErrors",
+)
+
+SITE_ENTRY_URL_KEYS: tuple[str, ...] = ("siteEntryUrl", "site_entry_url", "entryUrl", "entry_url")
 
 DEFAULT_RECRUITING_POLICY: dict[str, Any] = {
     "jdStandards": "拆解岗位目标、团队阶段、核心职责、硬性门槛、加分项、排除项和交付预期；所有候选人判断必须明确引用对应 JD 要求。",
@@ -151,6 +182,14 @@ class AssistantMessageCreateRequest(BaseModel):
     message: str
     user_id: str = "desktop-user"
     title: str | None = None
+    priority: str = "next"
+
+
+class AgentPendingUserInputAfterNextToolCallCreateRequest(BaseModel):
+    message: str
+    user_id: str = "desktop-user"
+    title: str | None = None
+    priority: str = "next"
 
 
 def build_router(container: AppContainer) -> APIRouter:
@@ -167,12 +206,15 @@ def build_router(container: AppContainer) -> APIRouter:
             )
             return {"task_id": task.id, "task_type": task.task_type, "priority": task.priority}
 
-    @router.post("/run-once")
-    def run_once() -> dict[str, Any]:
+    def _process_next_agent_queue_task() -> dict[str, Any]:
         try:
             return container.heartbeat.run_once()
         except AutonomousRunInterrupted as exc:
             return {"status": "interrupted", "reason": str(exc)}
+
+    @router.post("/task-queue/process-next")
+    def process_next_agent_queue_task() -> dict[str, Any]:
+        return _process_next_agent_queue_task()
 
     @router.get("/queue")
     def list_queue() -> list[dict[str, Any]]:
@@ -214,8 +256,33 @@ def build_router(container: AppContainer) -> APIRouter:
 
     @router.post("/autonomous/workspace-control/start")
     def start_autonomous_workspace(payload: WorkspaceControlRequest) -> dict[str, Any]:
-        container.heartbeat.start(updated_by=payload.reviewer, reason=payload.reason or "manual start")
-        return _workspace_control_payload(container.heartbeat.status())
+        started_run: dict[str, Any] | None = None
+        start_blocker: dict[str, Any] | None = None
+        with container.session_factory() as session:
+            definition = _resolve_agent_definition(session, "autonomous")
+            agent_session = _ensure_agent_session(session, definition, kind="autonomous")
+            if _find_open_autonomous_run(session, session_id=agent_session.id, agent_kind="autonomous") is None:
+                try:
+                    started_run = _create_saved_automation_run(
+                        session,
+                        definition=definition,
+                        requested_by=payload.reviewer or "desktop-user",
+                    )
+                except ValueError as exc:
+                    start_blocker = {"reason": str(exc)}
+        if start_blocker is None:
+            container.heartbeat.start(updated_by=payload.reviewer, reason=payload.reason or "manual start")
+        control = _workspace_control_payload(container.heartbeat.status())
+        if started_run is not None:
+            control["run"] = started_run["run"]
+            control["run_id"] = started_run["run_id"]
+            control["runId"] = started_run["runId"]
+            control["task_id"] = started_run["task_id"]
+            control["taskId"] = started_run["task_id"]
+        if start_blocker is not None:
+            control["run_start_blocked"] = start_blocker
+            control["runStartBlocked"] = start_blocker
+        return control
 
     @router.post("/autonomous/workspace-control/pause")
     def pause_autonomous_workspace(payload: WorkspaceControlRequest) -> dict[str, Any]:
@@ -251,110 +318,17 @@ def build_router(container: AppContainer) -> APIRouter:
     def create_autonomous_run(payload: AutonomousTriggerRequest) -> dict[str, Any]:
         with container.session_factory() as session:
             definition = _resolve_agent_definition(session, "autonomous")
-            agent_session = _ensure_agent_session(session, definition, kind="autonomous")
-            open_run = _find_open_autonomous_run(session, session_id=agent_session.id)
-            if open_run is not None:
-                raise HTTPException(
-                    status_code=409,
-                    detail="Autonomous already has an open run. Wait for it to finish or resume it before starting another run.",
-                )
+            return _create_autonomous_run(session, definition=definition, payload=payload, agent_kind="autonomous")
 
-            constraints = dict(payload.constraints or {})
-            scope_kind = str(constraints.get("scope_kind") or "").strip().lower()
-            memory_scope_kind = str(constraints.get("memory_scope_kind") or "").strip().lower()
-            if payload.jd_id:
-                constraints.setdefault("jd_id", payload.jd_id)
-            if payload.candidate_count_target is not None:
-                constraints.setdefault("candidate_count_target", payload.candidate_count_target)
-            if scope_kind == "global" or memory_scope_kind == "global":
-                constraints.setdefault("scope_kind", "global")
-                constraints.setdefault("scope_ref", SHARED_WORKSPACE_SCOPE_REF)
-                constraints.setdefault("memory_scope_kind", "global")
-                constraints.setdefault("memory_scope_ref", SHARED_WORKSPACE_SCOPE_REF)
-                constraints.setdefault("global_scope_ref", SHARED_WORKSPACE_SCOPE_REF)
-            requested_conversation_id = str(payload.conversation_id or "").strip() or None
-            conversation_id = AUTONOMOUS_PRIMARY_CONVERSATION_ID
-            parent_conversation_id = (
-                requested_conversation_id
-                if requested_conversation_id not in {None, "", AUTONOMOUS_PRIMARY_CONVERSATION_ID}
-                else None
-            )
-            context_hints = dict(payload.context_hints or {})
-            browser_target = derive_browser_target(
-                existing=context_hints.get("browser_target"),
-                structured_sources=(context_hints, constraints),
-                text_sources=(payload.instruction, payload.title),
-            )
-            if browser_target:
-                context_hints["browser_target"] = browser_target
-                constraints.setdefault("browser_target", browser_target)
-
-            instruction = str(payload.instruction or "").strip()
-            title = str(payload.title or _trim_title(instruction) or "Autonomous run").strip()
-
-            run = AgentRun(
-                session_id=agent_session.id,
-                job_description_id=payload.jd_id,
-                platform="site",
-                lane="agent",
-                run_type=payload.kind,
-                status="queued",
-                priority=payload.priority,
-                context_manifest={
-                    "instruction": instruction,
-                    "title": title,
-                    "kind": payload.kind,
-                    "requested_by": payload.requested_by,
-                    "candidate_count_target": payload.candidate_count_target,
-                    "conversation_id": conversation_id,
-                    "parent_conversation_id": parent_conversation_id,
-                    "constraints": constraints,
-                    "success_criteria": dict(payload.success_criteria or {}),
-                    "context_hints": context_hints,
-                    "trial_budget": dict(payload.trial_budget or {}),
-                    "run_preferences": dict(payload.run_preferences or {}),
-                    **({"browser_target": browser_target} if browser_target else {}),
-                },
-                runtime_metadata={
-                    "instruction": instruction,
-                    "title": title,
-                    "summary": payload.summary or instruction,
-                    "requested_by": payload.requested_by,
-                    "jd_id": payload.jd_id,
-                    "candidate_count_target": payload.candidate_count_target,
-                    "conversation_id": conversation_id,
-                    "parent_conversation_id": parent_conversation_id,
-                    "constraints": constraints,
-                    "success_criteria": dict(payload.success_criteria or {}),
-                    "context_hints": context_hints,
-                    "trial_budget": dict(payload.trial_budget or {}),
-                    "run_preferences": dict(payload.run_preferences or {}),
-                    **({"browser_target": browser_target} if browser_target else {}),
-                },
-                run_id=uuid4().hex,
-                agent_kind="autonomous",
-            )
-            session.add(run)
-            session.flush()
-
-            agent_session.current_lane = run.lane
-            agent_session.last_active_at = utcnow()
-
-            envelope = _default_run_envelope(run=run, definition=definition)
-            task = _enqueue_run_task(session, run=run, envelope=envelope)
-            session.commit()
-            session.refresh(run)
-            session.refresh(agent_session)
-            return {
-                "conversation_id": conversation_id,
-                "conversationId": conversation_id,
-                "run_id": run.run_id,
-                "runId": run.run_id,
-                "status": run.status,
-                "run": _serialize_run(run),
-                "session": RuntimeSessionRead.model_validate(agent_session).model_dump(by_alias=True),
-                "task_id": task.id,
-            }
+    @router.post("/{kind}/runs", status_code=201)
+    def create_runtime_agent_run(kind: AgentKind, payload: AutonomousTriggerRequest) -> dict[str, Any]:
+        if kind not in RUNTIME_AGENT_KINDS:
+            raise HTTPException(status_code=404, detail=f"Run creation is not supported for agent kind: {kind}")
+        if kind == "jd_sync":
+            payload.kind = "jd_sync"
+        with container.session_factory() as session:
+            definition = _resolve_agent_definition(session, kind)
+            return _create_autonomous_run(session, definition=definition, payload=payload, agent_kind=kind)
 
     @router.get("/{kind}")
     def get_agent(kind: AgentKind) -> dict[str, Any]:
@@ -374,6 +348,7 @@ def build_router(container: AppContainer) -> APIRouter:
             definition_patch: dict[str, Any] = {}
             projection_patch: dict[str, Any] = {}
             config_patch: dict[str, Any] = {}
+            product_config_patch: dict[str, Any] = {}
             for key in ("name", "status", "description", "dashboard_config", "channel_config", "agent_metadata"):
                 if key in patch:
                     projection_patch[key] = patch.pop(key)
@@ -394,7 +369,9 @@ def build_router(container: AppContainer) -> APIRouter:
                 memory_policy = dict(_product_config(definition, kind).get("memory_policy") or {})
                 memory_policy.update(dict(config_patch["memory_policy"] or {}))
                 config_patch["memory_policy"] = resolve_memory_policy(memory_policy)
-            for key in ("playbook_blueprint", "product_bindings", "product_config", "product_projections"):
+            if isinstance(patch.get("product_config"), dict):
+                product_config_patch = dict(patch.pop("product_config") or {})
+            for key in ("playbook_blueprint", "product_bindings", "product_projections"):
                 if key in patch:
                     definition_patch[key] = patch[key]
             if projection_patch:
@@ -403,11 +380,23 @@ def build_router(container: AppContainer) -> APIRouter:
                 projection.update(projection_patch)
                 product_projections[kind] = projection
                 definition_patch["product_projections"] = product_projections
-            if config_patch:
+            if product_config_patch or config_patch:
                 product_config = dict(definition.product_config or {})
+                for config_key, config_value in product_config_patch.items():
+                    if isinstance(config_value, dict):
+                        existing_config = dict(product_config.get(config_key) or {})
+                        product_config[config_key] = _merge_product_config_patch(
+                            existing_config,
+                            dict(config_value),
+                            config_key=config_key,
+                        )
+                    else:
+                        product_config[config_key] = config_value
+            if config_patch:
                 config = dict(product_config.get(kind) or {})
                 config.update(config_patch)
                 product_config[kind] = config
+            if product_config_patch or config_patch:
                 definition_patch["product_config"] = product_config
             updated = repo.update(definition, definition_patch)
             session.commit()
@@ -433,8 +422,6 @@ def build_router(container: AppContainer) -> APIRouter:
         with container.session_factory() as session:
             _resolve_agent_definition(session, "assistant")
             active_turn = container.assistant_adapter.active_turns.get(conversation_id)
-            if active_turn is not None and active_turn.worker.is_alive():
-                raise HTTPException(status_code=409, detail="Assistant conversation already has an active turn.")
             conversation = _ensure_assistant_conversation(
                 session,
                 container=container,
@@ -442,6 +429,27 @@ def build_router(container: AppContainer) -> APIRouter:
                 user_id=payload.user_id,
                 title=payload.title or _trim_title(payload.message),
             )
+            if active_turn is not None and active_turn.worker.is_alive():
+                pending_user_input = AgentPendingUserInputRepository(session).enqueue_prompt(
+                    agent_kind="assistant",
+                    conversation_id=conversation.conversation_id,
+                    message=payload.message,
+                    priority=payload.priority,
+                    queued_by=payload.user_id,
+                    metadata={"source": "assistant_active_turn"},
+                )
+                session.commit()
+                session.refresh(pending_user_input)
+                return {
+                    "conversation_id": conversation.conversation_id,
+                    "conversationId": conversation.conversation_id,
+                    "input_id": pending_user_input.input_id,
+                    "inputId": pending_user_input.input_id,
+                    "request_id": pending_user_input.input_id,
+                    "requestId": pending_user_input.input_id,
+                    "status": "queued",
+                    "pending_user_input": _serialize_agent_pending_user_input(pending_user_input),
+                }
             session.commit()
             resolved_conversation_id = conversation.conversation_id
 
@@ -462,6 +470,58 @@ def build_router(container: AppContainer) -> APIRouter:
             "requestId": request_id,
             "status": "accepted",
         }
+
+    @router.post("/{kind}/conversations/{conversation_id}/pending-user-input-after-next-tool-call", status_code=202)
+    def queue_pending_user_input_after_next_tool_call(
+        kind: AgentKind,
+        conversation_id: str,
+        payload: AgentPendingUserInputAfterNextToolCallCreateRequest,
+    ) -> dict[str, Any]:
+        if kind == "assistant":
+            return send_assistant_message(
+                conversation_id,
+                AssistantMessageCreateRequest(
+                    message=payload.message,
+                    user_id=payload.user_id,
+                    title=payload.title,
+                    priority=payload.priority,
+                ),
+            )
+        if kind not in RUNTIME_AGENT_KINDS:
+            raise HTTPException(status_code=404, detail=f"Messages are not supported for agent kind: {kind}")
+        with container.session_factory() as session:
+            definition = _resolve_agent_definition(session, kind)
+            agent_session = _ensure_agent_session(session, definition, kind=kind)
+            open_run = _find_open_autonomous_run(session, session_id=agent_session.id, agent_kind=kind)
+            if open_run is not None:
+                pending_user_input = AgentPendingUserInputRepository(session).enqueue_prompt(
+                    agent_kind=kind,
+                    conversation_id=conversation_id or _primary_conversation_id(kind),
+                    run=open_run,
+                    message=payload.message,
+                    priority=payload.priority,
+                    queued_by=payload.user_id,
+                    metadata={"source": "runtime_active_turn"},
+                )
+                session.commit()
+                session.refresh(pending_user_input)
+                return {
+                    "conversation_id": pending_user_input.conversation_id,
+                    "conversationId": pending_user_input.conversation_id,
+                    "run_id": open_run.run_id,
+                    "runId": open_run.run_id,
+                    "input_id": pending_user_input.input_id,
+                    "inputId": pending_user_input.input_id,
+                    "request_id": pending_user_input.input_id,
+                    "requestId": pending_user_input.input_id,
+                    "status": "queued",
+                    "pending_user_input": _serialize_agent_pending_user_input(pending_user_input),
+                }
+
+            raise HTTPException(
+                status_code=409,
+                detail="Agent must have an open run before pending user input can be queued after the next tool call.",
+            )
 
     @router.get("/{kind}/conversations/{conversation_id}")
     def get_agent_conversation(kind: AgentKind, conversation_id: str) -> dict[str, Any]:
@@ -518,35 +578,40 @@ def build_router(container: AppContainer) -> APIRouter:
             run = _resolve_run_for_kind(session, kind, run_id)
             return _list_turns(session, run)
 
-    @router.post("/autonomous/runs/{run_id}/cancel")
-    def cancel_run(run_id: str, payload: RunControlRequest) -> dict[str, Any]:
+    @router.post("/{kind}/runs/{run_id}/cancel")
+    def cancel_run(kind: AgentKind, run_id: str, payload: RunControlRequest) -> dict[str, Any]:
+        if kind not in RUNTIME_AGENT_KINDS:
+            raise HTTPException(status_code=404, detail=f"Run control is not supported for agent kind: {kind}")
         try:
             run_pk = container.autonomous_adapter.cancel_run(
                 run_id,
                 reviewer=payload.reviewer,
                 reason=payload.reason,
+                agent_kind=kind,
             )
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except KeyError as exc:
-            raise HTTPException(status_code=404, detail=f"Run not found for agent kind: autonomous") from exc
+            raise HTTPException(status_code=404, detail=f"Run not found for agent kind: {kind}") from exc
         with container.session_factory() as session:
             run = session.get(AgentRun, run_pk)
             if run is None:
                 raise HTTPException(status_code=404, detail=f"unknown run: {run_id}")
             return {"run": _serialize_run(run)}
 
-    @router.post("/autonomous/runs/{run_id}/resume")
-    def resume_run(run_id: str, payload: RunControlRequest) -> dict[str, Any]:
+    @router.post("/{kind}/runs/{run_id}/resume")
+    def resume_run(kind: AgentKind, run_id: str, payload: RunControlRequest) -> dict[str, Any]:
+        if kind not in RUNTIME_AGENT_KINDS:
+            raise HTTPException(status_code=404, detail=f"Run control is not supported for agent kind: {kind}")
         with container.session_factory() as session:
-            run = _resolve_run_for_kind(session, "autonomous", run_id)
+            run = _resolve_run_for_kind(session, kind, run_id)
             if str(run.status or "").strip().lower() in {"queued", "running", "active"}:
                 raise HTTPException(status_code=409, detail="Active run does not need resume.")
-            conflicting_run = _find_open_autonomous_run(session, session_id=run.session_id, exclude_run_id=run.id)
+            conflicting_run = _find_open_autonomous_run(session, session_id=run.session_id, agent_kind=kind, exclude_run_id=run.id)
             if conflicting_run is not None:
                 raise HTTPException(
                     status_code=409,
-                    detail="Autonomous already has another open run. Resolve it before resuming this one.",
+                    detail=f"{kind} already has another open run. Resolve it before resuming this one.",
                 )
             checkpoint = _resolve_run_gate_records(
                 session,
@@ -556,7 +621,7 @@ def build_router(container: AppContainer) -> APIRouter:
                 approval_status="approved",
                 interaction_action="resume",
             )
-            definition = _resolve_agent_definition(session, "autonomous")
+            definition = _resolve_agent_definition(session, kind)
             envelope = _resume_envelope_for_run(run=run, definition=definition, checkpoint=checkpoint)
             run.status = "queued"
             run.finished_at = None
@@ -636,9 +701,73 @@ def build_router(container: AppContainer) -> APIRouter:
     return router
 
 
+def _preserve_existing_site_entry_url_on_empty_patch(
+    existing_config: dict[str, Any],
+    incoming_config: dict[str, Any],
+    *,
+    config_key: str,
+) -> dict[str, Any]:
+    business_config_keys = {
+        "autonomous": ("automation_recruiting_config", "automationRecruitingConfig", "automation_config", "automationConfig"),
+        "jd_sync": ("jd_sync_config", "jdSyncConfig", "automation_config", "automationConfig"),
+    }.get(config_key)
+    if not business_config_keys:
+        return incoming_config
+    existing_url = _first_nested_site_entry_url(existing_config, business_config_keys)
+    if not existing_url:
+        return incoming_config
+    for business_config_key in business_config_keys:
+        business_config = incoming_config.get(business_config_key)
+        if not isinstance(business_config, dict):
+            continue
+        execution_sop = business_config.get("executionSop") or business_config.get("execution_sop")
+        if not isinstance(execution_sop, dict):
+            continue
+        for site_entry_key in SITE_ENTRY_URL_KEYS:
+            if site_entry_key in execution_sop and isinstance(execution_sop[site_entry_key], str) and not execution_sop[site_entry_key].strip():
+                execution_sop[site_entry_key] = existing_url
+    return incoming_config
+
+
+def _merge_product_config_patch(existing_config: dict[str, Any], incoming_config: dict[str, Any], *, config_key: str) -> dict[str, Any]:
+    incoming = _preserve_existing_site_entry_url_on_empty_patch(
+        existing_config,
+        dict(incoming_config),
+        config_key=config_key,
+    )
+    return _deep_merge_product_config(existing_config, incoming)
+
+
+def _deep_merge_product_config(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(existing or {})
+    for key, value in incoming.items():
+        current = merged.get(key)
+        if isinstance(current, dict) and isinstance(value, dict):
+            merged[key] = _deep_merge_product_config(dict(current), dict(value))
+        else:
+            merged[key] = value
+    return merged
+
+
+def _first_nested_site_entry_url(config: dict[str, Any], business_config_keys: tuple[str, ...]) -> str | None:
+    for business_config_key in business_config_keys:
+        business_config = config.get(business_config_key)
+        if not isinstance(business_config, dict):
+            continue
+        execution_sop = business_config.get("executionSop") or business_config.get("execution_sop")
+        if not isinstance(execution_sop, dict):
+            continue
+        for site_entry_key in SITE_ENTRY_URL_KEYS:
+            value = execution_sop.get(site_entry_key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
+
+
 def _serialize_agent_projection(definition: AgentDefinition, *, kind: AgentKind) -> dict[str, Any]:
     projection = _product_projection(definition, kind)
     config = _product_config(definition, kind)
+    role_definition = _projected_role_definition(definition, kind=kind, projection=projection, config=config)
     definition_payload = AgentDefinitionRead.model_validate(
         {
             "id": definition.id,
@@ -673,8 +802,8 @@ def _serialize_agent_projection(definition: AgentDefinition, *, kind: AgentKind)
         "description": projection.get("description", definition.description),
         "is_primary": kind == "autonomous",
         "isPrimary": kind == "autonomous",
-        "role_definition": dict(definition.role_definition or {}),
-        "roleDefinition": dict(definition.role_definition or {}),
+        "role_definition": role_definition,
+        "roleDefinition": role_definition,
         "prompt_config": dict(config.get("prompt_config") or definition.prompt_config or {}),
         "promptConfig": dict(config.get("prompt_config") or definition.prompt_config or {}),
         "playbook_blueprint": dict(definition.playbook_blueprint or {}),
@@ -687,6 +816,8 @@ def _serialize_agent_projection(definition: AgentDefinition, *, kind: AgentKind)
         "channelConfig": dict(projection.get("channel_config") or definition.channel_config or {}),
         "agent_metadata": dict(projection.get("agent_metadata") or definition.agent_metadata or {}),
         "agentMetadata": dict(projection.get("agent_metadata") or definition.agent_metadata or {}),
+        "product_config": dict(definition.product_config or {}),
+        "productConfig": dict(definition.product_config or {}),
         "product_binding": _product_binding(definition, kind),
         "productBinding": _product_binding(definition, kind),
         "agent_definition": definition_payload,
@@ -711,9 +842,57 @@ def _product_projection(definition: AgentDefinition, kind: AgentKind) -> dict[st
     return dict((definition.product_projections or {}).get(kind) or {})
 
 
+def _projected_role_definition(
+    definition: AgentDefinition,
+    *,
+    kind: AgentKind,
+    projection: dict[str, Any],
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    configured = (
+        projection.get("role_definition")
+        or projection.get("roleDefinition")
+        or config.get("role_definition")
+        or config.get("roleDefinition")
+    )
+    if isinstance(configured, dict):
+        return dict(configured)
+    if kind == "jd_sync":
+        return {
+            "identity": "JD 同步 Agent",
+            "positioning": "在人工已登录招聘网站的前提下，手动同步职位列表和职位详情到本地 JD 库的受限 Agent。",
+            "duties": [
+                "从配置的招聘网站入口读取职位列表和职位详情。",
+                "按 platform/external_id 或标题、部门、地点识别新增、更新和下架职位。",
+                "调用 JD 写入能力同步本地 JD 库，并记录同步结果和异常。",
+            ],
+            "tone": "professional, concise, evidence-driven",
+            "boundaries": [
+                "不处理登录、验证码、账号切换或绕过风控。",
+                "不筛选候选人、不评分、不外联、不推进投递流程。",
+                "只处理招聘站点中的职位信息，不读取或操作候选人数据。",
+            ],
+            "success_criteria": [
+                "本地 JD 库与招聘网站可见职位保持一致。",
+                "新增、更新、下架结果可追踪。",
+                "无法同步的职位有明确原因和证据。",
+            ],
+            "forbidden_actions": [
+                "擅自处理账号登录或安全校验。",
+                "擅自联系候选人或修改候选人状态。",
+                "将 JD 同步任务扩展为候选人筛选或招聘执行任务。",
+            ],
+        }
+    return dict(definition.role_definition or {})
+
+
 def _agent_session_key(definition: AgentDefinition, kind: AgentKind) -> str:
     binding = _product_binding(definition, kind)
     return str(binding.get("session_key") or kind).strip() or kind
+
+
+def _primary_conversation_id(kind: AgentKind) -> str:
+    return JD_SYNC_PRIMARY_CONVERSATION_ID if kind == "jd_sync" else AUTONOMOUS_PRIMARY_CONVERSATION_ID
 
 
 def _serialize_run(run: AgentRun) -> dict[str, Any]:
@@ -752,15 +931,50 @@ def _serialize_run(run: AgentRun) -> dict[str, Any]:
     payload["wakeup_state"] = dict(run.wakeup_state or {})
     payload["title"] = _run_title(run)
     payload["summary"] = _run_summary(run)
-    if run.agent_kind == "autonomous":
-        payload["conversation_id"] = AUTONOMOUS_PRIMARY_CONVERSATION_ID
-        payload["conversationId"] = AUTONOMOUS_PRIMARY_CONVERSATION_ID
-        payload["ref_id"] = AUTONOMOUS_PRIMARY_CONVERSATION_ID
-        payload["refId"] = AUTONOMOUS_PRIMARY_CONVERSATION_ID
+    if run.agent_kind in RUNTIME_AGENT_KINDS:
+        conversation_id = _primary_conversation_id(run.agent_kind)  # type: ignore[arg-type]
+        payload["conversation_id"] = conversation_id
+        payload["conversationId"] = conversation_id
+        payload["ref_id"] = conversation_id
+        payload["refId"] = conversation_id
     else:
         payload["ref_id"] = run.run_id
         payload["refId"] = run.run_id
     return payload
+
+
+def _serialize_agent_pending_user_input(pending_user_input: AgentPendingUserInput) -> dict[str, Any]:
+    return {
+        "id": pending_user_input.id,
+        "input_id": pending_user_input.input_id,
+        "inputId": pending_user_input.input_id,
+        "agent_kind": pending_user_input.agent_kind,
+        "agentKind": pending_user_input.agent_kind,
+        "conversation_id": pending_user_input.conversation_id,
+        "conversationId": pending_user_input.conversation_id,
+        "run_pk": pending_user_input.run_pk,
+        "runPk": pending_user_input.run_pk,
+        "run_id": pending_user_input.run_id,
+        "runId": pending_user_input.run_id,
+        "mode": pending_user_input.mode,
+        "priority": pending_user_input.priority,
+        "delivery": pending_user_input.delivery,
+        "status": pending_user_input.status,
+        "message": pending_user_input.message,
+        "queued_by": pending_user_input.queued_by,
+        "queuedBy": pending_user_input.queued_by,
+        "claimed_at": _serialize_unix_timestamp(pending_user_input.claimed_at),
+        "claimedAt": _serialize_unix_timestamp(pending_user_input.claimed_at),
+        "claimed_by": pending_user_input.claimed_by,
+        "claimedBy": pending_user_input.claimed_by,
+        "completed_at": _serialize_unix_timestamp(pending_user_input.completed_at),
+        "completedAt": _serialize_unix_timestamp(pending_user_input.completed_at),
+        "metadata": dict(pending_user_input.input_metadata or {}),
+        "created_at": _serialize_unix_timestamp(pending_user_input.created_at) or 0,
+        "createdAt": _serialize_unix_timestamp(pending_user_input.created_at) or 0,
+        "updated_at": _serialize_unix_timestamp(pending_user_input.updated_at) or 0,
+        "updatedAt": _serialize_unix_timestamp(pending_user_input.updated_at) or 0,
+    }
 
 
 def _serialize_approval(approval: ApprovalItem) -> dict[str, Any]:
@@ -832,6 +1046,560 @@ def _resolve_agent_definition(session: Session, kind: str) -> AgentDefinition:
     return definition
 
 
+def _create_autonomous_run(
+    session: Session,
+    *,
+    definition: AgentDefinition,
+    payload: AutonomousTriggerRequest,
+    agent_kind: AgentKind = "autonomous",
+) -> dict[str, Any]:
+    _validate_autonomous_run_contract(definition, payload)
+    agent_session = _ensure_agent_session(session, definition, kind=agent_kind)
+    open_run = _find_open_autonomous_run(session, session_id=agent_session.id, agent_kind=agent_kind)
+    if open_run is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"{agent_kind} already has an open run. Wait for it to finish or resume it before starting another run.",
+        )
+
+    constraints = dict(payload.constraints or {})
+    scope_kind = str(constraints.get("scope_kind") or "").strip().lower()
+    memory_scope_kind = str(constraints.get("memory_scope_kind") or "").strip().lower()
+    if payload.jd_id:
+        constraints.setdefault("jd_id", payload.jd_id)
+    if payload.candidate_count_target is not None:
+        constraints.setdefault("candidate_count_target", payload.candidate_count_target)
+    if scope_kind == "global" or memory_scope_kind == "global":
+        constraints.setdefault("scope_kind", "global")
+        constraints.setdefault("scope_ref", SHARED_WORKSPACE_SCOPE_REF)
+        constraints.setdefault("memory_scope_kind", "global")
+        constraints.setdefault("memory_scope_ref", SHARED_WORKSPACE_SCOPE_REF)
+        constraints.setdefault("global_scope_ref", SHARED_WORKSPACE_SCOPE_REF)
+    requested_conversation_id = str(payload.conversation_id or "").strip() or None
+    conversation_id = _primary_conversation_id(agent_kind)
+    parent_conversation_id = (
+        requested_conversation_id
+        if requested_conversation_id not in {None, "", conversation_id}
+        else None
+    )
+    context_hints = dict(payload.context_hints or {})
+    browser_target = derive_browser_target(
+        existing=context_hints.get("browser_target"),
+        structured_sources=(context_hints, constraints),
+        text_sources=(payload.instruction, payload.title),
+    )
+    if browser_target:
+        context_hints["browser_target"] = browser_target
+        constraints.setdefault("browser_target", browser_target)
+
+    instruction = str(payload.instruction or "").strip()
+    title = str(payload.title or _trim_title(instruction) or "Autonomous run").strip()
+
+    run = AgentRun(
+        session_id=agent_session.id,
+        job_description_id=payload.jd_id,
+        platform="site",
+        lane="agent",
+        run_type=payload.kind,
+        status="queued",
+        priority=payload.priority,
+        context_manifest={
+            "instruction": instruction,
+            "title": title,
+            "kind": payload.kind,
+            "requested_by": payload.requested_by,
+            "candidate_count_target": payload.candidate_count_target,
+            "conversation_id": conversation_id,
+            "parent_conversation_id": parent_conversation_id,
+            "constraints": constraints,
+            "success_criteria": dict(payload.success_criteria or {}),
+            "context_hints": context_hints,
+            "trial_budget": dict(payload.trial_budget or {}),
+            "run_preferences": dict(payload.run_preferences or {}),
+            **({"browser_target": browser_target} if browser_target else {}),
+        },
+        runtime_metadata={
+            "instruction": instruction,
+            "title": title,
+            "summary": payload.summary or instruction,
+            "requested_by": payload.requested_by,
+            "jd_id": payload.jd_id,
+            "candidate_count_target": payload.candidate_count_target,
+            "conversation_id": conversation_id,
+            "parent_conversation_id": parent_conversation_id,
+            "constraints": constraints,
+            "success_criteria": dict(payload.success_criteria or {}),
+            "context_hints": context_hints,
+            "trial_budget": dict(payload.trial_budget or {}),
+            "run_preferences": dict(payload.run_preferences or {}),
+            **({"browser_target": browser_target} if browser_target else {}),
+        },
+        run_id=uuid4().hex,
+        agent_kind=agent_kind,
+    )
+    session.add(run)
+    session.flush()
+
+    agent_session.current_lane = run.lane
+    agent_session.last_active_at = utcnow()
+
+    envelope = _default_run_envelope(run=run, definition=definition)
+    task = _enqueue_run_task(session, run=run, envelope=envelope)
+    session.commit()
+    session.refresh(run)
+    session.refresh(agent_session)
+    return {
+        "conversation_id": conversation_id,
+        "conversationId": conversation_id,
+        "run_id": run.run_id,
+        "runId": run.run_id,
+        "status": run.status,
+        "run": _serialize_run(run),
+        "session": RuntimeSessionRead.model_validate(agent_session).model_dump(by_alias=True),
+        "task_id": task.id,
+    }
+
+
+def _validate_autonomous_run_contract(definition: AgentDefinition, payload: AutonomousTriggerRequest) -> None:
+    run_kind = str(payload.kind or "").strip().lower()
+    if run_kind in JD_SYNC_RUN_KINDS:
+        jd_sync_config = _validated_jd_sync_config(definition)
+        _merge_jd_sync_payload(payload, config=jd_sync_config)
+        return
+    if run_kind in AUTOMATION_RECRUITING_RUN_KINDS:
+        _validated_automation_recruiting_config(definition)
+
+
+def _validated_jd_sync_config(definition: AgentDefinition) -> dict[str, Any]:
+    automation_config = _jd_sync_config(definition)
+    execution_sop = dict(
+        automation_config.get("executionSop")
+        or automation_config.get("execution_sop")
+        or {}
+    )
+    target_recruiting_site = _target_recruiting_site_from_sop(execution_sop)
+    if not target_recruiting_site.get("entry_url"):
+        raise HTTPException(
+            status_code=409,
+            detail="automation_recruiting_config missing target recruiting site fields: siteEntryUrl",
+        )
+    return {
+        "automation_config": automation_config,
+        "execution_sop": execution_sop,
+        "target_recruiting_site": target_recruiting_site,
+    }
+
+
+def _merge_jd_sync_payload(payload: AutonomousTriggerRequest, *, config: dict[str, Any]) -> None:
+    target_recruiting_site = dict(config["target_recruiting_site"])
+    execution_sop = dict(config["execution_sop"])
+    constraints = dict(payload.constraints or {})
+    constraints.setdefault("scope_kind", "global")
+    constraints.setdefault("plan_kind", "jd_sync")
+    constraints.setdefault("target_recruiting_site", target_recruiting_site)
+    constraints.setdefault("execution_sop", execution_sop)
+    constraints.setdefault("sync_policy", dict(config["automation_config"].get("syncPolicy") or config["automation_config"].get("sync_policy") or {}))
+    payload.constraints = constraints
+    context_hints = dict(payload.context_hints or {})
+    context_hints.setdefault(
+        "launch_plan",
+        {
+            "plan_kind": "jd_sync",
+            "target_recruiting_site": target_recruiting_site,
+            "requires_selected_jd": False,
+            "next_step_after_success": "select synced JD and configure JD strategy before full recruiting run",
+        },
+    )
+    payload.context_hints = context_hints
+    if not str(payload.title or "").strip():
+        payload.title = "同步招聘站点 JD"
+    payload.instruction = "\n".join(
+        [
+            "执行 JD 同步 bootstrap。该阶段只负责从已保存的招聘入口发现并同步 JD，不处理候选人筛选、评分、外联或投递推进。",
+            f"招聘入口 URL：{target_recruiting_site.get('entry_url')}；复用人工已登录的浏览器会话。",
+            "同步完成后，用户需要在配置页选择生效 JD，并为选中的 JD 配置策略、评分标准和执行 SOP 后，才能启动完整自动化招聘。",
+            "",
+            str(payload.instruction or "").strip(),
+        ]
+    ).strip()
+
+
+def _validated_automation_recruiting_config(definition: AgentDefinition) -> dict[str, Any]:
+    automation_config = _automation_recruiting_config(definition)
+    errors = _automation_recruiting_config_errors(automation_config)
+    if errors:
+        raise HTTPException(
+            status_code=409,
+            detail="automation_recruiting_config incomplete: " + "; ".join(errors),
+        )
+    return automation_config
+
+
+def _automation_recruiting_config_errors(automation_config: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    selected_job_ids = _selected_automation_job_ids(automation_config)
+    if not selected_job_ids:
+        errors.append("select at least one JD")
+    execution_sop = dict(
+        automation_config.get("executionSop")
+        or automation_config.get("execution_sop")
+        or {}
+    )
+    target_recruiting_site = _target_recruiting_site_from_sop(execution_sop)
+    if not target_recruiting_site.get("entry_url"):
+        errors.append("configure executionSop.siteEntryUrl")
+    if not str(execution_sop.get("stepsText") or execution_sop.get("steps_text") or "").strip():
+        errors.append("configure executionSop.stepsText")
+    activation_policy = dict(
+        automation_config.get("activationPolicy")
+        or automation_config.get("activation_policy")
+        or {}
+    )
+    missing_scheduler_fields = [
+        field
+        for field in AUTOMATION_REQUIRED_SCHEDULER_FIELDS
+        if not _has_config_value(activation_policy.get(field), _snake_case_value(activation_policy, field))
+    ]
+    if missing_scheduler_fields:
+        errors.append("configure activationPolicy fields: " + ", ".join(missing_scheduler_fields))
+    job_strategies = dict(
+        automation_config.get("jobStrategies")
+        or automation_config.get("job_strategies")
+        or {}
+    )
+    missing_strategy_jobs: list[str] = []
+    for job_id in selected_job_ids:
+        strategy = dict(job_strategies.get(job_id) or {})
+        missing = _missing_job_strategy_fields(strategy)
+        if missing:
+            missing_strategy_jobs.append(f"{job_id} ({', '.join(missing)})")
+    if missing_strategy_jobs:
+        errors.append("configure JD strategies: " + "; ".join(missing_strategy_jobs))
+    return errors
+
+
+def _selected_automation_job_ids(automation_config: dict[str, Any]) -> list[str]:
+    return [
+        str(item).strip()
+        for item in list(
+            automation_config.get("defaultRunJobIds")
+            or automation_config.get("default_run_job_ids")
+            or automation_config.get("selectedRunJobIds")
+            or automation_config.get("selected_run_job_ids")
+            or []
+        )
+        if str(item).strip()
+    ]
+
+
+def _missing_job_strategy_fields(strategy: dict[str, Any]) -> list[str]:
+    missing: list[str] = []
+    text_fields = (
+        ("screeningCriteria", "screening_criteria"),
+        ("manualReviewRules", "manual_review_rules"),
+    )
+    for camel, snake in text_fields:
+        if not _has_config_value(strategy.get(camel), strategy.get(snake)):
+            missing.append(camel)
+    resume_scoring = _dict_config_value(strategy.get("resumeScoring"), strategy.get("resume_scoring"))
+    online_resume = _dict_config_value(resume_scoring.get("online"), resume_scoring.get("onlineResume"), resume_scoring.get("online_resume"))
+    offline_resume = _dict_config_value(resume_scoring.get("offline"), resume_scoring.get("offlineResume"), resume_scoring.get("offline_resume"))
+    composite_scoring = _dict_config_value(strategy.get("compositeScoring"), strategy.get("composite_scoring"))
+    composite_scoring_text = (
+        strategy.get("compositeScoring")
+        if isinstance(strategy.get("compositeScoring"), str)
+        else strategy.get("composite_scoring")
+        if isinstance(strategy.get("composite_scoring"), str)
+        else None
+    )
+    if not _has_config_value(strategy.get("onlineResumeCriteria"), strategy.get("online_resume_criteria"), online_resume.get("criteria")):
+        missing.append("onlineResumeCriteria")
+    if not _has_config_value(online_resume.get("passThreshold"), online_resume.get("pass_threshold"), strategy.get("onlineResumePass")):
+        missing.append("onlineResumePass")
+    if not _has_config_value(strategy.get("offlineResumeCriteria"), strategy.get("offline_resume_criteria"), offline_resume.get("criteria")):
+        missing.append("offlineResumeCriteria")
+    if not _has_config_value(offline_resume.get("passThreshold"), offline_resume.get("pass_threshold"), strategy.get("offlineResumePass")):
+        missing.append("offlineResumePass")
+    if not _has_config_value(composite_scoring_text, strategy.get("composite_scoring_text"), composite_scoring.get("criteria")):
+        missing.append("compositeScoring")
+    if not _has_config_value(composite_scoring.get("passThreshold"), composite_scoring.get("pass_threshold"), strategy.get("compositePass")):
+        missing.append("compositePass")
+    if not _has_config_value(composite_scoring.get("manualReviewMin"), composite_scoring.get("manual_review_min"), strategy.get("manualReviewMin")):
+        missing.append("manualReviewMin")
+    return missing
+
+
+def _has_config_value(*values: Any) -> bool:
+    return any(value is not None and str(value).strip() for value in values)
+
+
+def _dict_config_value(*values: Any) -> dict[str, Any]:
+    for value in values:
+        if isinstance(value, dict):
+            return dict(value)
+    return {}
+
+
+def _snake_case_value(record: dict[str, Any], camel_key: str) -> Any:
+    snake_key = "".join(
+        f"_{char.lower()}" if char.isupper() else char
+        for char in camel_key
+    )
+    return record.get(snake_key)
+
+
+def _create_saved_automation_run(
+    session: Session,
+    *,
+    definition: AgentDefinition,
+    requested_by: str,
+) -> dict[str, Any]:
+    automation_config = _automation_recruiting_config(definition)
+    errors = _automation_recruiting_config_errors(automation_config)
+    if errors:
+        raise ValueError("automation_recruiting_config incomplete: " + "; ".join(errors))
+    selected_job_ids = _selected_automation_job_ids(automation_config)
+
+    job_strategies = dict(
+        automation_config.get("jobStrategies")
+        or automation_config.get("job_strategies")
+        or {}
+    )
+    job_plans = [
+        {
+            "job_description_id": job_id,
+            "strategy": dict(job_strategies.get(job_id) or {}),
+        }
+        for job_id in selected_job_ids
+    ]
+    tool_approval_policy = dict(
+        automation_config.get("toolApprovalPolicy")
+        or automation_config.get("tool_approval_policy")
+        or {}
+    )
+    execution_sop = dict(
+        automation_config.get("executionSop")
+        or automation_config.get("execution_sop")
+        or {}
+    )
+    activation_policy = _structured_activation_policy(automation_config)
+    resume_policy = dict(
+        automation_config.get("resumePolicy")
+        or automation_config.get("resume_policy")
+        or {}
+    )
+    sync_policy = dict(
+        automation_config.get("syncPolicy")
+        or automation_config.get("sync_policy")
+        or {}
+    )
+    target_recruiting_site = _target_recruiting_site_from_sop(execution_sop)
+    missing_site_fields = [
+        label
+        for key, label in (
+            ("entry_url", "siteEntryUrl"),
+        )
+        if not target_recruiting_site.get(key)
+    ]
+    if missing_site_fields:
+        raise ValueError(
+            "automation_recruiting_config missing target recruiting site fields: "
+            + ", ".join(missing_site_fields)
+        )
+    compiled_sop_prompt = _compiled_automation_sop_prompt(
+        execution_sop=execution_sop,
+        target_recruiting_site=target_recruiting_site,
+        job_plans=job_plans,
+    )
+    execution_sop["compiledPrompt"] = compiled_sop_prompt
+    site_instruction = (
+        f"招聘入口 URL：{target_recruiting_site.get('entry_url')}；"
+        "复用人工已登录的浏览器会话。"
+    )
+    payload = AutonomousTriggerRequest(
+        title=f"多 JD 自动化招聘 · {len(selected_job_ids)} 个 JD",
+        instruction=(
+            "按已保存的自动化招聘配置启动 Agent。\n"
+            f"本次运行覆盖 {len(selected_job_ids)} 个 JD；"
+            f"{site_instruction}\n"
+            "执行时必须遵守 JD 策略、执行 SOP、站点边界、审批规则和同步规则；"
+            "模型负责生成评分、证据和建议，阈值、权限和节奏由产品配置控制。\n\n"
+            "## 自动化招聘执行 SOP\n"
+            f"{compiled_sop_prompt}"
+        ),
+        kind="multi_jd_recruiting",
+        requested_by=requested_by,
+        constraints={
+            "scope_kind": "global",
+            "plan_kind": "multi_jd_recruiting",
+            "selected_job_description_ids": selected_job_ids,
+            "execution_sop": execution_sop,
+            "target_recruiting_site": target_recruiting_site,
+            "activation_policy": activation_policy,
+            "resume_policy": resume_policy,
+            "sync_policy": sync_policy,
+            "business_policy_overlay": {"job_plans": job_plans},
+            "runtime_controls": _automation_runtime_controls(
+                automation_config,
+                activation_policy=activation_policy,
+            ),
+            "tool_approval_policy": tool_approval_policy,
+        },
+        success_criteria={
+            "requires_online_resume_score": True,
+            "requires_offline_resume_score_for_complete_candidates": True,
+            "requires_composite_score": True,
+            "pass_decision_source": "score_thresholds",
+            "executable_job_source": "saved_automation_recruiting_config",
+        },
+        context_hints={
+            "launch_plan": {
+                "plan_kind": "multi_jd_recruiting",
+                "selected_job_description_ids": selected_job_ids,
+                "job_count": len(selected_job_ids),
+                "target_recruiting_site": target_recruiting_site,
+            }
+        },
+    )
+    return _create_autonomous_run(session, definition=definition, payload=payload, agent_kind="autonomous")
+
+
+def _automation_recruiting_config(definition: AgentDefinition) -> dict[str, Any]:
+    config = _product_config(definition, "autonomous")
+    raw = (
+        config.get("automation_recruiting_config")
+        or config.get("automationRecruitingConfig")
+        or config.get("automation_config")
+        or {}
+    )
+    if isinstance(raw, dict):
+        return dict(raw)
+    return {}
+
+
+def _jd_sync_config(definition: AgentDefinition) -> dict[str, Any]:
+    config = _product_config(definition, "jd_sync")
+    raw = (
+        config.get("jd_sync_config")
+        or config.get("jdSyncConfig")
+        or config.get("automation_config")
+        or {}
+    )
+    if isinstance(raw, dict) and raw:
+        return dict(raw)
+    return _automation_recruiting_config(definition)
+
+
+_LEGACY_ACTIVATION_POLICY_KEYS = {
+    "priorityPreset",
+    "priority_preset",
+    "startConditionsText",
+    "start_conditions_text",
+    "stopConditionsText",
+    "stop_conditions_text",
+    "priorityWeightsText",
+    "priority_weights_text",
+    "cooldownRulesText",
+    "cooldown_rules_text",
+}
+
+
+def _structured_activation_policy(automation_config: dict[str, Any]) -> dict[str, Any]:
+    raw = (
+        automation_config.get("activationPolicy")
+        or automation_config.get("activation_policy")
+        or {}
+    )
+    if not isinstance(raw, dict):
+        raw = {}
+    activation_policy = {
+        key: value
+        for key, value in dict(raw).items()
+        if key not in _LEGACY_ACTIVATION_POLICY_KEYS
+    }
+    activation_policy["programmaticAuthority"] = True
+    return activation_policy
+
+
+def _target_recruiting_site_from_sop(execution_sop: dict[str, Any]) -> dict[str, Any]:
+    def _text(*keys: str) -> str | None:
+        for key in keys:
+            value = execution_sop.get(key)
+            if value is None:
+                continue
+            normalized = str(value).strip()
+            if normalized:
+                return normalized
+        return None
+
+    access_rules_raw = _text("siteAccessRulesText", "site_access_rules_text", "siteAccessRules", "site_access_rules")
+    access_rules = [
+        line.strip()
+        for line in (access_rules_raw or "").splitlines()
+        if line.strip()
+    ]
+    return {
+        "entry_url": _text("siteEntryUrl", "site_entry_url", "entryUrl", "entry_url"),
+        "access_rules": access_rules,
+    }
+
+
+def _compiled_automation_sop_prompt(
+    *,
+    execution_sop: dict[str, Any],
+    target_recruiting_site: dict[str, Any],
+    job_plans: list[dict[str, Any]],
+) -> str:
+    steps_text = str(
+        execution_sop.get("stepsText")
+        or execution_sop.get("steps_text")
+        or ""
+    ).strip()
+    selected_job_lines = [
+        f"{index}. {plan.get('job_description_id')}"
+        for index, plan in enumerate(job_plans, start=1)
+        if plan.get("job_description_id")
+    ]
+    return "\n".join(
+        [
+            "## 本次运行入口与范围",
+            f"招聘入口 URL：{target_recruiting_site.get('entry_url') or '未配置'}",
+            "浏览器会话：复用人工已登录的浏览器会话；Agent 不处理登录、验证码、账号切换或绕过风控。",
+            "选中 JD：",
+            "\n".join(selected_job_lines) if selected_job_lines else "- 未选择 JD",
+            "JD 策略来源：使用本次运行随附的逐 JD 筛选、在线简历评分、离线简历评分、综合评分和人工复核规则。",
+            "",
+            "## 执行 SOP",
+            steps_text,
+        ]
+    )
+
+
+def _automation_runtime_controls(
+    automation_config: dict[str, Any],
+    *,
+    activation_policy: dict[str, Any],
+) -> dict[str, Any]:
+    job_strategies = dict(
+        automation_config.get("jobStrategies")
+        or automation_config.get("job_strategies")
+        or {}
+    )
+    thresholds: dict[str, Any] = {}
+    for job_id, strategy in job_strategies.items():
+        if not isinstance(strategy, dict):
+            continue
+        thresholds[str(job_id)] = {
+            "resume_scoring": dict(strategy.get("resumeScoring") or strategy.get("resume_scoring") or {}),
+            "composite_scoring": dict(strategy.get("compositeScoring") or strategy.get("composite_scoring") or {}),
+        }
+    return {
+        "decision_authority": "programmatic_thresholds_and_approval_gates",
+        "activation_policy": dict(activation_policy),
+        "score_thresholds_by_job": thresholds,
+    }
+
+
 def _get_agent_session(session: Session, definition: AgentDefinition, *, kind: AgentKind) -> AgentSession | None:
     stmt = (
         select(AgentSession)
@@ -877,13 +1645,14 @@ def _find_open_autonomous_run(
     session: Session,
     *,
     session_id: str,
+    agent_kind: AgentKind,
     exclude_run_id: str | None = None,
 ) -> AgentRun | None:
     stmt = (
         select(AgentRun)
         .where(
             AgentRun.session_id == session_id,
-            AgentRun.agent_kind == "autonomous",
+            AgentRun.agent_kind == agent_kind,
             AgentRun.status.in_(AUTONOMOUS_OPEN_RUN_STATUSES),
         )
         .order_by(AgentRun.updated_at.desc(), AgentRun.id.desc())
@@ -1099,9 +1868,10 @@ def _serialize_workspace(
             "memories": memories,
             "skills": _list_workspace_skills(session),
             "tools": _list_workspace_tools(container),
+            "mcps": _list_workspace_mcps(container),
             "config": _workspace_config(definition, kind=kind, provider_label=provider_label, model_label=model_label),
-            "workspace_control": _workspace_control_payload(container.heartbeat.status()) if kind == "autonomous" else None,
-            "workspaceControl": _workspace_control_payload(container.heartbeat.status()) if kind == "autonomous" else None,
+            "workspace_control": None,
+            "workspaceControl": None,
         }
 
     runs = _list_workspace_runs(session, definition, kind)
@@ -1119,6 +1889,7 @@ def _serialize_workspace(
         "conversations": [
             _autonomous_primary_conversation_summary(
                 definition=definition,
+                kind=kind,
                 latest_run=latest_run,
             )
         ],
@@ -1127,6 +1898,7 @@ def _serialize_workspace(
         "memories": memories,
         "skills": _list_workspace_skills(session),
         "tools": _list_workspace_tools(container),
+        "mcps": _list_workspace_mcps(container),
         "config": _workspace_config(definition, kind=kind, provider_label=provider_label, model_label=model_label),
         "workspace_control": _workspace_control_payload(container.heartbeat.status()),
         "workspaceControl": _workspace_control_payload(container.heartbeat.status()),
@@ -1159,13 +1931,14 @@ def _serialize_conversation_record(
             ],
         }
 
-    definition = _resolve_agent_definition(session, "autonomous")
-    if conversation_id == AUTONOMOUS_PRIMARY_CONVERSATION_ID:
-        return _serialize_autonomous_primary_conversation_record(session, definition=definition)
+    definition = _resolve_agent_definition(session, kind)
+    primary_conversation_id = _primary_conversation_id(kind)
+    if conversation_id == primary_conversation_id:
+        return _serialize_autonomous_primary_conversation_record(session, definition=definition, kind=kind)
 
-    run = _resolve_run_for_kind(session, "autonomous", conversation_id)
+    run = _resolve_run_for_kind(session, kind, conversation_id)
     if run is None:
-        raise HTTPException(status_code=404, detail="Conversation not found for agent kind: autonomous")
+        raise HTTPException(status_code=404, detail=f"Conversation not found for agent kind: {kind}")
     return {
         "conversation": _autonomous_run_conversation_summary(run),
         "messages": [_autonomous_run_message(conversation_id, run)],
@@ -1438,9 +2211,11 @@ def _assistant_run_from_conversation(conversation: dict[str, Any]) -> dict[str, 
 def _autonomous_primary_conversation_summary(
     *,
     definition: AgentDefinition,
+    kind: AgentKind = "autonomous",
     latest_run: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    projection = _product_projection(definition, "autonomous")
+    projection = _product_projection(definition, kind)
+    conversation_id = _primary_conversation_id(kind)
     updated_at = (
         None if latest_run is None else latest_run.get("updatedAt")
     ) or _serialize_timestamp(definition.updated_at)
@@ -1449,11 +2224,11 @@ def _autonomous_primary_conversation_summary(
         None if latest_run is None else str(latest_run.get("summary") or "").strip()
     ) or str(projection.get("description") or definition.description or "").strip() or None
     return {
-        "id": AUTONOMOUS_PRIMARY_CONVERSATION_ID,
-        "conversation_id": AUTONOMOUS_PRIMARY_CONVERSATION_ID,
-        "conversationId": AUTONOMOUS_PRIMARY_CONVERSATION_ID,
-        "agent_kind": "autonomous",
-        "agentKind": "autonomous",
+        "id": conversation_id,
+        "conversation_id": conversation_id,
+        "conversationId": conversation_id,
+        "agent_kind": kind,
+        "agentKind": kind,
         "title": str(projection.get("name") or "Autonomous").strip() or "Autonomous",
         "preview": preview,
         "status": status,
@@ -1473,8 +2248,8 @@ def _autonomous_run_conversation_summary(run: AgentRun) -> dict[str, Any]:
         "id": run.run_id or run.id,
         "conversation_id": run.run_id or run.id,
         "conversationId": run.run_id or run.id,
-        "agent_kind": "autonomous",
-        "agentKind": "autonomous",
+        "agent_kind": run.agent_kind,
+        "agentKind": run.agent_kind,
         "title": _run_title(run),
         "preview": _run_summary(run),
         "status": status,
@@ -1513,7 +2288,7 @@ def _autonomous_run_message(conversation_id: str, run: AgentRun) -> dict[str, An
 
 def _autonomous_turn_message(conversation_id: str, run: AgentRun, turn: AgentTurnRecord) -> dict[str, Any]:
     final_output = str((turn.turn_metadata or {}).get("final_output") or "").strip()
-    created_at = _serialize_timestamp(turn.created_at)
+    created_at = _serialize_timestamp(turn.updated_at or turn.created_at)
     event_kind = _autonomous_turn_event_kind(turn, final_output=final_output)
     return {
         "id": turn.turn_id,
@@ -1544,24 +2319,94 @@ def _autonomous_event_message(conversation_id: str, event: dict[str, Any]) -> di
     created_at = event.get("occurredAt") or event.get("occurred_at")
     event_type = str(event.get("event_type") or event.get("eventType") or "")
     payload = dict(event.get("payload") or {})
+    data = dict(payload.get("data") or {})
+    tool_name = str(data.get("tool_name") or data.get("name") or "").strip()
+    payload_kind = str(data.get("kind") or "").strip()
     return {
         "id": str(event.get("id") or uuid4().hex),
         "conversation_id": conversation_id,
         "conversationId": conversation_id,
         "role": "system",
         "kind": "status",
-        "content": str(event.get("message") or event.get("event_type") or "Autonomous event"),
+        "title": _runtime_event_title(event_type, data),
+        "content": _runtime_event_content(event_type, data) or str(event.get("message") or event.get("event_type") or "Autonomous event"),
         "created_at": created_at,
         "createdAt": created_at,
         "status": _event_message_status(event_type),
         "metadata": {
             "eventKind": _runtime_event_kind(event_type, payload),
+            "traceKind": _runtime_event_trace_kind(event_type, payload),
             "itemType": event_type,
             "message_type": "event",
             "event_type": event_type,
+            "payloadKind": payload_kind,
+            "toolName": tool_name or None,
+            "toolUseId": data.get("tool_use_id"),
+            "toolCallId": data.get("tool_call_id"),
+            "isError": data.get("is_error"),
             "payload": payload,
         },
     }
+
+
+def _runtime_event_title(event_type: str, data: dict[str, Any]) -> str | None:
+    tool_name = str(data.get("tool_name") or data.get("name") or "").strip()
+    kind = str(data.get("kind") or event_type or "").strip().lower()
+    if kind == "tool_input_streamed":
+        return f"准备工具调用：{tool_name}" if tool_name else "准备工具调用"
+    if kind == "tool_use_completed":
+        return f"工具输入完成：{tool_name}" if tool_name else "工具输入完成"
+    if kind == "tool_call_started":
+        return f"调用工具：{tool_name}" if tool_name else "调用工具"
+    if kind == "tool_result_ready":
+        return f"工具结果：{tool_name}" if tool_name else "工具结果"
+    if kind == "tool_error":
+        return f"工具异常：{tool_name}" if tool_name else "工具异常"
+    if event_type == "permission_requested":
+        return f"等待确认：{tool_name}" if tool_name else "等待确认"
+    return None
+
+
+def _runtime_event_content(event_type: str, data: dict[str, Any]) -> str | None:
+    tool_name = str(data.get("tool_name") or data.get("name") or "").strip()
+    kind = str(data.get("kind") or event_type or "").strip().lower()
+    if kind == "tool_input_streamed":
+        content = _compact_event_payload(data.get("content"))
+        lines = [f"工具：{tool_name}" if tool_name else "工具输入生成中"]
+        if content:
+            lines.append(f"参数草稿：{content}")
+        return "\n".join(lines)
+    if kind in {"tool_call_started", "tool_use_completed"}:
+        arguments = data.get("input")
+        if isinstance(arguments, dict) and arguments:
+            label = "最终参数" if kind == "tool_use_completed" else "参数"
+            return f"工具：{tool_name}\n{label}：{json.dumps(arguments, ensure_ascii=False, default=str)}"
+        fallback = "工具输入完成" if kind == "tool_use_completed" else "工具调用已开始"
+        return f"工具：{tool_name}" if tool_name else fallback
+    if kind in {"tool_result_ready", "tool_error"}:
+        content = _compact_event_payload(data.get("content"))
+        status = "异常" if bool(data.get("is_error")) or kind == "tool_error" else "完成"
+        lines = [f"工具：{tool_name}" if tool_name else "工具结果", f"状态：{status}"]
+        if content:
+            lines.append(f"结果：{content}")
+        return "\n".join(lines)
+    if event_type == "permission_requested":
+        reason = str(data.get("reason") or "").strip()
+        lines = [f"工具：{tool_name}" if tool_name else "工具请求人工确认"]
+        if reason:
+            lines.append(f"原因：{reason}")
+        return "\n".join(lines)
+    return None
+
+
+def _compact_event_payload(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+    else:
+        text = json.dumps(value, ensure_ascii=False, default=str)
+    return text[:640] if text else None
 
 
 def _autonomous_run_status_text(run: AgentRun) -> str:
@@ -1599,21 +2444,35 @@ def _autonomous_turn_event_kind(turn: AgentTurnRecord, *, final_output: str) -> 
 
 def _runtime_event_kind(event_type: str, payload: dict[str, Any]) -> str:
     normalized = event_type.strip().lower()
-    payload_kind = str(payload.get("kind") or "").strip().lower()
+    data = dict(payload.get("data") or {})
+    payload_kind = str(data.get("kind") or payload.get("kind") or "").strip().lower()
     source = f"{normalized} {payload_kind}"
     if "permission" in source or "waiting_human" in source or "blocked" in source:
         return "confirmation"
-    if payload_kind in {"tool_call_started", "tool_use_completed"}:
+    if payload_kind in {"tool_input_streamed", "tool_call_started", "tool_use_completed"}:
         return "tool_call"
     if payload_kind in {"tool_result_ready", "tool_error"}:
         return "execution_result"
-    if "tool_call" in source or "tool_use" in source or "command_execution" in source or "web_search" in source:
+    if "tool_call" in source or "tool_use" in source or "pending_user_input_after_next_tool_call" in source or "web_search" in source:
         return "tool_call"
     if "tool_result" in source or "turn_completed" in source:
         return "execution_result"
     if "llm_invocation" in source or "reasoning" in source or "thinking" in source:
         return "thinking"
     return "thinking"
+
+
+def _runtime_event_trace_kind(event_type: str, payload: dict[str, Any]) -> str:
+    normalized = event_type.strip().lower()
+    data = dict(payload.get("data") or {})
+    payload_kind = str(data.get("kind") or payload.get("kind") or "").strip().lower()
+    if normalized == "permission_requested":
+        return "permission_requested"
+    if payload_kind in {"tool_input_streamed", "tool_call_started", "tool_use_completed"}:
+        return "tool_call"
+    if payload_kind in {"tool_result_ready", "tool_error"}:
+        return "tool_result"
+    return _runtime_event_kind(event_type, payload)
 
 
 def _autonomous_turn_text(turn: AgentTurnRecord) -> str:
@@ -1661,9 +2520,9 @@ def _message_sort_rank(message: dict[str, Any]) -> str:
         message_type = str(metadata.get("message_type") or "").strip().lower()
         if message_type == "run":
             return "1"
-        if message_type == "turn":
-            return "2"
         if message_type == "event":
+            return "2"
+        if message_type == "turn":
             return "3"
     return "9"
 
@@ -1694,12 +2553,15 @@ def _serialize_autonomous_primary_conversation_record(
     session: Session,
     *,
     definition: AgentDefinition,
+    kind: AgentKind = "autonomous",
 ) -> dict[str, Any]:
-    agent_session = _get_agent_session(session, definition, kind="autonomous")
+    agent_session = _get_agent_session(session, definition, kind=kind)
+    conversation_id = _primary_conversation_id(kind)
     if agent_session is None:
         return {
             "conversation": _autonomous_primary_conversation_summary(
                 definition=definition,
+                kind=kind,
                 latest_run=None,
             ),
             "messages": [],
@@ -1710,7 +2572,7 @@ def _serialize_autonomous_primary_conversation_record(
             select(AgentRun)
             .where(
                 AgentRun.session_id == agent_session.id,
-                AgentRun.agent_kind == "autonomous",
+                AgentRun.agent_kind == kind,
             )
             .order_by(AgentRun.created_at.desc(), AgentRun.id.desc())
             .limit(20)
@@ -1719,6 +2581,7 @@ def _serialize_autonomous_primary_conversation_record(
     recent_runs.reverse()
     run_ids = [run.id for run in recent_runs]
     turns_by_run_id: dict[str, list[AgentTurnRecord]] = {run_id: [] for run_id in run_ids}
+    events_by_run_id: dict[str, list[dict[str, Any]]] = {run_id: [] for run_id in run_ids}
     if run_ids:
         turns = session.scalars(
             select(AgentTurnRecord)
@@ -1727,14 +2590,33 @@ def _serialize_autonomous_primary_conversation_record(
         ).all()
         for turn in turns:
             turns_by_run_id.setdefault(turn.run_pk, []).append(turn)
+        runtime_events = session.scalars(
+            select(AgentRuntimeEvent)
+            .where(
+                AgentRuntimeEvent.run_id.in_(run_ids),
+                AgentRuntimeEvent.event_type.in_(("tool_event", "permission_requested")),
+            )
+            .order_by(AgentRuntimeEvent.occurred_at.asc(), AgentRuntimeEvent.seq.asc(), AgentRuntimeEvent.id.asc())
+            .limit(2000)
+        ).all()
+        raw_events_by_run_id: dict[str, list[dict[str, Any]]] = {run_id: [] for run_id in run_ids}
+        for event in runtime_events:
+            if not event.run_id:
+                continue
+            event_payload = RuntimeEventRead.model_validate(event).model_dump(by_alias=True)
+            raw_events_by_run_id.setdefault(event.run_id, []).append(event_payload)
+        for run_id, raw_events in raw_events_by_run_id.items():
+            events_by_run_id[run_id] = _project_primary_timeline_runtime_events(raw_events)
     latest_run_payload = None if not recent_runs else _serialize_run(recent_runs[-1])
 
     messages: list[dict[str, Any]] = []
     for run in recent_runs:
-        run_message = _autonomous_run_message(AUTONOMOUS_PRIMARY_CONVERSATION_ID, run)
+        run_message = _autonomous_run_message(conversation_id, run)
         messages.append(run_message)
+        for event in events_by_run_id.get(run.id, []):
+            messages.append(_autonomous_event_message(conversation_id, event))
         for turn in turns_by_run_id.get(run.id, []):
-            turn_message = _autonomous_turn_message(AUTONOMOUS_PRIMARY_CONVERSATION_ID, run, turn)
+            turn_message = _autonomous_turn_message(conversation_id, run, turn)
             turn_content = str(turn_message.get("content") or "").strip()
             if not turn_content or turn_content == str(run_message.get("content") or "").strip():
                 continue
@@ -1746,9 +2628,85 @@ def _serialize_autonomous_primary_conversation_record(
     return {
         "conversation": _autonomous_primary_conversation_summary(
             definition=definition,
+            kind=kind,
             latest_run=latest_run_payload,
         ),
         "messages": sorted(messages, key=_agent_message_sort_key),
+    }
+
+
+def _project_primary_timeline_runtime_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    projected: list[dict[str, Any]] = []
+    stream_groups: dict[str, dict[str, Any]] = {}
+    for event in events:
+        event_type = str(event.get("event_type") or event.get("eventType") or "").strip().lower()
+        payload = dict(event.get("payload") or {})
+        data = dict(payload.get("data") or {})
+        kind = str(data.get("kind") or "").strip().lower()
+        if event_type == "tool_event" and kind == "tool_use_delta":
+            stream_key = str(data.get("id") or data.get("tool_use_id") or event.get("turn_id") or event.get("id") or "")
+            if not stream_key:
+                continue
+            group = stream_groups.setdefault(
+                stream_key,
+                {
+                    "event": event,
+                    "name": "",
+                    "deltas": [],
+                },
+            )
+            if str(data.get("name") or "").strip():
+                group["name"] = str(data.get("name") or "").strip()
+            delta = str(data.get("delta") or "")
+            if delta:
+                group["deltas"].append(delta)
+            continue
+        if _is_primary_timeline_runtime_event(event):
+            projected.append(event)
+
+    for group in stream_groups.values():
+        aggregated = _aggregated_tool_stream_event(group)
+        aggregated_data = dict(dict(aggregated.get("payload") or {}).get("data") or {})
+        if str(aggregated_data.get("content") or "").strip():
+            projected.append(aggregated)
+    return sorted(projected, key=lambda item: (_timestamp_sort_value(item.get("occurredAt") or item.get("occurred_at")), int(item.get("seq") or 0), str(item.get("id") or "")))
+
+
+def _aggregated_tool_stream_event(group: dict[str, Any]) -> dict[str, Any]:
+    event = dict(group.get("event") or {})
+    payload = dict(event.get("payload") or {})
+    data = dict(payload.get("data") or {})
+    name = str(group.get("name") or data.get("name") or data.get("tool_name") or "").strip()
+    arguments_text = "".join(str(item) for item in group.get("deltas") or []).strip()
+    data.update(
+        {
+            "kind": "tool_input_streamed",
+            "tool_name": name,
+            "name": name,
+            "content": arguments_text,
+        }
+    )
+    payload["data"] = data
+    event["id"] = f"{event.get('id') or uuid4().hex}:stream"
+    event["message"] = "tool_input_streamed"
+    event["payload"] = payload
+    return event
+
+
+def _is_primary_timeline_runtime_event(event: dict[str, Any]) -> bool:
+    event_type = str(event.get("event_type") or event.get("eventType") or "").strip().lower()
+    if event_type == "permission_requested":
+        return True
+    if event_type != "tool_event":
+        return False
+    payload = dict(event.get("payload") or {})
+    data = dict(payload.get("data") or {})
+    return str(data.get("kind") or "").strip().lower() in {
+        "tool_input_streamed",
+        "tool_call_started",
+        "tool_use_completed",
+        "tool_result_ready",
+        "tool_error",
     }
 
 
@@ -1940,6 +2898,14 @@ def _list_workspace_tools(container: AppContainer) -> list[dict[str, Any]]:
             )
             seen_names.add(tool_name)
     return tools
+
+
+def _list_workspace_mcps(container: AppContainer) -> list[dict[str, Any]]:
+    return [
+        McpServerRead.model_validate(item).model_dump(by_alias=True)
+        for item in container.mcp_registry.list_servers()
+        if bool(item.get("enabled", True) if isinstance(item, dict) else getattr(item, "enabled", True))
+    ]
 
 
 def _normalize_mcp_tool_payload(tool: Any) -> dict[str, Any]:

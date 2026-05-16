@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from itertools import count
 from typing import Iterator
@@ -50,6 +51,11 @@ class InteractionEngineConfig:
     max_history_messages: int | None = None
     compaction_summary_max_chars: int = 2000
     initial_seq: int = 1
+    runtime: dict[str, object] = field(default_factory=dict)
+    pending_user_input_after_next_tool_call_provider: Callable[
+        [TurnContext, ToolCall, ToolResult],
+        list[LLMMessage],
+    ] | None = None
 
 
 @dataclass(slots=True)
@@ -143,6 +149,10 @@ class InteractionEngine:
                 if self._abort_requested():
                     yield self._interrupted_output(pending.turn_id)
                     return
+                yield from self._inject_pending_user_input_after_next_tool_call(pending.context, pending.tool_call)
+                if self._abort_requested():
+                    yield self._interrupted_output(pending.turn_id)
+                    return
             else:
                 result = ToolResult(
                     tool_call_id=pending.tool_call.id,
@@ -174,6 +184,7 @@ class InteractionEngine:
             conversation_id=self.config.conversation_id,
             tools=self.config.tools,
             abort_signal=self._abort_controller.signal,
+            runtime=dict(self.config.runtime or {}),
         )
         for invocation_index in range(start_invocation_index, self.config.max_llm_invocations):
             if self._abort_requested():
@@ -277,12 +288,13 @@ class InteractionEngine:
                         "tool_name": tool_call.name,
                         "tool_use_id": tool_call.tool_use_id,
                         "tool_call_id": tool_call.id,
+                        "input": dict(tool_call.input or {}),
                     },
                 )
                 if self._abort_requested():
                     yield self._interrupted_output(turn_id)
                     return
-                if self._requires_permission(registry, tool_call):
+                if self._requires_permission(registry, tool_call, context):
                     self.pending_permission = PendingPermissionState(
                         turn_id=turn_id,
                         tool_call=tool_call,
@@ -309,6 +321,10 @@ class InteractionEngine:
                     yield self._interrupted_output(turn_id)
                     return
                 yield from self._run_tool_call(registry, tool_call, context)
+                if self._abort_requested():
+                    yield self._interrupted_output(turn_id)
+                    return
+                yield from self._inject_pending_user_input_after_next_tool_call(context, tool_call)
                 if self._abort_requested():
                     yield self._interrupted_output(turn_id)
                     return
@@ -340,17 +356,25 @@ class InteractionEngine:
             "summary": summary.content if summary is not None else "",
         }
 
-    def _requires_permission(self, registry: ToolRegistry, call: ToolCall) -> bool:
+    def _requires_permission(self, registry: ToolRegistry, call: ToolCall, context: TurnContext) -> bool:
         try:
             tool = registry.get(call.name)
         except Exception:
             return False
         metadata = dict(tool.metadata or {})
-        return bool(
+        configured_mode = _configured_tool_permission_mode(context.runtime, call.name)
+        hard_requires_confirmation = bool(
             metadata.get("requires_confirmation")
             or metadata.get("external_target")
             or call.input.get("requires_confirmation")
         )
+        if hard_requires_confirmation:
+            return True
+        if configured_mode == "approval":
+            return True
+        if configured_mode == "auto":
+            return False
+        return False
 
     def _run_tool(self, registry: ToolRegistry, call: ToolCall, context: TurnContext) -> ToolResult:
         try:
@@ -368,6 +392,7 @@ class InteractionEngine:
     def _run_tool_call(self, registry: ToolRegistry, call: ToolCall, context: TurnContext) -> Iterator[InteractionOutput]:
         result = self._run_tool(registry, call, context)
         yield from self._record_tool_result(result, call.turn_id)
+        context.runtime["_last_tool_result"] = result
 
     def _record_tool_result(self, result: ToolResult, turn_id: str) -> Iterator[InteractionOutput]:
         self.transcript.record_tool_result(self.config.conversation_id, result)
@@ -390,6 +415,42 @@ class InteractionEngine:
                 "tool_call_id": result.tool_call_id,
                 "is_error": result.is_error,
                 "content": result.content,
+            },
+        )
+
+    def _inject_pending_user_input_after_next_tool_call(
+        self,
+        context: TurnContext,
+        call: ToolCall,
+    ) -> Iterator[InteractionOutput]:
+        provider = self.config.pending_user_input_after_next_tool_call_provider
+        result = context.runtime.pop("_last_tool_result", None)
+        if provider is None or not isinstance(result, ToolResult):
+            return
+        messages = [
+            message
+            for message in provider(context, call, result)
+            if message.role == "user" and _message_text(message).strip()
+        ]
+        if not messages:
+            return
+        pending_input_ids: list[object] = []
+        for message in messages:
+            ids = message.metadata.get("pending_user_input_ids")
+            if isinstance(ids, list):
+                pending_input_ids.extend(ids)
+        self.history.append(messages)
+        self.transcript.record_messages(self.config.conversation_id, messages)
+        yield self._output(
+            "runtime_event",
+            context.turn_id,
+            {
+                "kind": "pending_user_input_after_next_tool_call_injected",
+                "message_count": len(messages),
+                "tool_name": call.name,
+                "tool_use_id": call.tool_use_id,
+                "tool_call_id": call.id,
+                "pending_user_input_ids": pending_input_ids,
             },
         )
 
@@ -437,6 +498,25 @@ def _message_text(message: LLMMessage) -> str:
         if isinstance(block, dict) and block.get("type") == "text":
             parts.append(str(block.get("text") or ""))
     return "".join(parts)
+
+
+def _configured_tool_permission_mode(runtime: dict[str, object], tool_name: str) -> str | None:
+    permission_policy = runtime.get("permission_policy")
+    if not isinstance(permission_policy, dict):
+        return None
+    tool_policy = permission_policy.get("tool_approval_policy") or permission_policy.get("toolApprovalPolicy")
+    if not isinstance(tool_policy, dict):
+        return None
+    default_mode = str(tool_policy.get("defaultMode") or tool_policy.get("default_mode") or "").strip().lower()
+    overrides = tool_policy.get("overrides")
+    if not isinstance(overrides, dict):
+        overrides = {}
+    mode = str(overrides.get(tool_name) or "").strip().lower()
+    if mode in {"approval", "auto"}:
+        return mode
+    if default_mode in {"approval", "auto"}:
+        return default_mode
+    return None
 
 
 def _tool_result_content(result: ToolResult) -> str:

@@ -115,6 +115,61 @@ def test_tool_loop_uses_injected_business_tool_without_bash() -> None:
     assert "cand-1" in str(second_request.messages[-1].content)
 
 
+def test_pending_user_input_after_next_tool_call_is_injected_before_next_model_step() -> None:
+    tool_use = ToolUse(id="call-1", name="observe", input={"page": "jobs"})
+    provider = FixtureLLMProvider(
+        responses=[
+            LLMResponse(
+                id="resp-1",
+                request_id="",
+                invocation_id="",
+                assistant_message=LLMMessage(role="assistant", content="", tool_uses=[tool_use]),
+                tool_uses=[tool_use],
+                stop_reason="tool_calls",
+            ),
+            LLMResponse(
+                id="resp-2",
+                request_id="",
+                invocation_id="",
+                assistant_message=LLMMessage(role="assistant", content="done"),
+            ),
+        ]
+    )
+    tool = ToolDefinition(
+        name="observe",
+        description="Observe something.",
+        schema=ToolSchema(
+            name="observe",
+            description="Observe something.",
+            input_schema={"type": "object"},
+        ),
+        handler=FunctionToolHandler(lambda args: {"ok": True}),
+    )
+
+    def _provider(context: TurnContext, call: ToolCall, result: ToolResult) -> list[LLMMessage]:
+        assert context.turn_id == call.turn_id
+        assert result.name == "observe"
+        return [LLMMessage(role="user", content="operator correction after tool")]
+
+    engine = InteractionEngine(
+        InteractionEngineConfig(
+            conversation_id="conv-after-tool",
+            provider=provider,
+            tools=[tool],
+            pending_user_input_after_next_tool_call_provider=_provider,
+        )
+    )
+
+    outputs = list(engine.submitMessage("run tool"))
+
+    assert any(
+        item.type == "runtime_event" and item.data["kind"] == "pending_user_input_after_next_tool_call_injected"
+        for item in outputs
+    )
+    assert provider.captured_requests[1].messages[-1].role == "user"
+    assert provider.captured_requests[1].messages[-1].content == "operator correction after tool"
+
+
 def test_llm_request_and_tool_context_receive_same_abort_signal() -> None:
     tool_use = ToolUse(id="call-1", name="capture_signal", input={})
     provider = FixtureLLMProvider(
@@ -271,6 +326,93 @@ def test_permission_resolution_continues_same_runtime_turn() -> None:
     assert second_request.messages[-2].tool_uses[0].id == "call-approval"
     assert second_request.messages[-1].role == "tool"
     assert "hello" in str(second_request.messages[-1].content)
+
+
+def test_runtime_permission_policy_can_force_tool_confirmation() -> None:
+    tool_use = ToolUse(id="call-forced", name="send_message", input={"text": "hello"})
+    provider = FixtureLLMProvider(
+        responses=[
+            LLMResponse(
+                id="resp-1",
+                request_id="",
+                invocation_id="",
+                assistant_message=LLMMessage(role="assistant", content="", tool_uses=[tool_use]),
+                tool_uses=[tool_use],
+                stop_reason="tool_calls",
+            )
+        ]
+    )
+    tool = ToolDefinition(
+        name="send_message",
+        description="Send a message.",
+        schema=ToolSchema(name="send_message", description="Send a message.", input_schema={"type": "object"}),
+        handler=FunctionToolHandler(lambda args: {"sent": args["text"]}),
+        metadata={"requires_confirmation": False},
+    )
+    engine = InteractionEngine(
+        InteractionEngineConfig(
+            conversation_id="conv-forced-approval",
+            provider=provider,
+            tools=[tool],
+            runtime={
+                "permission_policy": {
+                    "tool_approval_policy": {
+                        "defaultMode": "auto",
+                        "overrides": {"send_message": "approval"},
+                    }
+                }
+            },
+        )
+    )
+
+    outputs = list(engine.submitMessage("send hello"))
+
+    assert any(item.type == "permission_requested" for item in outputs)
+    assert engine.pending_permission is not None
+
+
+def test_runtime_permission_policy_auto_override_cannot_bypass_tool_metadata_confirmation() -> None:
+    tool_use = ToolUse(id="call-auto", name="send_message", input={"text": "hello"})
+    provider = FixtureLLMProvider(
+        responses=[
+            LLMResponse(
+                id="resp-1",
+                request_id="",
+                invocation_id="",
+                assistant_message=LLMMessage(role="assistant", content="", tool_uses=[tool_use]),
+                tool_uses=[tool_use],
+                stop_reason="tool_calls",
+            ),
+            LLMResponse(id="resp-2", request_id="", invocation_id="", assistant_message=LLMMessage(role="assistant", content="done")),
+        ]
+    )
+    tool = ToolDefinition(
+        name="send_message",
+        description="Send a message.",
+        schema=ToolSchema(name="send_message", description="Send a message.", input_schema={"type": "object"}),
+        handler=FunctionToolHandler(lambda args: {"sent": args["text"]}),
+        metadata={"requires_confirmation": True},
+    )
+    engine = InteractionEngine(
+        InteractionEngineConfig(
+            conversation_id="conv-auto-approval",
+            provider=provider,
+            tools=[tool],
+            runtime={
+                "permission_policy": {
+                    "tool_approval_policy": {
+                        "defaultMode": "approval",
+                        "overrides": {"send_message": "auto"},
+                    }
+                }
+            },
+        )
+    )
+
+    outputs = list(engine.submitMessage("send hello"))
+
+    assert any(item.type == "permission_requested" for item in outputs)
+    assert engine.pending_permission is not None
 
 
 def test_permission_resolution_can_resume_from_transcript_checkpoint() -> None:

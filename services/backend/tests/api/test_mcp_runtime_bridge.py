@@ -458,10 +458,10 @@ def test_container_build_registers_enabled_virtualhid_mcp_tools(tmp_path: Path, 
     tool = reloaded.scene_context_tool_registry.tools["hid_state"]
     assert tool.metadata["external_tool"] is True
     assert tool.metadata["mcp_server_key"] == "virtualhid"
-    assert set(tool.metadata["capabilities"]) == {"scene", "computer", "computer_read"}
+    assert set(tool.metadata["capabilities"]) == {"mcp", "hid", "computer", "computer_read", "read_only"}
 
     mutating_tool = reloaded.scene_context_tool_registry.tools["hid_action"]
-    assert set(mutating_tool.metadata["capabilities"]) == {"scene", "computer", "computer_write"}
+    assert set(mutating_tool.metadata["capabilities"]) == {"mcp", "hid", "computer", "computer_write"}
 
     with reloaded.session_factory() as session:
         server = next(item for item in session.query(McpServer).all() if item.server_key == "virtualhid")

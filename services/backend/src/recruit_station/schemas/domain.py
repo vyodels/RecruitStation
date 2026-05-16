@@ -1985,6 +1985,11 @@ class McpServerRead(McpServerBase):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
+    standard_config: dict[str, Any] = Field(
+        default_factory=dict,
+        validation_alias=AliasChoices("standard_config", "standardConfig"),
+        serialization_alias="standardConfig",
+    )
     health_status: str
     health_error: str | None = None
     last_health_at: int | None = None

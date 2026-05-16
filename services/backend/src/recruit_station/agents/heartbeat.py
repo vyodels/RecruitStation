@@ -69,16 +69,19 @@ class Heartbeat:
     def run_once(self) -> dict[str, Any]:
         with self.session_factory() as session:
             state = session.get(AgentGlobalState, "singleton")
-            control_state = _control_state(state)
-            if control_state in {"stopped", "terminating"}:
-                return {"status": control_state, "reason": _control_metadata(state).get("reason")}
-            if control_state == "paused":
-                return {"status": "paused", "reason": _control_metadata(state).get("reason") or (state.pause_reason if state is not None else None)}
-            if state is not None and state.autonomous_paused:
-                return {"status": "paused", "reason": state.pause_reason}
-
             queue = TaskQueueRepository(session)
-            task = queue.claim_next(locked_by=self.worker_id)
+            control_state = _control_state(state)
+            if control_state == "terminating":
+                return {"status": control_state, "reason": _control_metadata(state).get("reason")}
+            task = None
+            if control_state in {"stopped", "paused"} or (state is not None and state.autonomous_paused):
+                task = queue.claim_next_for_agent_kind("jd_sync", locked_by=self.worker_id)
+                if task is None:
+                    if control_state == "paused" or (state is not None and state.autonomous_paused):
+                        return {"status": "paused", "reason": _control_metadata(state).get("reason") or (state.pause_reason if state is not None else None)}
+                    return {"status": control_state, "reason": _control_metadata(state).get("reason")}
+            if task is None:
+                task = queue.claim_next(locked_by=self.worker_id)
             if task is None:
                 return {"status": "idle"}
 
@@ -100,10 +103,11 @@ class Heartbeat:
                 }
 
             preflight = self._preflight_task(payload)
-            if preflight is not None and not bool(preflight.get("ok")):
-                self._block_run_for_preflight(session, payload, preflight=preflight)
-                queue.mark_pending(task.id, attempts=int(task.attempts or 0) + 1, error="mcp_preflight_blocked")
-                return {"status": "deferred", "task_id": task.id, "reason": "mcp_preflight_blocked", "preflight": preflight}
+            if preflight is not None:
+                payload = _payload_with_mcp_readiness(payload, preflight=preflight)
+                task.payload = payload
+                self._record_run_mcp_readiness(session, payload, preflight=preflight)
+                session.commit()
 
             try:
                 self.autonomous_adapter.run_turn_from_envelope(payload)
@@ -180,16 +184,13 @@ class Heartbeat:
             }
         return registry.browser_hid_preflight()
 
-    def _block_run_for_preflight(self, session: Session, payload: dict[str, Any], *, preflight: dict[str, Any]) -> None:
+    def _record_run_mcp_readiness(self, session: Session, payload: dict[str, Any], *, preflight: dict[str, Any]) -> None:
         run = _resolve_run_for_payload(session, payload)
         if run is None:
             return
-        run.status = "blocked"
-        run.blocked_reason = "mcp_preflight_blocked"
         metadata = dict(run.runtime_metadata or {})
-        metadata["mcp_preflight"] = preflight
+        metadata["mcp_readiness"] = preflight
         run.runtime_metadata = metadata
-        session.commit()
 
     def pause(self, *, reason: str | None = None, updated_by: str | None = None) -> AgentGlobalState:
         with self.session_factory() as session:
@@ -280,6 +281,17 @@ def _payload_requires_browser_hid_preflight(value: Any) -> bool:
     if isinstance(value, list):
         return any(_payload_requires_browser_hid_preflight(item) for item in value)
     return False
+
+
+def _payload_with_mcp_readiness(payload: dict[str, Any], *, preflight: dict[str, Any]) -> dict[str, Any]:
+    updated = dict(payload or {})
+    metadata = dict(updated.get("metadata") or {}) if isinstance(updated.get("metadata"), dict) else {}
+    metadata["mcp_readiness"] = dict(preflight or {})
+    updated["metadata"] = metadata
+    constraints = dict(updated.get("constraints") or {}) if isinstance(updated.get("constraints"), dict) else {}
+    constraints["mcp_readiness"] = dict(preflight or {})
+    updated["constraints"] = constraints
+    return updated
 
 
 def _resolve_run_for_payload(session: Session, payload: dict[str, Any]) -> AgentRun | None:

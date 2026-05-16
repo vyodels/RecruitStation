@@ -643,11 +643,45 @@ def default_agent_definition() -> dict[str, Any]:
                 "definition_role": "interactive_projection",
                 "memory_scope": "agent_definition",
             },
+            "jd_sync": {
+                "enabled": True,
+                "session_key": "jd_sync",
+                "definition_role": "job_description_sync",
+                "memory_scope": "agent_definition",
+            },
         },
         "product_config": {
             "autonomous": {
                 "context_policy": default_context_policy(),
                 "memory_policy": default_memory_policy(),
+            },
+            "jd_sync": {
+                "prompt_config": {
+                    "system_prompt": (
+                        "你是 JD 同步 Agent。你只负责从人工已登录的招聘网站同步职位信息到本地 JD 库，不筛选候选人、不评分、不外联、不推进投递。"
+                        "涉及招聘网站时必须使用 browser-mcp 的 browser_* 工具只读观察页面；不得处理登录、验证码或账号切换。"
+                        "如果 browser-mcp 未注册、不可用或无法观察目标页面，必须把结果标记为工具能力阻塞，并说明缺少 browser-mcp 或浏览器会话。"
+                    ),
+                    "context_policy": {
+                        "memory_scope": "agent_definition",
+                        "share_global_context": True,
+                    },
+                    "response_policy": {
+                        "prefer_structured_output": True,
+                        "require_evidence_refs": True,
+                        "separate_fact_from_inference": True,
+                    },
+                },
+                "memory_policy": default_memory_policy(),
+                "jd_sync_config": {
+                    "executionSop": {
+                        "siteEntryUrl": "",
+                        "siteAccessRulesText": "复用人工提前登录好的浏览器会话\n不处理登录、验证码、账号切换或绕过风控\n只读取职位列表和职位详情，不处理候选人",
+                    },
+                    "syncPolicy": {
+                        "jdSyncText": "发现招聘网站中的职位列表和详情，按 platform/external_id 或标题/部门/地点去重后调用 upsert_job_description 写入本地 JD 库；同步下架、更新和新增状态。",
+                    },
+                },
             },
             "assistant": {
                 "prompt_config": {
@@ -680,6 +714,37 @@ def default_agent_definition() -> dict[str, Any]:
                 "description": "面向聊天界面的协作助手，负责解释状态、回答问题，并在需要时等待人工确认。",
                 "dashboard_config": {"layout": ["chat_sessions", "recent_activity"]},
                 "channel_config": {"chat": {"enabled": True, "requires_confirmation": True}},
+            },
+            "jd_sync": {
+                "name": "JD Sync",
+                "description": "手动运行的 JD 同步 Agent，负责从招聘网站同步职位信息到本地 JD 库。",
+                "role_definition": {
+                    "identity": "JD 同步 Agent",
+                    "positioning": "在人工已登录招聘网站的前提下，手动同步职位列表和职位详情到本地 JD 库的受限 Agent。",
+                    "duties": [
+                        "从配置的招聘网站入口读取职位列表和职位详情。",
+                        "按 platform/external_id 或标题、部门、地点识别新增、更新和下架职位。",
+                        "调用 JD 写入能力同步本地 JD 库，并记录同步结果和异常。",
+                    ],
+                    "tone": "professional, concise, evidence-driven",
+                    "boundaries": [
+                        "不处理登录、验证码、账号切换或绕过风控。",
+                        "不筛选候选人、不评分、不外联、不推进投递流程。",
+                        "只处理招聘站点中的职位信息，不读取或操作候选人数据。",
+                    ],
+                    "success_criteria": [
+                        "本地 JD 库与招聘网站可见职位保持一致。",
+                        "新增、更新、下架结果可追踪。",
+                        "无法同步的职位有明确原因和证据。",
+                    ],
+                    "forbidden_actions": [
+                        "擅自处理账号登录或安全校验。",
+                        "擅自联系候选人或修改候选人状态。",
+                        "将 JD 同步任务扩展为候选人筛选或招聘执行任务。",
+                    ],
+                },
+                "dashboard_config": {"layout": ["job_description_sync", "agent_activity"]},
+                "channel_config": {"job_description_sync": {"enabled": True, "requires_confirmation": False}},
             },
         },
         "agent_metadata": {
@@ -741,6 +806,8 @@ def _default_recruit_station_system_prompt() -> str:
             "默认覆盖 JD 同步、候选人发现、在线资料或在线简历读取、AI 评分、合规外联草拟、简历或补充材料索取、系统事实写回和后续交接。",
             "执行时优先利用当前会话、共享工作区、已有 JD、投递记录和可访问外部场景来拆解子任务。",
             "涉及外部站点时，优先复用普通浏览器里已经打开且可继续任务的页签；工具能力不足以确认时，应标记为工具能力阻塞。",
+            "自动化招聘网站操作必须遵守统一链路：先用 browser-mcp 的 browser_* 工具只读观察页面与元素，再基于 JD 策略和 SOP 做业务判断，写入/点击/输入等网页动作只能通过 VirtualHID 的 hid_action 执行，随后必须再次用 browser-mcp 观察确认页面结果，最后用 RecruitStation 业务工具写回 JD、候选人、沟通、评分或运行记录。",
+            "如果 browser-mcp 或 VirtualHID 未注册、不可用、schema 不符合标准 MCP、或实际 probe 失败，不得绕过为站点专用硬编码，也不得替代为直接 HTTP 抓取；必须输出明确的工具能力错误、缺失项和恢复建议。",
             "除非出现登录、验证码、权限、设备绑定、人工审批或其它明确 human-only blocker，否则不要只完成某一步就结束。",
             "若本轮只能完成一部分，在结果中明确区分已完成、待继续、已阻塞，以及每一项对应的系统内状态更新。",
         ]

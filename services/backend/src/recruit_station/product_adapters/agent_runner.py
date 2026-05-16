@@ -6,7 +6,7 @@ from typing import Any
 
 from recruit_station.agent_runtime.engine import InteractionEngine, InteractionEngineConfig
 from recruit_station.agent_runtime.transcript import Transcript
-from recruit_station.agent_runtime.types import InteractionOutput, LLMMessage, LLMProvider
+from recruit_station.agent_runtime.types import InteractionOutput, LLMMessage, LLMProvider, ToolCall, ToolResult, TurnContext
 from recruit_station.capabilities.tools import ToolRegistry
 
 
@@ -55,6 +55,11 @@ def run_agent_turn(
     structured_status_resolver: Callable[[Any], tuple[str, str] | None] | None = None,
     status_defaults: AgentTurnStatusDefaults | None = None,
     include_tool_result_metadata: bool = False,
+    runtime: dict[str, Any] | None = None,
+    pending_user_input_after_next_tool_call_provider: Callable[
+        [TurnContext, ToolCall, ToolResult],
+        list[LLMMessage],
+    ] | None = None,
 ) -> AgentEngineResult:
     defaults = status_defaults or AgentTurnStatusDefaults(completed_status="completed")
     normalized_system_prompt, normalized_initial_messages = _extract_system_prompt(
@@ -73,6 +78,8 @@ def run_agent_turn(
             max_llm_invocations=max_llm_invocations,
             max_history_messages=max_history_messages,
             initial_seq=initial_seq,
+            runtime=dict(runtime or {}),
+            pending_user_input_after_next_tool_call_provider=pending_user_input_after_next_tool_call_provider,
         )
     )
     if engine_sink is not None:

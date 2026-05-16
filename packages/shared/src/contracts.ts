@@ -386,6 +386,7 @@ export type AgentDefinition = {
   description?: string | null;
   status: string;
   config: AgentDefinitionConfig;
+  productConfig?: Record<string, unknown>;
   createdAt?: string | null;
   updatedAt?: string | null;
 };

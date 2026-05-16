@@ -5,12 +5,13 @@ import json
 import re
 from threading import RLock
 from typing import Any
+from uuid import uuid4
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from recruit_station.agent_runtime.engine import InteractionEngine, transcript_from_checkpoint
-from recruit_station.agent_runtime.types import InteractionOutput, LLMProvider
+from recruit_station.agent_runtime.types import InteractionOutput, LLMMessage, LLMProvider, ToolCall, ToolResult, TurnContext
 from recruit_station.db.base import utcnow
 from recruit_station.evolution.learning_writer import LearningWriter
 from recruit_station.memory.filesystem import MemoryFileStore
@@ -22,6 +23,7 @@ from recruit_station.memory.writeback import (
     write_stable_memory_facts_to_files,
 )
 from recruit_station.models.domain import (
+    AgentPendingUserInput,
     AgentRun,
     AgentRunCheckpoint,
     AgentRuntimeEvent,
@@ -36,6 +38,7 @@ from recruit_station.models.domain import (
     Skill,
     TaskQueueItem,
 )
+from recruit_station.repositories.domain import AgentPendingUserInputRepository, TaskQueueRepository
 from recruit_station.product_adapters.limits import TurnLimits
 from recruit_station.agents.outcome import AgentTurnOutcome
 from recruit_station.plugins.host import PluginHost
@@ -57,6 +60,9 @@ AUTONOMOUS_OPEN_RUN_STATUSES: tuple[str, ...] = (
     "paused",
     "resumable",
 )
+RUNTIME_AGENT_KINDS: tuple[str, ...] = ("autonomous", "jd_sync")
+AUTONOMOUS_PRIMARY_CONVERSATION_ID = "autonomous-primary"
+JD_SYNC_PRIMARY_CONVERSATION_ID = "jd-sync-primary"
 
 
 @dataclass(slots=True)
@@ -88,9 +94,9 @@ class AutonomousAdapter:
     active_turns: dict[str, ActiveAutonomousTurn] = field(default_factory=dict)
     _active_turns_lock: RLock = field(default_factory=RLock)
 
-    def cancel_run(self, run_id: str, *, reviewer: str, reason: str | None = None) -> str:
+    def cancel_run(self, run_id: str, *, reviewer: str, reason: str | None = None, agent_kind: str | None = None) -> str:
         with self.session_factory() as session:
-            run = _resolve_autonomous_run_for_control(session, run_id)
+            run = _resolve_autonomous_run_for_control(session, run_id, agent_kind=agent_kind)
             if run.status == "completed":
                 raise ValueError("Completed run cannot be cancelled.")
             cancel_reason = reason or "cancelled"
@@ -111,7 +117,7 @@ class AutonomousAdapter:
             stmt = (
                 select(AgentRun)
                 .where(
-                    AgentRun.agent_kind == "autonomous",
+                    AgentRun.agent_kind.in_(RUNTIME_AGENT_KINDS),
                     AgentRun.status.in_(AUTONOMOUS_OPEN_RUN_STATUSES),
                 )
                 .order_by(AgentRun.updated_at.desc(), AgentRun.id.desc())
@@ -208,7 +214,7 @@ class AutonomousAdapter:
             run_constraints["global_scope_ref"] = (
                 str(run_constraints.get("global_scope_ref") or "") or agent_definition_id
             )
-            run_constraints["source_kind"] = "autonomous"
+            run_constraints["source_kind"] = run.agent_kind or "autonomous"
             if resolved_application_id:
                 run_constraints["application_id"] = resolved_application_id
             browser_target = derive_browser_target(
@@ -320,6 +326,22 @@ class AutonomousAdapter:
                     if active_turn.interrupt_reason or self._run_has_terminal_interrupt(run.id):
                         engine.interrupt(active_turn.interrupt_reason)
 
+                def _pending_user_input_after_next_tool_call_provider(
+                    context: TurnContext,
+                    tool_call: ToolCall,
+                    tool_result: ToolResult,
+                ) -> list[LLMMessage]:
+                    return _consume_pending_user_input_after_next_tool_call(
+                        session,
+                        run=run,
+                        turn=turn,
+                        agent_kind=str(run.agent_kind or "autonomous").strip() or "autonomous",
+                        conversation_id=_primary_conversation_id_for_run(run),
+                        context=context,
+                        tool_call=tool_call,
+                        tool_result=tool_result,
+                    )
+
                 try:
                     runner_result = run_agent_turn(
                         provider=self.provider,
@@ -336,6 +358,8 @@ class AutonomousAdapter:
                         output_sink=lambda output: _record_engine_output(session, run=run, turn_id=turn.turn_id, output=output),
                         engine_sink=_bind_engine,
                         structured_status_resolver=_outcome_from_structured_result_data,
+                        runtime={"permission_policy": _runtime_permission_policy(run_constraints)},
+                        pending_user_input_after_next_tool_call_provider=_pending_user_input_after_next_tool_call_provider,
                         status_defaults=AgentTurnStatusDefaults(
                             completed_status="complete",
                             completed_gate_signal="run_done",
@@ -457,6 +481,13 @@ class AutonomousAdapter:
                     memory_file_store=self.memory_file_store,
                 )
                 session.commit()
+                _queue_user_input_after_next_turn(
+                    session,
+                    run=run,
+                    turn=turn,
+                    envelope=envelope,
+                )
+                session.commit()
             return last_outcome
 
     def recover_stale(self) -> int:
@@ -475,7 +506,7 @@ class AutonomousAdapter:
             open_stmt = (
                 select(AgentRun)
                 .where(
-                    AgentRun.agent_kind == "autonomous",
+                    AgentRun.agent_kind.in_(RUNTIME_AGENT_KINDS),
                     AgentRun.status.in_(AUTONOMOUS_OPEN_RUN_STATUSES),
                 )
                 .order_by(
@@ -632,9 +663,9 @@ class AutonomousAdapter:
                 learning_content=_skill_learning_audit_log(review_payload, draft_contract),
                 source_run_id=run.id,
                 source_turn_id=turn.turn_id,
-                source_kind="autonomous",
+                source_kind=run.agent_kind or "autonomous",
                 agent_definition_id=agent_definition_id,
-                proposed_by="autonomous",
+                proposed_by=run.agent_kind or "autonomous",
                 environment_scope=_skill_environment_scope(run=run, snapshot=snapshot),
             )
         except Exception as exc:
@@ -935,6 +966,19 @@ def _memory_writeback_policy(definition: AgentDefinition | None) -> MemoryWriteb
     return memory_writeback_policy_from_config(dict(config or {}))
 
 
+def _runtime_permission_policy(run_constraints: dict[str, Any]) -> dict[str, Any]:
+    tool_policy = dict(run_constraints.get("tool_approval_policy") or {})
+    overrides = dict(tool_policy.get("overrides") or {})
+    normalized_overrides: dict[str, Any] = {}
+    for key, value in overrides.items():
+        normalized_key = str(key).split(":", 1)[-1].strip()
+        if normalized_key:
+            normalized_overrides[normalized_key] = value
+    if normalized_overrides:
+        tool_policy["overrides"] = normalized_overrides
+    return {"tool_approval_policy": tool_policy}
+
+
 def _definition_system_prompt(definition: AgentDefinition | None) -> str:
     if definition is None:
         return "你是 RecruitStation。你的核心职责是严格在招聘场景中维护候选人与投递记录事实，以投递记录为单位推进流程、记录证据，并把高风险动作交给人工确认。"
@@ -1195,11 +1239,16 @@ def _summarize_turn_tool_activity(events: list[AgentRuntimeEvent]) -> list[dict[
 def _summarize_turn_events(events: list[AgentRuntimeEvent]) -> list[dict[str, Any]]:
     outline: list[dict[str, Any]] = []
     for event in events:
-        if event.event_type in {"llm_invocation_started", "llm_invocation_completed", "tool_event", "permission_requested"}:
+        payload = dict(event.payload or {})
+        data = dict(payload.get("data") or {})
+        if event.event_type in {"llm_invocation_started", "llm_invocation_completed", "tool_event", "permission_requested"} or (
+            event.event_type == "runtime_event"
+            and str(data.get("kind") or "").startswith("pending_user_input_after_next_tool_call")
+        ):
             outline.append(
                 {
                     "event_type": event.event_type,
-                    "message": event.message,
+                    "message": str(data.get("kind") or event.message),
                 }
             )
     return outline[-12:]
@@ -1372,11 +1421,213 @@ def _run_instruction_snapshot(*, run: AgentRun, envelope: dict[str, Any]) -> dic
             world_snapshot.get("run_preferences"),
             envelope.get("run_preferences"),
         ),
+        "pending_input": _pending_input_from_envelope(envelope),
     }
 
 
 def _snapshot_instruction(snapshot: dict[str, Any], run: AgentRun) -> str:
-    return _first_text(snapshot.get("instruction"), run.run_type, "Autonomous execution") or "Autonomous execution"
+    instruction = _first_text(snapshot.get("instruction"), run.run_type, "Autonomous execution") or "Autonomous execution"
+    pending_input = [
+        item
+        for item in list(snapshot.get("pending_input") or [])
+        if isinstance(item, dict) and str(item.get("message") or "").strip()
+    ]
+    if not pending_input:
+        return instruction
+    pending_user_input_lines = [
+        f"- {str(item.get('message') or '').strip()}"
+        for item in pending_input
+    ]
+    return "\n\n".join(
+        [
+            instruction,
+            "## Queued user input after next turn",
+            "Process these operator instructions in this follow-up turn while preserving the original run boundaries and product policies.",
+            "\n".join(pending_user_input_lines),
+        ]
+    )
+
+
+def _pending_input_from_envelope(envelope: dict[str, Any]) -> list[dict[str, Any]]:
+    pending_input = envelope.get("pending_input")
+    if not isinstance(pending_input, list):
+        return []
+    items: list[dict[str, Any]] = []
+    for item in pending_input:
+        if isinstance(item, dict):
+            message = str(item.get("message") or "").strip()
+            if message:
+                items.append(
+                    {
+                        "input_id": str(item.get("input_id") or item.get("inputId") or "").strip() or None,
+                        "priority": str(item.get("priority") or "next").strip().lower() or "next",
+                        "queued_by": str(item.get("queued_by") or item.get("queuedBy") or "").strip() or None,
+                        "message": message,
+                    }
+                )
+        else:
+            message = str(item or "").strip()
+            if message:
+                items.append({"input_id": None, "priority": "next", "queued_by": None, "message": message})
+    return items
+
+
+def _primary_conversation_id_for_run(run: AgentRun) -> str:
+    for raw in (
+        (run.context_manifest or {}).get("conversation_id"),
+        (run.runtime_metadata or {}).get("conversation_id"),
+        (run.wakeup_state or {}).get("conversation_id"),
+    ):
+        normalized = str(raw or "").strip()
+        if normalized:
+            return normalized
+    return JD_SYNC_PRIMARY_CONVERSATION_ID if run.agent_kind == "jd_sync" else AUTONOMOUS_PRIMARY_CONVERSATION_ID
+
+
+def _pending_user_input_prompt_payload(pending_user_input: AgentPendingUserInput) -> dict[str, Any]:
+    return {
+        "input_id": pending_user_input.input_id,
+        "priority": pending_user_input.priority,
+        "queued_by": pending_user_input.queued_by,
+        "message": pending_user_input.message,
+    }
+
+
+def _pending_user_input_after_next_tool_call_message(records: list[AgentPendingUserInput]) -> LLMMessage:
+    payload = [_pending_user_input_prompt_payload(record) for record in records]
+    lines = [
+        "## Pending user input after next tool call",
+        "Process these operator instructions before the next model step. Keep the current run, product policy, and tool boundary intact.",
+    ]
+    lines.extend(f"- {item['message']}" for item in payload)
+    return LLMMessage(
+        role="user",
+        content="\n".join(lines),
+        metadata={
+            "kind": "pending_user_input_after_next_tool_call",
+            "pending_user_input_ids": [record.input_id for record in records],
+            "pending_input": payload,
+        },
+    )
+
+
+def _consume_pending_user_input_after_next_tool_call(
+    session: Session,
+    *,
+    run: AgentRun,
+    turn: AgentTurnRecord,
+    agent_kind: str,
+    conversation_id: str,
+    context: TurnContext,
+    tool_call: ToolCall,
+    tool_result: ToolResult,
+) -> list[LLMMessage]:
+    if _terminal_interrupt_status(run.status) is not None:
+        return []
+    pending_user_inputs = AgentPendingUserInputRepository(session).list_pending_prompts(
+        agent_kind=agent_kind,
+        conversation_id=conversation_id,
+        run_pk=run.id,
+        limit=20,
+    )
+    if not pending_user_inputs:
+        return []
+    AgentPendingUserInputRepository(session).mark_consumed(
+        pending_user_inputs,
+        claimed_by="pending_user_input_after_next_tool_call",
+        metadata={
+            "consumer": "pending_user_input_after_next_tool_call",
+            "run_pk": run.id,
+            "turn_id": turn.turn_id,
+            "runtime_turn_id": context.turn_id,
+            "tool_name": tool_call.name,
+            "tool_call_id": tool_call.id,
+            "tool_use_id": tool_call.tool_use_id,
+            "tool_result_error": bool(tool_result.is_error),
+        },
+    )
+    session.commit()
+    return [_pending_user_input_after_next_tool_call_message(pending_user_inputs)]
+
+
+def _queue_user_input_after_next_turn(
+    session: Session,
+    *,
+    run: AgentRun,
+    turn: AgentTurnRecord,
+    envelope: dict[str, Any],
+) -> bool:
+    if _terminal_interrupt_status(run.status) is not None:
+        return False
+    agent_kind = str(run.agent_kind or "autonomous").strip() or "autonomous"
+    conversation_id = _primary_conversation_id_for_run(run)
+    pending_user_inputs = AgentPendingUserInputRepository(session).list_pending_prompts(
+        agent_kind=agent_kind,
+        conversation_id=conversation_id,
+        run_pk=run.id,
+        limit=20,
+    )
+    if not pending_user_inputs:
+        return False
+
+    pending_user_input_payloads = [_pending_user_input_prompt_payload(pending_user_input) for pending_user_input in pending_user_inputs]
+    followup_envelope = dict(envelope or {})
+    followup_envelope["run_pk"] = run.id
+    followup_envelope["run_id"] = run.run_id
+    followup_envelope["trigger_type"] = "queued_user_input_after_next_turn"
+    followup_envelope["pending_input"] = pending_user_input_payloads
+    metadata = dict(followup_envelope.get("metadata") or {}) if isinstance(followup_envelope.get("metadata"), dict) else {}
+    metadata["agent_kind"] = agent_kind
+    metadata["conversation_id"] = conversation_id
+    metadata["queued_user_input_after_next_turn_ids"] = [pending_user_input.input_id for pending_user_input in pending_user_inputs]
+    followup_envelope["metadata"] = metadata
+    world_snapshot = dict(followup_envelope.get("world_snapshot") or {}) if isinstance(followup_envelope.get("world_snapshot"), dict) else {}
+    world_snapshot["pending_input"] = pending_user_input_payloads
+    followup_envelope["world_snapshot"] = world_snapshot
+
+    task = TaskQueueRepository(session).enqueue(
+        task_id=f"run-{run.id}-input-{pending_user_inputs[-1].input_id}-{uuid4().hex[:8]}",
+        task_type="autonomous_turn",
+        priority=int(run.priority or 100),
+        payload=followup_envelope,
+    )
+    run.queue_task_id = task.id
+    run.status = "queued"
+    run.finished_at = None
+    wakeup_state = dict(run.wakeup_state or {})
+    wakeup_state.update(
+        {
+            "conversation_id": conversation_id,
+            "queued_user_input_after_next_turn_ids": [pending_user_input.input_id for pending_user_input in pending_user_inputs],
+            "queued_user_input_after_next_turn_at": utcnow().isoformat(),
+            "source_turn_id": turn.turn_id,
+        }
+    )
+    run.wakeup_state = wakeup_state
+    AgentPendingUserInputRepository(session).mark_consumed(
+        pending_user_inputs,
+        claimed_by="queued_user_input_after_next_turn",
+        metadata={
+            "consumer": "queued_user_input_after_next_turn",
+            "run_pk": run.id,
+            "turn_id": turn.turn_id,
+            "task_id": task.id,
+        },
+    )
+    _append_runtime_event(
+        session,
+        run=run,
+        turn_id=turn.turn_id,
+        seq=int(turn.seq or 0) + 1,
+        event_type="queued_user_input_after_next_turn",
+        message="queued_user_input_after_next_turn",
+        payload={
+            "conversation_id": conversation_id,
+            "pending_user_input_ids": [pending_user_input.input_id for pending_user_input in pending_user_inputs],
+            "task_id": task.id,
+        },
+    )
+    return True
 
 
 def _snapshot_kind(snapshot: dict[str, Any], run: AgentRun) -> str:
@@ -1514,14 +1765,15 @@ def _interrupt_open_run(session: Session, *, run: AgentRun, reason: str) -> None
     run.wakeup_state = {}
 
 
-def _resolve_autonomous_run_for_control(session: Session, run_id: str) -> AgentRun:
+def _resolve_autonomous_run_for_control(session: Session, run_id: str, *, agent_kind: str | None = None) -> AgentRun:
     normalized = str(run_id or "").strip()
     if not normalized:
         raise KeyError("unknown run: ")
-    stmt = select(AgentRun).where(
-        AgentRun.agent_kind == "autonomous",
-        (AgentRun.run_id == normalized) | (AgentRun.id == normalized),
-    )
+    stmt = select(AgentRun).where((AgentRun.run_id == normalized) | (AgentRun.id == normalized))
+    if agent_kind:
+        stmt = stmt.where(AgentRun.agent_kind == agent_kind)
+    else:
+        stmt = stmt.where(AgentRun.agent_kind.in_(RUNTIME_AGENT_KINDS))
     run = session.scalars(stmt).first()
     if run is None:
         raise KeyError(f"unknown run: {normalized}")
@@ -1853,12 +2105,12 @@ def _upsert_wait_human_approval(
             target_id=run.run_id or run.id,
             title=title,
             status="pending",
-            requested_by="autonomous",
+            requested_by=run.agent_kind or "autonomous",
             payload=payload,
             notes=summary,
             run_pk=run.id,
             turn_pk=turn.id,
-            source_kind="autonomous",
+            source_kind=run.agent_kind or "autonomous",
             tool_name=tool_name,
             args_digest=args_digest,
             idempotency_key=f"wait-human:{run.id}:{turn.id}",

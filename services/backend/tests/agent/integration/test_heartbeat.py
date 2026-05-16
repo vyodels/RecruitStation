@@ -109,7 +109,7 @@ def test_heartbeat_honors_global_pause(tmp_path: Path) -> None:
         session.close()
 
 
-def test_heartbeat_defers_real_browser_hid_task_when_preflight_fails(tmp_path: Path) -> None:
+def test_heartbeat_records_browser_hid_readiness_and_still_runs_agent(tmp_path: Path) -> None:
     session = _make_session(tmp_path)
     try:
         definition = AgentDefinition(definition_key="primary", name="Primary", is_primary=True)
@@ -141,11 +141,13 @@ def test_heartbeat_defers_real_browser_hid_task_when_preflight_fails(tmp_path: P
             def browser_hid_preflight(self) -> dict[str, object]:
                 return {"ok": False, "status": "blocked", "missing": ["browser-mcp"], "checks": []}
 
+        captured_payloads: list[dict[str, object]] = []
+
         class FakeAdapter:
             mcp_registry = FakeRegistry()
 
-            def run_turn_from_envelope(self, _payload: dict[str, object]) -> None:
-                raise AssertionError("autonomous turn must not run when preflight fails")
+            def run_turn_from_envelope(self, payload: dict[str, object]) -> None:
+                captured_payloads.append(dict(payload))
 
         heartbeat = Heartbeat(session_factory=create_session_factory(session.get_bind()), autonomous_adapter=FakeAdapter())  # type: ignore[arg-type]
         heartbeat.start(updated_by="api-test", reason="test start")
@@ -153,13 +155,15 @@ def test_heartbeat_defers_real_browser_hid_task_when_preflight_fails(tmp_path: P
         result = heartbeat.run_once()
 
         session.expire_all()
-        assert result["status"] == "deferred"
-        assert result["reason"] == "mcp_preflight_blocked"
-        assert TaskQueueRepository(session).get("task-preflight").status == "pending"
+        assert result["status"] == "processed"
+        assert TaskQueueRepository(session).get("task-preflight").status == "completed"
         blocked_run = session.get(AgentRun, run.id)
-        assert blocked_run.status == "blocked"
-        assert blocked_run.blocked_reason == "mcp_preflight_blocked"
-        assert blocked_run.runtime_metadata["mcp_preflight"]["missing"] == ["browser-mcp"]
+        assert blocked_run.status == "queued"
+        assert blocked_run.blocked_reason is None
+        assert blocked_run.runtime_metadata["mcp_readiness"]["missing"] == ["browser-mcp"]
+        assert captured_payloads
+        assert captured_payloads[0]["metadata"]["mcp_readiness"]["missing"] == ["browser-mcp"]
+        assert captured_payloads[0]["constraints"]["mcp_readiness"]["missing"] == ["browser-mcp"]
     finally:
         session.close()
 

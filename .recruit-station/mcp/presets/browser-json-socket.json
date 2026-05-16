@@ -9,8 +9,8 @@
     "MCP_BROWSER_CHROME_SOCKET": "${endpoint}"
   },
   "runtime_tool_capabilities": {
-    "default": ["browser"],
-    "read_only": ["search", "document"],
+    "default": ["mcp", "browser"],
+    "read_only": ["read_only", "document"],
     "mutating": []
   },
   "runtime_tool_read_only_names": [
