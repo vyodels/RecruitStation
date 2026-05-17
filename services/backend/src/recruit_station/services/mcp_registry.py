@@ -440,6 +440,11 @@ def _raise_for_jsonrpc_error(response: dict[str, Any], *, label: str) -> None:
     raise McpBridgeError(f"{message} ({label})")
 
 
+def _is_method_not_found_for(exc: Exception, method: str) -> bool:
+    message = str(exc).lower()
+    return method.lower() in message and ("method not found" in message or "unknown method" in message)
+
+
 @dataclass(slots=True)
 class _JsonLineSession:
     endpoint: str
@@ -575,7 +580,12 @@ def _mcp_list_resources(server: McpServer) -> list[dict[str, Any]]:
     cursor: str | None = None
     while True:
         params = {"cursor": cursor} if cursor else {}
-        result = _mcp_session_request(server, "resources/list", params)
+        try:
+            result = _mcp_session_request(server, "resources/list", params)
+        except McpBridgeError as exc:
+            if _is_method_not_found_for(exc, "resources/list"):
+                return []
+            raise
         raw_resources = result.get("resources")
         if isinstance(raw_resources, list):
             resources.extend(item for item in raw_resources if isinstance(item, dict))
@@ -775,7 +785,6 @@ def _browser_hid_sequence_scope_key(arguments: dict[str, Any], result: Any | Non
         arguments.get("episode_id"),
         arguments.get("episodeId"),
         arguments.get("taskId"),
-        arguments.get("id"),
         context.get("episode_id"),
         context.get("episodeId"),
         context.get("taskId"),
@@ -804,6 +813,13 @@ def _browser_hid_sequence_scope_key(arguments: dict[str, Any], result: Any | Non
         _host_from_url(target.get("url")),
         _host_from_url(context.get("url")),
         _host_from_url(arguments.get("url")),
+        _host_from_url(arguments.get("expectedOrigin")),
+        _host_from_url(arguments.get("expected_origin")),
+        _host_from_url(arguments.get("targetOrigin")),
+        _host_from_url(arguments.get("target_origin")),
+        arguments.get("expectedHost"),
+        arguments.get("expected_host"),
+        arguments.get("host"),
         _result_host(result),
     )
     if not any((run_id, episode_id, account, host)):
@@ -1525,7 +1541,10 @@ class McpRegistryService:
             tools.register(
                 ToolDefinition(
                     name="list_mcp_resources",
-                    description="List resources exposed by enabled standard MCP JSON-RPC servers.",
+                    description=(
+                        "List resources exposed by enabled standard MCP JSON-RPC servers. "
+                        "This is for MCP servers that implement resources/list; browser and VirtualHID MCP servers usually expose tools, not resources."
+                    ),
                     parameters={
                         "type": "object",
                         "properties": {

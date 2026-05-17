@@ -9,7 +9,7 @@ from sqlalchemy import select
 from agent_runtime.fixtures import LLMResponse, ScriptedProvider, ToolCall
 from recruit_station.capabilities.tools import ToolDefinition
 from recruit_station.core.settings import load_settings
-from recruit_station.models.domain import AgentPendingUserInput, AgentRun, AgentRunCheckpoint, ApprovalItem, OperatorInteraction, TaskQueueItem
+from recruit_station.models.domain import AgentPendingUserInput, AgentRun, AgentRunCheckpoint, AgentRuntimeEvent, ApprovalItem, OperatorInteraction, TaskQueueItem
 from recruit_station.server import create_app
 
 
@@ -168,8 +168,18 @@ def test_jd_sync_run_requires_only_saved_entry_url(tmp_path, monkeypatch) -> Non
                 "jd_sync": {
                     "jd_sync_config": {
                         "executionSop": {
-                            "siteEntryUrl": "https://mock-recruiting.local/jobs",
-                            "siteAccessRulesText": "复用已登录浏览器会话",
+                            "siteEntryUrl": "https://mock-recruiting.local/",
+                            "siteAccessRulesText": "\n".join(
+                                [
+                                    "复用人工提前登录好的浏览器会话",
+                                    "目标网页可以是招聘网站任意可访问页面，由 Agent 根据页面可见导航和内容找到职位列表与职位详情",
+                                    "不处理登录、验证码、账号切换或绕过风控",
+                                    "只处理职位信息，不处理候选人",
+                                ]
+                            ),
+                        },
+                        "syncPolicy": {
+                            "jdSyncText": "发现招聘网站中的职位列表和详情，按 platform/external_id 或标题/部门/地点去重后调用 upsert_job_description 写入本地 JD 库；同步下架、更新和新增状态。"
                         },
                     }
                 }
@@ -180,7 +190,7 @@ def test_jd_sync_run_requires_only_saved_entry_url(tmp_path, monkeypatch) -> Non
 
     response = client.post(
         "/api/agents/jd_sync/runs",
-        json={"title": "Sync JD", "instruction": "sync jobs"},
+        json={"title": "Sync JD", "requestMessage": "同步招聘站点 JD", "instruction": "sync jobs"},
     )
 
     assert response.status_code == 201, response.text
@@ -191,9 +201,95 @@ def test_jd_sync_run_requires_only_saved_entry_url(tmp_path, monkeypatch) -> Non
     runtime_metadata = payload["run"].get("runtimeMetadata") or payload["run"]["runtime_metadata"]
     constraints = runtime_metadata["constraints"]
     assert constraints["plan_kind"] == "jd_sync"
-    assert constraints["target_recruiting_site"]["entry_url"] == "https://mock-recruiting.local/jobs"
-    assert "只负责从已保存的招聘入口发现并同步 JD" in runtime_metadata["instruction"]
+    assert constraints["target_recruiting_site"]["entry_url"] == "https://mock-recruiting.local/"
+    assert "任务范围：" in runtime_metadata["instruction"]
+    assert "- 从配置的招聘网站目标网页出发，目标网页可以是该网站任意可访问页面。" in runtime_metadata["instruction"]
+    assert "- 根据页面可见导航和内容自行找到职位列表与职位详情。" in runtime_metadata["instruction"]
+    assert "- 只发现和同步 JD。" in runtime_metadata["instruction"]
+    assert "- 不处理候选人筛选、评分、外联或投递推进。" in runtime_metadata["instruction"]
+    assert "目标网页：" in runtime_metadata["instruction"]
+    assert "站点访问规则：" in runtime_metadata["instruction"]
+    assert "- 复用人工提前登录好的浏览器会话" in runtime_metadata["instruction"]
+    assert "- 目标网页可以是招聘网站任意可访问页面，由 Agent 根据页面可见导航和内容找到职位列表与职位详情" in runtime_metadata["instruction"]
+    assert "- 不处理登录、验证码、账号切换或绕过风控" in runtime_metadata["instruction"]
+    assert "- 只处理职位信息，不处理候选人" in runtime_metadata["instruction"]
+    assert "JD 同步策略：" in runtime_metadata["instruction"]
+    assert "- 从配置的招聘网站目标网页出发，根据页面可见导航和内容自行找到职位列表与职位详情，识别新增、更新和下架职位；只有确认职位详情已完整采集且没有阻塞时，才同步到本地 JD 库，列表页摘要只能作为发现线索。同步过程只处理职位信息，不处理候选人。" in runtime_metadata["instruction"]
+    assert "提前打开特定列表页" not in runtime_metadata["instruction"]
+    assert "upsert_job_description" not in runtime_metadata["instruction"]
+    assert "platform/external_id" not in runtime_metadata["instruction"]
+    assert "external_id" not in runtime_metadata["instruction"]
+    assert runtime_metadata["instruction"].count("URL：https://mock-recruiting.local/") == 1
     assert "selected_job_description_ids" not in constraints
+    conversation = client.get("/api/agents/jd_sync/conversations/jd-sync-primary")
+    assert conversation.status_code == 200
+    messages = conversation.json()["messages"]
+    run_input = next(
+        message
+        for message in messages
+        if message.get("metadata", {}).get("message_type") == "run_input"
+        and message.get("metadata", {}).get("run_id") == payload["runId"]
+    )
+    assert run_input["role"] == "user"
+    assert run_input["kind"] == "message"
+    assert run_input["content"] == runtime_metadata["instruction"]
+    assert run_input["title"] == "Sync JD"
+    assert "站点访问规则：" in run_input["content"]
+    assert "JD 同步策略：" in run_input["content"]
+    assert "复用人工提前登录好的浏览器会话" in run_input["content"]
+    assert "目标网页可以是招聘网站任意可访问页面" in run_input["content"]
+    assert "不处理登录、验证码、账号切换或绕过风控" in run_input["content"]
+    assert "只处理职位信息，不处理候选人" in run_input["content"]
+    assert "upsert_job_description" not in run_input["content"]
+    assert "platform/external_id" not in run_input["content"]
+    assert "external_id" not in run_input["content"]
+    assert run_input["content"].count("URL：https://mock-recruiting.local/") == 1
+    assert "sync jobs" in run_input["content"]
+
+
+def test_jd_sync_run_dedupes_legacy_frontend_prompt_template(tmp_path, monkeypatch) -> None:
+    client = _client(tmp_path, monkeypatch, "jd-sync-legacy-template")
+    patched = client.patch(
+        "/api/agents/jd_sync",
+        json={
+            "product_config": {
+                "jd_sync": {
+                    "jd_sync_config": {
+                        "executionSop": {
+                            "siteEntryUrl": "https://mock-recruiting.local/jobs",
+                            "siteAccessRulesText": "复用已登录浏览器会话",
+                        },
+                    }
+                }
+            }
+        },
+    )
+    assert patched.status_code == 200, patched.text
+
+    legacy_frontend_instruction = "\n".join(
+        [
+            "从已保存的目标网页同步 JD。只发现和同步职位，不处理候选人筛选、评分、外联或投递推进。",
+            "目标网页 URL：https://mock-recruiting.local/jobs",
+            "同步完成后，再选择生效 JD 并配置 JD 策略、评分标准和完整执行 SOP。",
+        ]
+    )
+    response = client.post(
+        "/api/agents/jd_sync/runs",
+        json={
+            "title": "同步招聘站点 JD",
+            "requestMessage": "同步招聘站点 JD",
+            "instruction": legacy_frontend_instruction,
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    payload = response.json()
+    runtime_metadata = payload["run"].get("runtimeMetadata") or payload["run"]["runtime_metadata"]
+    instruction = runtime_metadata["instruction"]
+    assert instruction.count("URL：https://mock-recruiting.local/jobs") == 1
+    assert instruction.count("只发现和同步 JD") == 1
+    assert "站点访问规则：" in instruction
+    assert "再选择生效 JD" not in instruction
 
 
 def test_jd_sync_process_next_task_when_autonomous_workspace_is_stopped(tmp_path, monkeypatch) -> None:
@@ -479,13 +575,13 @@ def test_workspace_start_creates_run_from_saved_automation_config(tmp_path, monk
     assert "account_label" not in constraints["target_recruiting_site"]
     assert constraints["target_recruiting_site"]["access_rules"] == ["复用已登录浏览器会话", "不处理登录验证码或账号切换"]
     compiled_sop = constraints["execution_sop"]["compiledPrompt"]
-    assert "招聘入口 URL：https://www.zhipin.com/web/geek/job" in compiled_sop
+    assert "招聘网站目标网页 URL：https://www.zhipin.com/web/geek/job" in compiled_sop
     assert "1. jd-a" in compiled_sop
     assert "2. jd-b" in compiled_sop
     assert "score candidates" in compiled_sop
     instruction = runtime_metadata["instruction"]
     assert "## 自动化招聘执行 SOP" in instruction
-    assert "招聘入口 URL：https://www.zhipin.com/web/geek/job" in instruction
+    assert "招聘网站目标网页 URL：https://www.zhipin.com/web/geek/job" in instruction
     assert "1. jd-a" in instruction
     assert "2. jd-b" in instruction
     assert "score candidates" in instruction
@@ -545,6 +641,10 @@ def test_autonomous_process_next_task_completes_run_and_projects_primary_convers
             content="Completed candidate search.",
             result_data={"execution_status": "completed"},
         ),
+        LLMResponse(
+            content="Second task completed after clear.",
+            result_data={"execution_status": "completed"},
+        ),
     )
     _force_start_workspace(client)
     created = _start_autonomous_run(client)
@@ -565,7 +665,102 @@ def test_autonomous_process_next_task_completes_run_and_projects_primary_convers
     conversation = client.get("/api/agents/autonomous/conversations/autonomous-primary")
     assert conversation.status_code == 200
     assert conversation.json()["conversation"]["id"] == "autonomous-primary"
-    assert any(message["content"] == "Completed candidate search." for message in conversation.json()["messages"])
+    messages = conversation.json()["messages"]
+    run_input = next(
+        message
+        for message in messages
+        if message.get("metadata", {}).get("message_type") == "run_input"
+        and message.get("metadata", {}).get("run_id") == created["runId"]
+    )
+    run_status = next(message for message in messages if message.get("metadata", {}).get("message_type") == "run")
+    final_output = next(message for message in messages if message["content"] == "Completed candidate search.")
+    assert run_input["role"] == "user"
+    assert run_input["kind"] == "message"
+    assert run_input["content"] == "Find one candidate and stop for approval before external action."
+    assert run_input["title"] == "Find one candidate"
+    assert final_output["role"] == "assistant"
+    assert final_output["kind"] == "message"
+    assert messages.index(run_input) < messages.index(run_status) < messages.index(final_output)
+
+
+def test_assistant_conversation_clear_removes_turn_history(tmp_path, monkeypatch) -> None:
+    client = _client(tmp_path, monkeypatch, "assistant-clear")
+    created = client.post(
+        "/api/agents/assistant/conversations",
+        json={"user_id": "api-test", "title": "Clear me"},
+    )
+    assert created.status_code == 201, created.text
+    conversation_id = created.json()["conversationId"]
+    client.app.state.container.assistant_adapter.session_store.append_turn(
+        conversation_id,
+        role="user",
+        content={"text": "hello"},
+    )
+    before = client.get(f"/api/agents/assistant/conversations/{conversation_id}")
+    assert before.status_code == 200
+    assert len(before.json()["messages"]) == 1
+
+    cleared = client.post(
+        f"/api/agents/assistant/conversations/{conversation_id}/clear",
+        json={"reviewer": "api-test", "reason": "reset chat"},
+    )
+
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["cleared"] is True
+    assert cleared.json()["messages"] == []
+    after = client.get(f"/api/agents/assistant/conversations/{conversation_id}")
+    assert after.status_code == 200
+    assert after.json()["messages"] == []
+
+
+def test_autonomous_primary_conversation_clear_resets_projected_history(tmp_path, monkeypatch) -> None:
+    client = _client(tmp_path, monkeypatch, "autonomous-clear")
+    _script_autonomous_provider(
+        client,
+        LLMResponse(
+            content="Completed candidate search.",
+            result_data={"execution_status": "completed"},
+        ),
+        LLMResponse(
+            content="Second task completed after clear.",
+            result_data={"execution_status": "completed"},
+        ),
+    )
+    _force_start_workspace(client)
+    created = _start_autonomous_run(client)
+    processed = client.post("/api/agents/task-queue/process-next")
+    assert processed.status_code == 200
+    before = client.get("/api/agents/autonomous/conversations/autonomous-primary")
+    assert any(message["content"] == "Completed candidate search." for message in before.json()["messages"])
+
+    cleared = client.post(
+        "/api/agents/autonomous/conversations/autonomous-primary/clear",
+        json={"reviewer": "api-test", "reason": "reset agent conversation"},
+    )
+
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["cleared"] is True
+    assert cleared.json()["messages"] == []
+    after = client.get("/api/agents/autonomous/conversations/autonomous-primary")
+    assert after.status_code == 200
+    assert after.json()["messages"] == []
+    workspace = client.get("/api/agents/autonomous/workspace")
+    assert workspace.status_code == 200
+    assert workspace.json()["runs"] == []
+    run_detail = client.get(f"/api/agents/autonomous/runs/{created['runId']}")
+    assert run_detail.status_code == 200
+
+    next_run = _start_autonomous_run(client, title="After clear", instruction="Run after clear.")
+    assert next_run["status"] == "queued"
+    workspace_after_start = client.get("/api/agents/autonomous/workspace")
+    assert workspace_after_start.status_code == 200
+    assert [run["runId"] for run in workspace_after_start.json()["runs"]] == [next_run["runId"]]
+
+    processed_again = client.post("/api/agents/task-queue/process-next")
+    assert processed_again.status_code == 200
+    after_second_run = client.get("/api/agents/autonomous/conversations/autonomous-primary")
+    assert any(message["content"] == "Second task completed after clear." for message in after_second_run.json()["messages"])
+    assert all(message["content"] != "Completed candidate search." for message in after_second_run.json()["messages"])
 
 
 def test_runtime_message_enqueues_pending_user_input_after_next_tool_call_for_open_run(tmp_path, monkeypatch) -> None:
@@ -650,6 +845,69 @@ def test_runtime_pending_user_input_after_next_tool_call_is_injected_before_next
         and ((event.get("payload") or {}).get("data") or {}).get("kind") == "pending_user_input_after_next_tool_call_injected"
         for event in run_detail["events"]
     )
+    conversation = client.get("/api/agents/autonomous/conversations/autonomous-primary")
+    assert conversation.status_code == 200
+    messages = conversation.json()["messages"]
+    injected_input = next(
+        message
+        for message in messages
+        if message.get("metadata", {}).get("traceKind") == "user_message"
+        and message["content"] == "Narrow this run to backend candidates only."
+    )
+    assert injected_input["role"] == "user"
+    assert "Pending user input after next tool call" not in injected_input["content"]
+
+
+def test_runtime_primary_conversation_projects_assistant_delta_as_streaming_message(tmp_path, monkeypatch) -> None:
+    client = _client(tmp_path, monkeypatch, "conversation-assistant-delta")
+    _force_start_workspace(client)
+    created = _start_autonomous_run(client, title="Stream answer", instruction="Explain progress.")
+
+    with client.app.state.session_factory() as session:
+        run = session.scalars(select(AgentRun).where(AgentRun.run_id == created["runId"])).one()
+        session.add(
+            AgentRuntimeEvent(
+                session_id=run.session_id,
+                run_id=run.id,
+                source="autonomous",
+                event_type="assistant_message_delta",
+                message="assistant_message_delta",
+                seq=1,
+                payload={
+                    "type": "assistant_message_delta",
+                    "data": {"delta": "正在", "invocation_id": "inv-stream"},
+                },
+            )
+        )
+        session.add(
+            AgentRuntimeEvent(
+                session_id=run.session_id,
+                run_id=run.id,
+                source="autonomous",
+                event_type="assistant_message_delta",
+                message="assistant_message_delta",
+                seq=2,
+                payload={
+                    "type": "assistant_message_delta",
+                    "data": {"delta": "处理", "invocation_id": "inv-stream"},
+                },
+            )
+        )
+        session.commit()
+
+    conversation = client.get("/api/agents/autonomous/conversations/autonomous-primary")
+
+    assert conversation.status_code == 200
+    messages = conversation.json()["messages"]
+    streaming = next(
+        message
+        for message in messages
+        if message.get("metadata", {}).get("traceKind") == "assistant_message"
+    )
+    assert streaming["role"] == "assistant"
+    assert streaming["kind"] == "message"
+    assert streaming["status"] == "streaming"
+    assert streaming["content"] == "正在处理"
 
 
 def test_autonomous_primary_conversation_projects_tool_call_and_result_events(tmp_path, monkeypatch) -> None:

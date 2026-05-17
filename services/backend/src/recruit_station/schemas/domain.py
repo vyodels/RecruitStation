@@ -152,6 +152,15 @@ class JobDescriptionUpdate(BaseModel):
     source: str | None = None
 
 
+class JobDescriptionBulkDeleteRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    job_description_ids: list[str] = Field(
+        validation_alias=AliasChoices("job_description_ids", "jobDescriptionIds"),
+        serialization_alias="jobDescriptionIds",
+    )
+
+
 class JobDescriptionRead(JobDescriptionBase):
     model_config = ConfigDict(from_attributes=True)
 
@@ -169,6 +178,13 @@ class JobDescriptionPageRead(BaseModel):
     limit: int
     offset: int
     has_next: bool = Field(serialization_alias="hasNext")
+
+
+class JobDescriptionBulkDeleteRead(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    deleted_ids: list[str] = Field(default_factory=list, serialization_alias="deletedIds")
+    missing_ids: list[str] = Field(default_factory=list, serialization_alias="missingIds")
 
 
 class JobDescriptionFunnelStepRead(BaseModel):

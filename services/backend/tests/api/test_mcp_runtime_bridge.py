@@ -10,7 +10,7 @@ from recruit_station.models.domain import McpServer
 from recruit_station.server import create_app
 from recruit_station.services.browser_mcp_bridge import BROWSER_SOCKET_PRESET_KEY
 from recruit_station.services.container import AppContainer
-from recruit_station.services.mcp_registry import STANDARD_MCP_PROTOCOL, VIRTUALHID_SOCKET_PRESET_KEY
+from recruit_station.services.mcp_registry import McpBridgeError, STANDARD_MCP_PROTOCOL, VIRTUALHID_SOCKET_PRESET_KEY
 
 
 def _settings(tmp_path: Path, name: str) -> AppSettings:
@@ -605,3 +605,39 @@ def test_mcp_resource_access_registers_fixed_ordinary_tools(tmp_path: Path, monk
     assert ("docs", "resources/list", {}) in runtime_requests
     assert ("docs", "resources/list", {"cursor": "page-2"}) in runtime_requests
     assert ("docs", "resources/read", {"uri": "file:///candidate-profile.md"}) in runtime_requests
+
+
+def test_mcp_resource_list_treats_resource_unsupported_servers_as_empty(tmp_path: Path, monkeypatch) -> None:
+    def fake_mcp_session_request(server, method: str, params: dict[str, object] | None = None, *, timeout_seconds: float = 8.0) -> dict[str, object]:
+        if method == "tools/list":
+            return {"tools": [{"name": "browser_get_active_tab", "inputSchema": {"type": "object"}}]}
+        if method == "resources/list":
+            raise McpBridgeError("Method not found: resources/list")
+        return {}
+
+    monkeypatch.setattr(
+        "recruit_station.services.mcp_registry._mcp_session_request",
+        fake_mcp_session_request,
+    )
+
+    settings = _settings(tmp_path, "mcp-resource-unsupported.db")
+    container = AppContainer.build(settings)
+    with container.session_factory() as session:
+        session.add(
+            McpServer(
+                server_key="browser",
+                name="Browser MCP",
+                transport_kind="unix_socket",
+                protocol=STANDARD_MCP_PROTOCOL,
+                endpoint=str(tmp_path / "browser.sock"),
+                enabled=True,
+            )
+        )
+        session.commit()
+
+    reloaded = AppContainer.build(settings)
+    listed = reloaded.tool_registry.execute("list_mcp_resources", {"server_key": "browser"})
+
+    assert listed.is_error is False
+    assert listed.output["servers"][0]["server_key"] == "browser"
+    assert listed.output["servers"][0]["resources"] == []

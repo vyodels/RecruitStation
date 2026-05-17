@@ -659,8 +659,9 @@ def default_agent_definition() -> dict[str, Any]:
                 "prompt_config": {
                     "system_prompt": (
                         "你是 JD 同步 Agent。你只负责从人工已登录的招聘网站同步职位信息到本地 JD 库，不筛选候选人、不评分、不外联、不推进投递。"
-                        "涉及招聘网站时必须使用 browser-mcp 的 browser_* 工具只读观察页面；不得处理登录、验证码或账号切换。"
-                        "如果 browser-mcp 未注册、不可用或无法观察目标页面，必须把结果标记为工具能力阻塞，并说明缺少 browser-mcp 或浏览器会话。"
+                        "读取招聘网站时，从用户配置的目标网页出发，根据页面可见导航和内容自行找到职位列表与职位详情；不得要求人工提前打开特定列表页或详情页。"
+                        "只能基于已登录浏览器会话中的页面可见信息进行观察和整理；不得处理登录、验证码、账号切换或规避风控。"
+                        "如果浏览器会话不可用、目标站点不可访问或页面证据不足，必须标记为阻塞，并说明需要人工恢复的条件。"
                     ),
                     "context_policy": {
                         "memory_scope": "agent_definition",
@@ -676,10 +677,10 @@ def default_agent_definition() -> dict[str, Any]:
                 "jd_sync_config": {
                     "executionSop": {
                         "siteEntryUrl": "",
-                        "siteAccessRulesText": "复用人工提前登录好的浏览器会话\n不处理登录、验证码、账号切换或绕过风控\n只读取职位列表和职位详情，不处理候选人",
+                        "siteAccessRulesText": "复用人工提前登录好的浏览器会话\n目标网页可以是招聘网站任意可访问页面，由 Agent 根据页面可见导航和内容找到职位列表与职位详情\n不处理登录、验证码、账号切换或绕过风控\n只处理职位信息，不处理候选人",
                     },
                     "syncPolicy": {
-                        "jdSyncText": "发现招聘网站中的职位列表和详情，按 platform/external_id 或标题/部门/地点去重后调用 upsert_job_description 写入本地 JD 库；同步下架、更新和新增状态。",
+                        "jdSyncText": "从配置的招聘网站目标网页出发，根据页面可见导航和内容自行找到职位列表与职位详情，识别新增、更新和下架职位，并同步到本地 JD 库；同步过程只处理职位信息，不处理候选人。",
                     },
                 },
             },
@@ -717,14 +718,14 @@ def default_agent_definition() -> dict[str, Any]:
             },
             "jd_sync": {
                 "name": "JD Sync",
-                "description": "手动运行的 JD 同步 Agent，负责从招聘网站同步职位信息到本地 JD 库。",
+                "description": "手动运行的 JD 同步 Agent，负责从招聘网站目标网页出发同步职位信息到本地 JD 库。",
                 "role_definition": {
                     "identity": "JD 同步 Agent",
-                    "positioning": "在人工已登录招聘网站的前提下，手动同步职位列表和职位详情到本地 JD 库的受限 Agent。",
+                    "positioning": "在人工已登录招聘网站的前提下，从配置的目标网页出发同步职位信息到本地 JD 库的受限 Agent。",
                     "duties": [
-                        "从配置的招聘网站入口读取职位列表和职位详情。",
-                        "按 platform/external_id 或标题、部门、地点识别新增、更新和下架职位。",
-                        "调用 JD 写入能力同步本地 JD 库，并记录同步结果和异常。",
+                        "从配置的招聘网站目标网页出发，根据页面可见导航和内容找到职位列表与职位详情。",
+                        "根据职位标题、团队、地点和页面可见来源信息识别新增、更新和下架职位。",
+                        "将确认后的职位信息同步到本地 JD 库，并记录同步结果和异常。",
                     ],
                     "tone": "professional, concise, evidence-driven",
                     "boundaries": [

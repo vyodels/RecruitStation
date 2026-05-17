@@ -68,6 +68,31 @@ def test_autonomous_context_renders_payload_and_json_turn_input() -> None:
     assert context.context_payload["memory_layers"]["long_term"].startswith("memory index")
 
 
+def test_autonomous_context_treats_browser_target_url_as_entrypoint_hint() -> None:
+    context = build_autonomous_turn_context(
+        title="Recruiting workflow",
+        instruction="当前 Chrome 活动页已经是 http://127.0.0.1:4317/jobs，请完成招聘闭环。",
+        scope_kind="global",
+        scope_ref="workspace:shared",
+        constraints={
+            "browser_target": {"url": "http://127.0.0.1:4317/jobs", "host": "127.0.0.1:4317"},
+            "context_hints": {"active_tab_url": "http://127.0.0.1:4317/jobs"},
+        },
+        world_snapshot={},
+        recent_events=[],
+        memory_entries=[],
+        available_tools=["delegate_scene_context"],
+        skill_contexts=[],
+        available_mcps=["browser"],
+    )
+
+    system_prompt = str(context.initial_messages[0].content)
+    assert "browser_target.url is an entrypoint hint" in system_prompt
+    assert "not an exact active-tab path requirement" in system_prompt
+    assert "full origin" in system_prompt
+    assert "Do not treat context_hints.active_tab_url as current browser evidence" in system_prompt
+
+
 def test_shared_context_builder_uses_canonical_instruction_payload() -> None:
     context = build_agent_turn_context(
         agent_kind="autonomous",

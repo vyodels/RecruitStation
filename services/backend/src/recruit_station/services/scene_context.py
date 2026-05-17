@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlparse
@@ -520,6 +521,7 @@ def _build_scene_instruction(request: dict[str, Any]) -> str:
         parts.append(f"浏览器目标：{_compact_value(request['browser_target'])}")
         parts.append(
             "当 browser_target.url 存在时，必须以该 URL 的完整 origin（包含端口）作为目标边界。"
+            "browser_target.url 只是入口提示，不是要求当前活动页路径必须完全等于该 URL；同 origin 下的路径可随工作流跳转。"
             "不要把同 hostname 但不同端口、不同 origin 或旧测试 tab 当成当前任务目标；"
             "browser 侧只允许只读 snapshot/query/wait/target-identification；不得把 browser 工具当作点击、导航、下载、Cookie 或外壳维护执行器。"
             "若当前只读目标识别无法确认允许的目标页，停止当前动作并返回结构化 blocker 或请求 human 处理。"
@@ -593,9 +595,9 @@ def _append_episode_engine_events(
             "recorded_at": event.get("recorded_at"),
             "payload": payload,
         }
-        if event_type == "tool_event" and kind in {"tool_call_started", "tool_use_completed"}:
+        if event_type == "tool_event" and kind in {"tool_call_started", "tool_use_completed", "tool_result_ready"}:
             action_entries.append(entry)
-        else:
+        if not (event_type == "tool_event" and kind in {"tool_call_started", "tool_use_completed"}):
             observation_entries.append(entry)
     observation_entries = observation_entries[-200:]
     action_entries = action_entries[-200:]
@@ -606,6 +608,11 @@ def _append_episode_engine_events(
         "engine_output_count": max(engine_output_count, int((episode.metrics or {}).get("engine_output_count") or 0)),
         "tool_call_count": len(action_entries),
         "tool_result_count": sum(
+            1
+            for item in action_entries
+            if item.get("type") == "tool_event" and _as_dict(item.get("payload")).get("kind") == "tool_result_ready"
+        )
+        or sum(
             1
             for item in observation_entries
             if item.get("type") == "tool_event" and _as_dict(item.get("payload")).get("kind") == "tool_result_ready"
@@ -1236,6 +1243,16 @@ def _normalize_scene_hid_action_arguments(
     if host:
         if target or tab_id is not None:
             target.setdefault("host", host)
+            window_title = _resolve_web_window_title(
+                context=context,
+                target=target,
+                request=request,
+                browser_semantics=browser_semantics,
+                tab_id=tab_id,
+                desired_host=host,
+            )
+            if window_title:
+                target.setdefault("windowTitle", window_title)
             normalized["target"] = target
         context.setdefault("host", host)
         if url:
@@ -1315,6 +1332,14 @@ def _remember_browser_tab(browser_semantics: dict[str, Any], tab: dict[str, Any]
         browser_semantics["last_host"] = host
     if url:
         browser_semantics["last_url"] = url
+    title = _optional_string(tab.get("title"))
+    window_title = _optional_string(tab.get("windowTitle") or tab.get("window_title") or title)
+    if title:
+        browser_semantics["last_title"] = title
+        browser_semantics["last_title_host"] = host
+    if window_title:
+        browser_semantics["last_window_title"] = window_title
+        browser_semantics["last_window_title_host"] = host
     if viewport:
         browser_semantics["last_viewport"] = viewport
     if tab_id is None:
@@ -1328,7 +1353,8 @@ def _remember_browser_tab(browser_semantics: dict[str, Any], tab: dict[str, Any]
                 "tabId": tab_id,
                 "url": url,
                 "host": host,
-                "title": _optional_string(tab.get("title")),
+                "title": title,
+                "windowTitle": window_title,
                 "windowId": _optional_int(tab.get("windowId") or tab.get("window_id")),
                 "active": bool(tab.get("active")),
                 "viewport": viewport or None,
@@ -1390,6 +1416,47 @@ def _resolve_web_url(
         if url:
             return url
     return None
+
+
+def _resolve_web_window_title(
+    *,
+    context: dict[str, Any],
+    target: dict[str, Any],
+    request: dict[str, Any],
+    browser_semantics: dict[str, Any],
+    tab_id: int | None,
+    desired_host: str | None,
+) -> str | None:
+    browser_target = dict(request.get("browser_target") or {})
+    tab_info = dict((browser_semantics.get("tabs") or {}).get(tab_id) or {}) if tab_id is not None else {}
+    candidates = (
+        (target.get("windowTitle"), target),
+        (target.get("window_title"), target),
+        (context.get("windowTitle"), context),
+        (context.get("window_title"), context),
+        (browser_target.get("windowTitle"), browser_target),
+        (browser_target.get("window_title"), browser_target),
+        (tab_info.get("windowTitle"), tab_info),
+        (tab_info.get("window_title"), tab_info),
+        (tab_info.get("title"), tab_info),
+        (browser_semantics.get("last_window_title"), {"host": browser_semantics.get("last_window_title_host")}),
+        (browser_semantics.get("last_title"), {"host": browser_semantics.get("last_title_host")}),
+    )
+    for candidate, source in candidates:
+        if not _browser_title_source_matches_host(source, desired_host=desired_host):
+            continue
+        title = _optional_string(candidate, max_length=255)
+        if title:
+            return title
+    return None
+
+
+def _browser_title_source_matches_host(source: dict[str, Any], *, desired_host: str | None) -> bool:
+    normalized_desired = _normalize_host_boundary(_host_from_url(desired_host) or desired_host)
+    if not normalized_desired:
+        return True
+    source_host = _normalize_host_boundary(_host_from_url(source.get("host")) or source.get("host") or _host_from_url(source.get("url")))
+    return not source_host or source_host == normalized_desired
 
 
 def _primitive_from_legacy_point(arguments: dict[str, Any]) -> dict[str, Any] | None:
@@ -1551,6 +1618,9 @@ def _scene_result_status(outcome: AgentTurnOutcome) -> str:
     result_status = str((outcome.result_data or {}).get("status") or "").strip().lower()
     if result_status:
         return result_status
+    final_status = str((_scene_final_control_payload(outcome) or {}).get("status") or "").strip().lower()
+    if _is_scene_non_success_status(final_status):
+        return final_status
     return ""
 
 
@@ -1564,6 +1634,12 @@ def _stored_status(public_status: str) -> str:
 
 
 def _public_summary(outcome: AgentTurnOutcome, blockers: list[dict[str, Any]]) -> str:
+    final_payload = _scene_final_control_payload(outcome)
+    final_status = str((final_payload or {}).get("status") or "").strip().lower()
+    if _is_scene_non_success_status(final_status):
+        final_summary = str((final_payload or {}).get("summary") or (final_payload or {}).get("message") or "").strip()
+        if final_summary:
+            return final_summary
     final_output = str(outcome.final_output or "").strip()
     if final_output:
         return final_output
@@ -1581,6 +1657,38 @@ def _scene_result_data(outcome: AgentTurnOutcome) -> dict[str, Any]:
     if isinstance(outcome.result_data, dict) and outcome.result_data:
         return dict(outcome.result_data)
     return {}
+
+
+def _scene_final_control_payload(outcome: AgentTurnOutcome) -> dict[str, Any] | None:
+    return _parse_scene_final_output_json(outcome.final_output)
+
+
+def _is_scene_non_success_status(value: str) -> bool:
+    terminal_values = {"blocked", "wait_human", "waiting_human", "paused", "error", "failed", "failure", "fail"}
+    return value in terminal_values or value.startswith(("blocked_", "failed_", "failure_"))
+
+
+def _parse_scene_final_output_json(value: Any) -> dict[str, Any] | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if len(lines) >= 3 and lines[0].startswith("```") and lines[-1].strip().startswith("```"):
+            text = "\n".join(lines[1:-1]).strip()
+    candidates = [text]
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        candidates.append(text[start : end + 1])
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
 
 
 def _scene_result_artifacts(result_data: dict[str, Any]) -> list[dict[str, Any]]:

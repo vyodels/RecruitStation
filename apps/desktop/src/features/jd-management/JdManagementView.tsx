@@ -599,6 +599,7 @@ export function JdManagementView({
   const [keyword, setKeyword] = useState("");
   const [applicantKeyword, setApplicantKeyword] = useState("");
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [selectedJobIds, setSelectedJobIds] = useState<Set<string>>(() => new Set());
   const [drawerRow, setDrawerRow] = useState<JdManagementRow | null>(null);
   const [creating, setCreating] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -630,6 +631,12 @@ export function JdManagementView({
   const paginatedRows = filteredRows;
   const pageStart = serverTotal ? (currentPage - 1) * pageSize + 1 : 0;
   const pageEnd = Math.min((currentPage - 1) * pageSize + paginatedRows.length, serverTotal);
+  const pageSelectableJobIds = useMemo(
+    () => paginatedRows.map((row) => row.job.jobDescriptionId).filter((id): id is string => Boolean(id)),
+    [paginatedRows],
+  );
+  const selectedCount = selectedJobIds.size;
+  const allPageRowsSelected = pageSelectableJobIds.length > 0 && pageSelectableJobIds.every((jobId) => selectedJobIds.has(jobId));
   const pageNumbers = useMemo(() => {
     const windowSize = 5;
     const halfWindow = Math.floor(windowSize / 2);
@@ -640,11 +647,20 @@ export function JdManagementView({
 
   useEffect(() => {
     setPage(1);
+    setSelectedJobIds(new Set());
   }, [applicantKeyword, cityFilter, departmentFilter, keyword, ownerFilter, pageSize, statusFilter]);
 
   useEffect(() => {
     setPage((current) => clampPage(current, pageCount));
   }, [pageCount]);
+
+  useEffect(() => {
+    const visibleIds = new Set(pageSelectableJobIds);
+    setSelectedJobIds((current) => {
+      const next = new Set([...current].filter((jobId) => visibleIds.has(jobId)));
+      return next.size === current.size ? current : next;
+    });
+  }, [pageSelectableJobIds]);
 
   useEffect(() => {
     let cancelled = false;
@@ -761,6 +777,32 @@ export function JdManagementView({
 
   const selectedRow = paginatedRows.find((row) => row.key === selectedKey) ?? paginatedRows[0] ?? null;
 
+  const toggleJobSelection = (jobDescriptionId: string, checked: boolean) => {
+    setSelectedJobIds((current) => {
+      const next = new Set(current);
+      if (checked) {
+        next.add(jobDescriptionId);
+      } else {
+        next.delete(jobDescriptionId);
+      }
+      return next;
+    });
+  };
+
+  const toggleCurrentPageSelection = (checked: boolean) => {
+    setSelectedJobIds((current) => {
+      const next = new Set(current);
+      pageSelectableJobIds.forEach((jobId) => {
+        if (checked) {
+          next.add(jobId);
+        } else {
+          next.delete(jobId);
+        }
+      });
+      return next;
+    });
+  };
+
   const openDrawer = async (row: JdManagementRow) => {
     if (!row.job.jobDescriptionId) {
       setDrawerRow(row);
@@ -806,10 +848,44 @@ export function JdManagementView({
     setSaving(true);
     try {
       await apiClient.deleteJobDescription(jobDescriptionId);
+      setSelectedJobIds((current) => {
+        const next = new Set(current);
+        next.delete(jobDescriptionId);
+        return next;
+      });
       await onRefresh();
       setReloadToken((value) => value + 1);
       setDrawerRow(null);
       setCreating(false);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const deleteSelectedJobs = async () => {
+    const jobDescriptionIds = Array.from(selectedJobIds);
+    if (!jobDescriptionIds.length) {
+      return;
+    }
+    if (!window.confirm(`确认删除选中的 ${jobDescriptionIds.length} 个 JD？相关投递记录会保留，但将不再关联这些 JD。`)) {
+      return;
+    }
+    setSaving(true);
+    try {
+      const result = await apiClient.bulkDeleteJobDescriptions(jobDescriptionIds);
+      setSelectedJobIds(new Set());
+      if (drawerRow?.job.jobDescriptionId && jobDescriptionIds.includes(drawerRow.job.jobDescriptionId)) {
+        setDrawerRow(null);
+        setCreating(false);
+      }
+      if (selectedRow?.job.jobDescriptionId && jobDescriptionIds.includes(selectedRow.job.jobDescriptionId)) {
+        setSelectedKey(null);
+      }
+      await onRefresh();
+      setReloadToken((value) => value + 1);
+      if (result.missingIds.length) {
+        window.alert(`已删除 ${result.deletedIds.length} 个 JD，${result.missingIds.length} 个 JD 不存在或已被删除。`);
+      }
     } finally {
       setSaving(false);
     }
@@ -875,10 +951,30 @@ export function JdManagementView({
         </section>
 
         <section className="jd-management-table-card">
+          <div className="jd-management-bulkbar" data-active={selectedCount > 0 ? "true" : "false"}>
+            <span>{selectedCount > 0 ? `已选择 ${selectedCount} 个 JD` : "选择 JD 后可批量删除"}</span>
+            <button
+              type="button"
+              className="jd-management-button jd-management-button--danger"
+              disabled={!selectedCount || saving}
+              onClick={() => void deleteSelectedJobs()}
+            >
+              删除选中 JD
+            </button>
+          </div>
           <div className="jd-management-table-wrap">
             <table className="jd-management-table">
               <thead>
                 <tr>
+                  <th className="jd-management-table__select">
+                    <input
+                      type="checkbox"
+                      aria-label="选择当前页 JD"
+                      checked={allPageRowsSelected}
+                      disabled={!pageSelectableJobIds.length || saving}
+                      onChange={(event) => toggleCurrentPageSelection(event.target.checked)}
+                    />
+                  </th>
                   <th>职位名称</th>
                   <th>城市</th>
                   <th>部门</th>
@@ -895,16 +991,28 @@ export function JdManagementView({
               <tbody>
                 {serverError ? (
                   <tr>
-                    <td colSpan={11} className="jd-management-table__empty">{serverError}</td>
+                    <td colSpan={12} className="jd-management-table__empty">{serverError}</td>
                   </tr>
                 ) : null}
                 {!serverError && !paginatedRows.length ? (
                   <tr>
-                    <td colSpan={11} className="jd-management-table__empty">{serverLoading ? "加载中" : "还没有职位数据哦～"}</td>
+                    <td colSpan={12} className="jd-management-table__empty">{serverLoading ? "加载中" : "还没有职位数据哦～"}</td>
                   </tr>
                 ) : null}
                 {paginatedRows.map((row) => (
                   <tr key={row.key} data-active={selectedRow?.key === row.key ? "true" : undefined} onClick={() => setSelectedKey(row.key)}>
+                    <td className="jd-management-table__select">
+                      {row.job.jobDescriptionId ? (
+                        <input
+                          type="checkbox"
+                          aria-label={`选择 ${row.job.title}`}
+                          checked={selectedJobIds.has(row.job.jobDescriptionId)}
+                          disabled={saving}
+                          onClick={(event) => event.stopPropagation()}
+                          onChange={(event) => toggleJobSelection(row.job.jobDescriptionId as string, event.target.checked)}
+                        />
+                      ) : null}
+                    </td>
                     <td>
                       <span className="jd-management-role-cell">
                         <strong>{row.job.title}</strong>

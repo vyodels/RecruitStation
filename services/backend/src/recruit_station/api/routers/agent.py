@@ -2,16 +2,20 @@ from __future__ import annotations
 
 from datetime import datetime
 import json
+from pathlib import Path
+import time
 from threading import Thread
 from typing import Any, Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from recruit_station.agents.autonomous import AutonomousRunInterrupted
+from recruit_station.assistant.stream import format_sse_event
 from recruit_station.db.base import utcnow
 from recruit_station.models.domain import (
     AgentRun,
@@ -57,6 +61,12 @@ RUNTIME_AGENT_KINDS: tuple[AgentKind, ...] = ("autonomous", "jd_sync")
 AUTONOMOUS_PRIMARY_CONVERSATION_ID = "autonomous-primary"
 JD_SYNC_PRIMARY_CONVERSATION_ID = "jd-sync-primary"
 SHARED_WORKSPACE_SCOPE_REF = "workspace:shared"
+DEFAULT_JD_SYNC_POLICY_TEXT = "从配置的招聘网站目标网页出发，根据页面可见导航和内容自行找到职位列表与职位详情，识别新增、更新和下架职位；只有确认职位详情已完整采集且没有阻塞时，才同步到本地 JD 库，列表页摘要只能作为发现线索。同步过程只处理职位信息，不处理候选人。"
+TECHNICAL_JD_SYNC_TEXT_MARKERS = (
+    "upsert_job_description",
+    "platform/external_id",
+    "external_id",
+)
 AUTONOMOUS_OPEN_RUN_STATUSES: tuple[str, ...] = (
     "queued",
     "running",
@@ -133,6 +143,11 @@ class AutonomousTriggerRequest(BaseModel):
 
     title: str | None = None
     instruction: str
+    request_message: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("request_message", "requestMessage"),
+        serialization_alias="requestMessage",
+    )
     kind: str = "recruiting"
     requested_by: str = "desktop-user"
     summary: str | None = None
@@ -164,6 +179,11 @@ class AutonomousTriggerRequest(BaseModel):
 
 
 class RunControlRequest(BaseModel):
+    reviewer: str = "desktop-user"
+    reason: str | None = None
+
+
+class ConversationClearRequest(BaseModel):
     reviewer: str = "desktop-user"
     reason: str | None = None
 
@@ -534,6 +554,139 @@ def build_router(container: AppContainer) -> APIRouter:
                 conversation_id=conversation_id,
             )
 
+    @router.get("/{kind}/conversations/{conversation_id}/stream")
+    def stream_agent_conversation(kind: AgentKind, conversation_id: str) -> StreamingResponse:
+        if kind not in RUNTIME_AGENT_KINDS:
+            raise HTTPException(status_code=404, detail=f"Conversation stream is not supported for agent kind: {kind}")
+
+        def _stream():
+            last_signature: str | None = None
+            idle_ticks = 0
+            max_idle_ticks = 300
+            while idle_ticks < max_idle_ticks:
+                with container.session_factory() as session:
+                    _resolve_agent_definition(session, kind)
+                    record = _serialize_conversation_record(
+                        session,
+                        container=container,
+                        kind=kind,
+                        conversation_id=conversation_id,
+                    )
+                signature = _conversation_stream_signature(record)
+                if signature != last_signature:
+                    last_signature = signature
+                    idle_ticks = 0
+                    yield format_sse_event("conversation_snapshot", record)
+                else:
+                    idle_ticks += 1
+                    if idle_ticks % 40 == 0:
+                        yield ": keep-alive\n\n"
+                time.sleep(0.25)
+
+        return StreamingResponse(_stream(), media_type="text/event-stream")
+
+    @router.post("/{kind}/conversations/{conversation_id}/clear")
+    def clear_agent_conversation(kind: AgentKind, conversation_id: str, payload: ConversationClearRequest) -> dict[str, Any]:
+        if kind == "assistant":
+            container.assistant_adapter.cancel_turn(conversation_id)
+            with container.session_factory() as session:
+                conversation = session.scalars(
+                    select(ConversationSession).where(ConversationSession.conversation_id == conversation_id)
+                ).first()
+                if conversation is None:
+                    raise HTTPException(status_code=404, detail="Conversation not found for agent kind: assistant")
+                session.execute(delete(ConversationTurn).where(ConversationTurn.conversation_pk == conversation.id))
+                jsonl_path = Path(conversation.jsonl_path)
+                if jsonl_path.exists():
+                    jsonl_path.write_text("", encoding="utf-8")
+                conversation.context_summary = None
+                conversation.messages_token_count = 0
+                conversation.last_compact_at = None
+                conversation.status = "active"
+                conversation.last_active_at = utcnow()
+                session.commit()
+                session.refresh(conversation)
+                return {
+                    "conversation": _assistant_conversation_summary_from_session(session, conversation),
+                    "messages": [],
+                    "cleared": True,
+                }
+
+        if kind not in RUNTIME_AGENT_KINDS:
+            raise HTTPException(status_code=404, detail=f"Conversation clear is not supported for agent kind: {kind}")
+        primary_conversation_id = _primary_conversation_id(kind)
+        if conversation_id != primary_conversation_id:
+            raise HTTPException(status_code=404, detail=f"Only the primary conversation can be cleared for agent kind: {kind}")
+
+        open_run_ids: list[str] = []
+        with container.session_factory() as session:
+            definition = _resolve_agent_definition(session, kind)
+            agent_session = _ensure_agent_session(session, definition, kind=kind)
+            open_runs = session.scalars(
+                select(AgentRun).where(
+                    AgentRun.session_id == agent_session.id,
+                    AgentRun.agent_kind == kind,
+                    AgentRun.status.in_(AUTONOMOUS_OPEN_RUN_STATUSES),
+                )
+            ).all()
+            open_run_ids = [str(run.run_id or run.id) for run in open_runs]
+
+        cancelled_run_ids: list[str] = []
+        for run_id in open_run_ids:
+            try:
+                container.autonomous_adapter.cancel_run(
+                    run_id,
+                    reviewer=payload.reviewer,
+                    reason=payload.reason or "conversation cleared",
+                    agent_kind=kind,
+                )
+                cancelled_run_ids.append(run_id)
+            except (KeyError, ValueError):
+                continue
+
+        with container.session_factory() as session:
+            definition = _resolve_agent_definition(session, kind)
+            agent_session = _ensure_agent_session(session, definition, kind=kind)
+            cleared_at = utcnow()
+            cleared_run_ids = [
+                str(run_id)
+                for run_id in session.scalars(
+                    select(AgentRun.id).where(
+                        AgentRun.session_id == agent_session.id,
+                        AgentRun.agent_kind == kind,
+                    )
+                ).all()
+            ]
+            metadata = dict(agent_session.runtime_metadata or {})
+            metadata["conversation_cleared_at"] = cleared_at.isoformat()
+            metadata["conversation_cleared_by"] = payload.reviewer
+            metadata["conversation_cleared_run_ids"] = cleared_run_ids
+            if payload.reason:
+                metadata["conversation_clear_reason"] = payload.reason
+            agent_session.runtime_metadata = metadata
+            agent_session.last_active_at = cleared_at
+            pending_inputs = session.scalars(
+                select(AgentPendingUserInput).where(
+                    AgentPendingUserInput.agent_kind == kind,
+                    AgentPendingUserInput.conversation_id == primary_conversation_id,
+                    AgentPendingUserInput.status.in_(("pending", "claimed")),
+                )
+            ).all()
+            for pending_input in pending_inputs:
+                pending_input.status = "cancelled"
+                pending_input.completed_at = cleared_at
+                input_metadata = dict(pending_input.input_metadata or {})
+                input_metadata["cancelled_by"] = payload.reviewer
+                input_metadata["cancel_reason"] = payload.reason or "conversation cleared"
+                pending_input.input_metadata = input_metadata
+            session.commit()
+            return {
+                **_serialize_autonomous_primary_conversation_record(session, definition=definition, kind=kind),
+                "cleared": True,
+                "cancelledRunIds": cancelled_run_ids,
+                "cancelled_run_ids": cancelled_run_ids,
+            }
+
     @router.get("/{kind}/runs")
     def list_runs(
         kind: AgentKind,
@@ -558,6 +711,11 @@ def build_router(container: AppContainer) -> APIRouter:
             )
             if status is not None:
                 stmt = stmt.where(AgentRun.status == status)
+            hidden_run_ids = _agent_session_conversation_hidden_run_ids(agent_session)
+            if hidden_run_ids:
+                stmt = stmt.where(AgentRun.id.not_in(hidden_run_ids))
+            elif (clear_after := _agent_session_conversation_cleared_at(agent_session)) is not None:
+                stmt = stmt.where(AgentRun.created_at > clear_after)
             return [_serialize_run(item) for item in session.scalars(stmt).all()]
 
     @router.get("/{kind}/runs/{run_id}")
@@ -776,12 +934,12 @@ def _serialize_agent_projection(definition: AgentDefinition, *, kind: AgentKind)
             "status": definition.status,
             "description": definition.description,
             "is_primary": definition.is_primary,
-            "role_definition": dict(definition.role_definition or {}),
-            "prompt_config": dict(definition.prompt_config or {}),
+            "role_definition": role_definition,
+            "prompt_config": dict(config.get("prompt_config") or definition.prompt_config or {}),
             "playbook_blueprint": dict(definition.playbook_blueprint or {}),
-            "memory_policy": dict(definition.memory_policy or {}),
-            "dashboard_config": dict(definition.dashboard_config or {}),
-            "channel_config": dict(definition.channel_config or {}),
+            "memory_policy": dict(config.get("memory_policy") or definition.memory_policy or {}),
+            "dashboard_config": dict(projection.get("dashboard_config") or definition.dashboard_config or {}),
+            "channel_config": dict(projection.get("channel_config") or definition.channel_config or {}),
             "product_bindings": dict(definition.product_bindings or {}),
             "product_config": dict(definition.product_config or {}),
             "product_projections": dict(definition.product_projections or {}),
@@ -860,11 +1018,11 @@ def _projected_role_definition(
     if kind == "jd_sync":
         return {
             "identity": "JD 同步 Agent",
-            "positioning": "在人工已登录招聘网站的前提下，手动同步职位列表和职位详情到本地 JD 库的受限 Agent。",
+            "positioning": "在人工已登录招聘网站的前提下，从配置的目标网页出发同步职位信息到本地 JD 库的受限 Agent。",
             "duties": [
-                "从配置的招聘网站入口读取职位列表和职位详情。",
-                "按 platform/external_id 或标题、部门、地点识别新增、更新和下架职位。",
-                "调用 JD 写入能力同步本地 JD 库，并记录同步结果和异常。",
+                "从配置的招聘网站目标网页出发，根据页面可见导航和内容找到职位列表与职位详情。",
+                "根据职位标题、团队、地点和页面可见来源信息识别新增、更新和下架职位。",
+                "将确认后的职位信息同步到本地 JD 库，并记录同步结果和异常。",
             ],
             "tone": "professional, concise, evidence-driven",
             "boundaries": [
@@ -1053,6 +1211,9 @@ def _create_autonomous_run(
     payload: AutonomousTriggerRequest,
     agent_kind: AgentKind = "autonomous",
 ) -> dict[str, Any]:
+    requested_message = str(payload.request_message or "").strip()
+    requested_instruction = str(payload.instruction or "").strip()
+    requested_title = str(payload.title or "").strip()
     _validate_autonomous_run_contract(definition, payload)
     agent_session = _ensure_agent_session(session, definition, kind=agent_kind)
     open_run = _find_open_autonomous_run(session, session_id=agent_session.id, agent_kind=agent_kind)
@@ -1106,6 +1267,9 @@ def _create_autonomous_run(
         context_manifest={
             "instruction": instruction,
             "title": title,
+            "requested_message": requested_message,
+            "requested_instruction": requested_instruction,
+            "requested_title": requested_title,
             "kind": payload.kind,
             "requested_by": payload.requested_by,
             "candidate_count_target": payload.candidate_count_target,
@@ -1121,6 +1285,9 @@ def _create_autonomous_run(
         runtime_metadata={
             "instruction": instruction,
             "title": title,
+            "requested_message": requested_message,
+            "requested_instruction": requested_instruction,
+            "requested_title": requested_title,
             "summary": payload.summary or instruction,
             "requested_by": payload.requested_by,
             "jd_id": payload.jd_id,
@@ -1193,12 +1360,13 @@ def _validated_jd_sync_config(definition: AgentDefinition) -> dict[str, Any]:
 def _merge_jd_sync_payload(payload: AutonomousTriggerRequest, *, config: dict[str, Any]) -> None:
     target_recruiting_site = dict(config["target_recruiting_site"])
     execution_sop = dict(config["execution_sop"])
+    sync_policy = dict(config["automation_config"].get("syncPolicy") or config["automation_config"].get("sync_policy") or {})
     constraints = dict(payload.constraints or {})
     constraints.setdefault("scope_kind", "global")
     constraints.setdefault("plan_kind", "jd_sync")
     constraints.setdefault("target_recruiting_site", target_recruiting_site)
     constraints.setdefault("execution_sop", execution_sop)
-    constraints.setdefault("sync_policy", dict(config["automation_config"].get("syncPolicy") or config["automation_config"].get("sync_policy") or {}))
+    constraints.setdefault("sync_policy", sync_policy)
     payload.constraints = constraints
     context_hints = dict(payload.context_hints or {})
     context_hints.setdefault(
@@ -1213,15 +1381,165 @@ def _merge_jd_sync_payload(payload: AutonomousTriggerRequest, *, config: dict[st
     payload.context_hints = context_hints
     if not str(payload.title or "").strip():
         payload.title = "同步招聘站点 JD"
-    payload.instruction = "\n".join(
+    user_instruction = _normalize_jd_sync_extra_instruction(
+        payload.instruction,
+        entry_url=str(target_recruiting_site.get("entry_url") or "").strip(),
+        title=payload.title,
+        request_message=payload.request_message,
+    )
+    payload.instruction = _build_jd_sync_user_instruction(
+        target_recruiting_site=target_recruiting_site,
+        execution_sop=execution_sop,
+        sync_policy=sync_policy,
+        user_instruction=user_instruction,
+    )
+
+
+def _build_jd_sync_user_instruction(
+    *,
+    target_recruiting_site: dict[str, Any],
+    execution_sop: dict[str, Any],
+    sync_policy: dict[str, Any],
+    user_instruction: str,
+) -> str:
+    entry_url = str(target_recruiting_site.get("entry_url") or "").strip()
+    access_rules = _config_text_lines(
+        execution_sop.get("siteAccessRulesText")
+        or execution_sop.get("site_access_rules_text")
+        or execution_sop.get("siteAccessRules")
+        or execution_sop.get("site_access_rules")
+    )
+    sync_policy_lines = _product_jd_sync_policy_lines(
+        sync_policy.get("jdSyncText")
+        or sync_policy.get("jd_sync_text")
+    )
+    instruction_parts = [
+        "同步招聘站点 JD",
+        "",
+        "任务范围：",
+        "- 从配置的招聘网站目标网页出发，目标网页可以是该网站任意可访问页面。",
+        "- 根据页面可见导航和内容自行找到职位列表与职位详情。",
+        "- 只发现和同步 JD。",
+        "- 不处理候选人筛选、评分、外联或投递推进。",
+        "",
+        "目标网页：",
+        f"- URL：{entry_url}",
+    ]
+    if access_rules:
+        instruction_parts.extend(["", "站点访问规则：", *[f"- {line}" for line in access_rules]])
+    if sync_policy_lines:
+        instruction_parts.extend(["", "JD 同步策略：", *[f"- {line}" for line in sync_policy_lines]])
+    instruction_parts.extend(
         [
-            "执行 JD 同步 bootstrap。该阶段只负责从已保存的招聘入口发现并同步 JD，不处理候选人筛选、评分、外联或投递推进。",
-            f"招聘入口 URL：{target_recruiting_site.get('entry_url')}；复用人工已登录的浏览器会话。",
-            "同步完成后，用户需要在配置页选择生效 JD，并为选中的 JD 配置策略、评分标准和执行 SOP 后，才能启动完整自动化招聘。",
             "",
-            str(payload.instruction or "").strip(),
+            "同步完成后：",
+            "- 在配置页选择生效 JD。",
+            "- 为选中的 JD 配置策略、评分标准和完整执行 SOP 后，才能启动完整自动化招聘。",
         ]
-    ).strip()
+    )
+    if user_instruction:
+        instruction_parts.extend(["", "补充指令：", user_instruction])
+    return _dedupe_jd_sync_instruction("\n".join(instruction_parts), entry_url=entry_url)
+
+
+def _config_text_lines(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        candidates = [str(item).strip() for item in value]
+    else:
+        candidates = [line.strip() for line in str(value).splitlines()]
+    return [line for line in candidates if line]
+
+
+def _product_jd_sync_policy_lines(value: Any) -> list[str]:
+    lines = _config_text_lines(value)
+    if not lines:
+        return [DEFAULT_JD_SYNC_POLICY_TEXT]
+    product_lines: list[str] = []
+    for line in lines:
+        normalized = line.lower()
+        if any(marker in normalized for marker in TECHNICAL_JD_SYNC_TEXT_MARKERS):
+            if DEFAULT_JD_SYNC_POLICY_TEXT not in product_lines:
+                product_lines.append(DEFAULT_JD_SYNC_POLICY_TEXT)
+            continue
+        product_lines.append(line)
+    return product_lines or [DEFAULT_JD_SYNC_POLICY_TEXT]
+
+
+def _dedupe_jd_sync_instruction(instruction: str, *, entry_url: str) -> str:
+    raw = str(instruction or "").strip()
+    if not raw:
+        return ""
+    seen: set[str] = set()
+    lines: list[str] = []
+    for line in raw.splitlines():
+        stripped = line.strip()
+        key = _jd_sync_instruction_line_key(stripped, entry_url=entry_url)
+        if key and key in seen:
+            continue
+        if key:
+            seen.add(key)
+        lines.append(line.rstrip())
+    return "\n".join(lines).strip()
+
+
+def _jd_sync_instruction_line_key(line: str, *, entry_url: str) -> str | None:
+    if not line:
+        return None
+    if entry_url and line.startswith(f"目标网页 URL：{entry_url}"):
+        return "entry_url"
+    if entry_url and line in {f"- URL：{entry_url}", f"URL：{entry_url}"}:
+        return "entry_url"
+    if line in {
+        "- 只读取职位列表和职位详情。",
+        "- 只发现和同步 JD。",
+    }:
+        return "jd_sync_boundary"
+    if line in {
+        "同步完成后，用户需要在配置页选择生效 JD，并为选中的 JD 配置策略、评分标准和执行 SOP 后，才能启动完整自动化招聘。",
+        "同步完成后，再选择生效 JD 并配置 JD 策略、评分标准和完整执行 SOP。",
+        "- 在配置页选择生效 JD。",
+        "- 为选中的 JD 配置策略、评分标准和完整执行 SOP 后，才能启动完整自动化招聘。",
+    }:
+        return "next_step"
+    return None
+
+
+def _normalize_jd_sync_extra_instruction(
+    instruction: str,
+    *,
+    entry_url: str,
+    title: str | None,
+    request_message: str | None,
+) -> str:
+    raw = str(instruction or "").strip()
+    if not raw:
+        return ""
+    launch_texts = {
+        str(title or "").strip(),
+        str(request_message or "").strip(),
+        "同步招聘站点 JD",
+    }
+    if raw in {text for text in launch_texts if text}:
+        return ""
+    legacy_template_lines = {
+        "从已保存的目标网页同步 JD。只发现和同步职位，不处理候选人筛选、评分、外联或投递推进。",
+        "同步完成后，用户需要在配置页选择生效 JD，并为选中的 JD 配置策略、评分标准和执行 SOP 后，才能启动完整自动化招聘。",
+        "同步完成后，再选择生效 JD 并配置 JD 策略、评分标准和完整执行 SOP。",
+    }
+    if entry_url:
+        legacy_template_lines.add(f"目标网页 URL：{entry_url}")
+        legacy_template_lines.add(f"目标网页 URL：{entry_url}；复用人工已登录的浏览器会话。")
+    remaining_lines = [
+        line.strip()
+        for line in raw.splitlines()
+        if line.strip() and line.strip() not in legacy_template_lines
+    ]
+    normalized = "\n".join(remaining_lines).strip()
+    if normalized in {text for text in launch_texts if text}:
+        return ""
+    return normalized
 
 
 def _validated_automation_recruiting_config(definition: AgentDefinition) -> dict[str, Any]:
@@ -1413,11 +1731,12 @@ def _create_saved_automation_run(
     )
     execution_sop["compiledPrompt"] = compiled_sop_prompt
     site_instruction = (
-        f"招聘入口 URL：{target_recruiting_site.get('entry_url')}；"
-        "复用人工已登录的浏览器会话。"
+        f"招聘网站目标网页 URL：{target_recruiting_site.get('entry_url')}；"
+        "复用人工已登录的浏览器会话，并由 Agent 根据页面可见导航和内容进入正确业务页面。"
     )
     payload = AutonomousTriggerRequest(
         title=f"多 JD 自动化招聘 · {len(selected_job_ids)} 个 JD",
+        request_message=f"启动多 JD 自动化招聘：{len(selected_job_ids)} 个 JD",
         instruction=(
             "按已保存的自动化招聘配置启动 Agent。\n"
             f"本次运行覆盖 {len(selected_job_ids)} 个 JD；"
@@ -1562,8 +1881,8 @@ def _compiled_automation_sop_prompt(
     ]
     return "\n".join(
         [
-            "## 本次运行入口与范围",
-            f"招聘入口 URL：{target_recruiting_site.get('entry_url') or '未配置'}",
+            "## 本次运行目标网页与范围",
+            f"招聘网站目标网页 URL：{target_recruiting_site.get('entry_url') or '未配置'}",
             "浏览器会话：复用人工已登录的浏览器会话；Agent 不处理登录、验证码、账号切换或绕过风控。",
             "选中 JD：",
             "\n".join(selected_job_lines) if selected_job_lines else "- 未选择 JD",
@@ -1625,6 +1944,27 @@ def _ensure_agent_session(session: Session, definition: AgentDefinition, *, kind
     session.add(item)
     session.flush()
     return item
+
+
+def _agent_session_conversation_cleared_at(agent_session: AgentSession) -> datetime | None:
+    metadata = dict(agent_session.runtime_metadata or {})
+    raw_value = metadata.get("conversation_cleared_at")
+    if isinstance(raw_value, datetime):
+        return raw_value
+    if not isinstance(raw_value, str) or not raw_value.strip():
+        return None
+    try:
+        return datetime.fromisoformat(raw_value)
+    except ValueError:
+        return None
+
+
+def _agent_session_conversation_hidden_run_ids(agent_session: AgentSession) -> list[str]:
+    metadata = dict(agent_session.runtime_metadata or {})
+    raw_ids = metadata.get("conversation_cleared_run_ids")
+    if not isinstance(raw_ids, list):
+        return []
+    return [str(item) for item in raw_ids if str(item or "").strip()]
 
 
 def _resolve_run_for_kind(session: Session, kind: AgentKind, run_id: str) -> AgentRun:
@@ -2286,6 +2626,86 @@ def _autonomous_run_message(conversation_id: str, run: AgentRun) -> dict[str, An
     }
 
 
+def _autonomous_run_input_message(conversation_id: str, run: AgentRun) -> dict[str, Any] | None:
+    context_manifest = dict(run.context_manifest or {})
+    runtime_metadata = dict(run.runtime_metadata or {})
+    content = _display_run_input_content(
+        run=run,
+        context_manifest=context_manifest,
+        runtime_metadata=runtime_metadata,
+    )
+    if not content:
+        return None
+    title = str(
+        context_manifest.get("requested_title")
+        or runtime_metadata.get("requested_title")
+        or context_manifest.get("title")
+        or runtime_metadata.get("title")
+        or _run_title(run)
+    ).strip()
+    created_at = _serialize_timestamp(run.created_at)
+    return {
+        "id": f"{conversation_id}:run:{run.run_id or run.id}:input",
+        "conversation_id": conversation_id,
+        "conversationId": conversation_id,
+        "role": "user",
+        "kind": "message",
+        "title": title or None,
+        "content": content,
+        "created_at": created_at,
+        "createdAt": created_at,
+        "status": "sent",
+        "metadata": {
+            "eventKind": "human",
+            "itemType": "runtime_run_request",
+            "message_type": "run_input",
+            "run_id": run.run_id,
+            "lane": run.lane,
+            "priority": run.priority,
+            "requested_by": context_manifest.get("requested_by") or runtime_metadata.get("requested_by"),
+        },
+    }
+
+
+def _display_run_input_content(
+    *,
+    run: AgentRun,
+    context_manifest: dict[str, Any],
+    runtime_metadata: dict[str, Any],
+) -> str:
+    content = str(
+        runtime_metadata.get("instruction")
+        or context_manifest.get("instruction")
+        or runtime_metadata.get("requested_instruction")
+        or context_manifest.get("requested_instruction")
+        or context_manifest.get("requested_message")
+        or runtime_metadata.get("requested_message")
+        or ""
+    ).strip()
+    if str(run.run_type or "").strip().lower() in JD_SYNC_RUN_KINDS:
+        entry_url = _run_instruction_entry_url(run, context_manifest=context_manifest, runtime_metadata=runtime_metadata)
+        return _dedupe_jd_sync_instruction(content, entry_url=entry_url)
+    return content
+
+
+def _run_instruction_entry_url(
+    run: AgentRun,
+    *,
+    context_manifest: dict[str, Any],
+    runtime_metadata: dict[str, Any],
+) -> str:
+    sources = [
+        dict(runtime_metadata.get("constraints") or {}),
+        dict(context_manifest.get("constraints") or {}),
+    ]
+    for source in sources:
+        target_site = dict(source.get("target_recruiting_site") or {})
+        entry_url = str(target_site.get("entry_url") or "").strip()
+        if entry_url:
+            return entry_url
+    return ""
+
+
 def _autonomous_turn_message(conversation_id: str, run: AgentRun, turn: AgentTurnRecord) -> dict[str, Any]:
     final_output = str((turn.turn_metadata or {}).get("final_output") or "").strip()
     created_at = _serialize_timestamp(turn.updated_at or turn.created_at)
@@ -2322,12 +2742,14 @@ def _autonomous_event_message(conversation_id: str, event: dict[str, Any]) -> di
     data = dict(payload.get("data") or {})
     tool_name = str(data.get("tool_name") or data.get("name") or "").strip()
     payload_kind = str(data.get("kind") or "").strip()
+    role = _runtime_event_role(event_type, data)
+    kind = "message" if role in {"user", "assistant"} else "status"
     return {
         "id": str(event.get("id") or uuid4().hex),
         "conversation_id": conversation_id,
         "conversationId": conversation_id,
-        "role": "system",
-        "kind": "status",
+        "role": role,
+        "kind": kind,
         "title": _runtime_event_title(event_type, data),
         "content": _runtime_event_content(event_type, data) or str(event.get("message") or event.get("event_type") or "Autonomous event"),
         "created_at": created_at,
@@ -2349,9 +2771,23 @@ def _autonomous_event_message(conversation_id: str, event: dict[str, Any]) -> di
     }
 
 
+def _runtime_event_role(event_type: str, data: dict[str, Any]) -> str:
+    normalized = str(event_type or "").strip().lower()
+    payload_kind = str(data.get("kind") or "").strip().lower()
+    if normalized in {"assistant_message_delta", "assistant_message_completed"}:
+        return "assistant"
+    if normalized == "runtime_event" and payload_kind == "pending_user_input_after_next_tool_call_injected":
+        return "user"
+    return "system"
+
+
 def _runtime_event_title(event_type: str, data: dict[str, Any]) -> str | None:
     tool_name = str(data.get("tool_name") or data.get("name") or "").strip()
     kind = str(data.get("kind") or event_type or "").strip().lower()
+    if str(event_type or "").strip().lower() in {"assistant_message_delta", "assistant_message_completed"}:
+        return None
+    if kind == "pending_user_input_after_next_tool_call_injected":
+        return None
     if kind == "tool_input_streamed":
         return f"准备工具调用：{tool_name}" if tool_name else "准备工具调用"
     if kind == "tool_use_completed":
@@ -2370,6 +2806,33 @@ def _runtime_event_title(event_type: str, data: dict[str, Any]) -> str | None:
 def _runtime_event_content(event_type: str, data: dict[str, Any]) -> str | None:
     tool_name = str(data.get("tool_name") or data.get("name") or "").strip()
     kind = str(data.get("kind") or event_type or "").strip().lower()
+    normalized_event_type = str(event_type or "").strip().lower()
+    if normalized_event_type == "assistant_message_delta":
+        return str(data.get("message") or data.get("delta") or "").strip() or None
+    if normalized_event_type == "assistant_message_completed":
+        return str(data.get("message") or "").strip() or None
+    if kind == "pending_user_input_after_next_tool_call_injected":
+        messages = data.get("messages")
+        if isinstance(messages, list):
+            lines: list[str] = []
+            for item in messages:
+                if not isinstance(item, dict):
+                    continue
+                metadata = item.get("metadata")
+                pending_input = metadata.get("pending_input") if isinstance(metadata, dict) else None
+                if isinstance(pending_input, list):
+                    lines.extend(
+                        str(pending.get("message") or "").strip()
+                        for pending in pending_input
+                        if isinstance(pending, dict) and str(pending.get("message") or "").strip()
+                    )
+                    continue
+                content = str(item.get("content") or "").strip()
+                if content:
+                    lines.append(content)
+            if lines:
+                return "\n".join(lines)
+        return None
     if kind == "tool_input_streamed":
         content = _compact_event_payload(data.get("content"))
         lines = [f"工具：{tool_name}" if tool_name else "工具输入生成中"]
@@ -2414,7 +2877,7 @@ def _autonomous_run_status_text(run: AgentRun) -> str:
     if status == "queued":
         return "Autonomous run is queued in the backend."
     if status == "waiting_human":
-        return "Autonomous run is waiting for desktop approval."
+        return "Autonomous run is waiting for the next runtime event."
     if status == "completed":
         return "Autonomous run completed."
     if status in {"failed", "cancelled", "interrupted"}:
@@ -2424,8 +2887,6 @@ def _autonomous_run_status_text(run: AgentRun) -> str:
 
 def _autonomous_run_event_kind(run: AgentRun) -> str:
     status = run.status.strip().lower()
-    if status == "waiting_human":
-        return "confirmation"
     if status in {"completed", "failed", "cancelled", "interrupted"}:
         return "execution_result"
     return "thinking"
@@ -2447,6 +2908,12 @@ def _runtime_event_kind(event_type: str, payload: dict[str, Any]) -> str:
     data = dict(payload.get("data") or {})
     payload_kind = str(data.get("kind") or payload.get("kind") or "").strip().lower()
     source = f"{normalized} {payload_kind}"
+    if normalized == "assistant_message_delta":
+        return "thinking"
+    if normalized == "assistant_message_completed":
+        return "execution_result"
+    if payload_kind == "pending_user_input_after_next_tool_call_injected":
+        return "human"
     if "permission" in source or "waiting_human" in source or "blocked" in source:
         return "confirmation"
     if payload_kind in {"tool_input_streamed", "tool_call_started", "tool_use_completed"}:
@@ -2466,6 +2933,10 @@ def _runtime_event_trace_kind(event_type: str, payload: dict[str, Any]) -> str:
     normalized = event_type.strip().lower()
     data = dict(payload.get("data") or {})
     payload_kind = str(data.get("kind") or payload.get("kind") or "").strip().lower()
+    if normalized in {"assistant_message_delta", "assistant_message_completed"}:
+        return "assistant_message"
+    if payload_kind == "pending_user_input_after_next_tool_call_injected":
+        return "user_message"
     if normalized == "permission_requested":
         return "permission_requested"
     if payload_kind in {"tool_input_streamed", "tool_call_started", "tool_use_completed"}:
@@ -2489,6 +2960,10 @@ def _autonomous_turn_text(turn: AgentTurnRecord) -> str:
 
 def _event_message_status(event_type: str) -> str:
     normalized = event_type.strip().lower()
+    if normalized == "assistant_message_delta":
+        return "streaming"
+    if normalized == "assistant_message_completed":
+        return "sent"
     if normalized in {
         "turn_started",
         "llm_invocation_started",
@@ -2514,16 +2989,63 @@ def _agent_message_sort_key(message: dict[str, Any]) -> tuple[float, str, str]:
     )
 
 
+def _conversation_stream_signature(record: dict[str, Any]) -> str:
+    conversation = dict(record.get("conversation") or {})
+    messages = list(record.get("messages") or [])
+    payload = {
+        "conversation": {
+            "id": conversation.get("id") or conversation.get("conversationId"),
+            "status": conversation.get("status"),
+            "updatedAt": conversation.get("updatedAt") or conversation.get("updated_at"),
+            "preview": conversation.get("preview"),
+            "refId": conversation.get("refId") or conversation.get("ref_id"),
+        },
+        "messages": [
+            {
+                "id": message.get("id"),
+                "role": message.get("role"),
+                "kind": message.get("kind"),
+                "status": message.get("status"),
+                "title": message.get("title"),
+                "content": message.get("content"),
+                "metadata": _conversation_stream_metadata_signature(message.get("metadata")),
+            }
+            for message in messages
+        ],
+    }
+    return json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
+
+
+def _conversation_stream_metadata_signature(metadata: Any) -> dict[str, Any]:
+    if not isinstance(metadata, dict):
+        return {}
+    return {
+        "message_type": metadata.get("message_type") or metadata.get("messageType"),
+        "event_type": metadata.get("event_type") or metadata.get("eventType"),
+        "eventKind": metadata.get("eventKind"),
+        "traceKind": metadata.get("traceKind"),
+        "runStatus": metadata.get("runStatus") or metadata.get("run_status"),
+        "turnStatus": metadata.get("turnStatus") or metadata.get("turn_status"),
+    }
+
+
 def _message_sort_rank(message: dict[str, Any]) -> str:
     metadata = message.get("metadata")
     if isinstance(metadata, dict):
         message_type = str(metadata.get("message_type") or "").strip().lower()
+        if message_type == "run_input":
+            return "0"
         if message_type == "run":
             return "1"
         if message_type == "event":
             return "2"
         if message_type == "turn":
             return "3"
+    role = str(message.get("role") or "").strip().lower()
+    if role == "user":
+        return "0"
+    if role == "assistant":
+        return "3"
     return "9"
 
 
@@ -2567,12 +3089,16 @@ def _serialize_autonomous_primary_conversation_record(
             "messages": [],
         }
 
+    hidden_run_ids = _agent_session_conversation_hidden_run_ids(agent_session)
+    clear_after = None if hidden_run_ids else _agent_session_conversation_cleared_at(agent_session)
     recent_runs = list(
         session.scalars(
             select(AgentRun)
             .where(
                 AgentRun.session_id == agent_session.id,
                 AgentRun.agent_kind == kind,
+                *(() if not hidden_run_ids else (AgentRun.id.not_in(hidden_run_ids),)),
+                *(() if clear_after is None else (AgentRun.created_at > clear_after,)),
             )
             .order_by(AgentRun.created_at.desc(), AgentRun.id.desc())
             .limit(20)
@@ -2594,7 +3120,13 @@ def _serialize_autonomous_primary_conversation_record(
             select(AgentRuntimeEvent)
             .where(
                 AgentRuntimeEvent.run_id.in_(run_ids),
-                AgentRuntimeEvent.event_type.in_(("tool_event", "permission_requested")),
+                AgentRuntimeEvent.event_type.in_((
+                    "assistant_message_delta",
+                    "assistant_message_completed",
+                    "runtime_event",
+                    "tool_event",
+                    "permission_requested",
+                )),
             )
             .order_by(AgentRuntimeEvent.occurred_at.asc(), AgentRuntimeEvent.seq.asc(), AgentRuntimeEvent.id.asc())
             .limit(2000)
@@ -2611,14 +3143,25 @@ def _serialize_autonomous_primary_conversation_record(
 
     messages: list[dict[str, Any]] = []
     for run in recent_runs:
+        run_input_message = _autonomous_run_input_message(conversation_id, run)
+        if run_input_message is not None:
+            messages.append(run_input_message)
         run_message = _autonomous_run_message(conversation_id, run)
         messages.append(run_message)
+        assistant_event_contents: set[str] = set()
         for event in events_by_run_id.get(run.id, []):
-            messages.append(_autonomous_event_message(conversation_id, event))
+            event_message = _autonomous_event_message(conversation_id, event)
+            messages.append(event_message)
+            if event_message.get("role") == "assistant":
+                content = str(event_message.get("content") or "").strip()
+                if content:
+                    assistant_event_contents.add(content)
         for turn in turns_by_run_id.get(run.id, []):
             turn_message = _autonomous_turn_message(conversation_id, run, turn)
             turn_content = str(turn_message.get("content") or "").strip()
             if not turn_content or turn_content == str(run_message.get("content") or "").strip():
+                continue
+            if turn_message.get("role") == "assistant" and turn_content in assistant_event_contents:
                 continue
             turn_status = str(turn.status or "").strip().lower()
             has_final_output = bool(str((turn.turn_metadata or {}).get("final_output") or "").strip())
@@ -2638,11 +3181,28 @@ def _serialize_autonomous_primary_conversation_record(
 def _project_primary_timeline_runtime_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     projected: list[dict[str, Any]] = []
     stream_groups: dict[str, dict[str, Any]] = {}
+    assistant_delta_groups: dict[str, dict[str, Any]] = {}
+    completed_assistant_keys: set[str] = set()
     for event in events:
         event_type = str(event.get("event_type") or event.get("eventType") or "").strip().lower()
         payload = dict(event.get("payload") or {})
         data = dict(payload.get("data") or {})
         kind = str(data.get("kind") or "").strip().lower()
+        if event_type == "assistant_message_completed":
+            completed_assistant_keys.add(_assistant_stream_key(event))
+        if event_type == "assistant_message_delta":
+            stream_key = _assistant_stream_key(event)
+            group = assistant_delta_groups.setdefault(
+                stream_key,
+                {
+                    "event": event,
+                    "deltas": [],
+                },
+            )
+            delta = str(data.get("delta") or data.get("message") or "")
+            if delta:
+                group["deltas"].append(delta)
+            continue
         if event_type == "tool_event" and kind == "tool_use_delta":
             stream_key = str(data.get("id") or data.get("tool_use_id") or event.get("turn_id") or event.get("id") or "")
             if not stream_key:
@@ -2669,7 +3229,33 @@ def _project_primary_timeline_runtime_events(events: list[dict[str, Any]]) -> li
         aggregated_data = dict(dict(aggregated.get("payload") or {}).get("data") or {})
         if str(aggregated_data.get("content") or "").strip():
             projected.append(aggregated)
+    for stream_key, group in assistant_delta_groups.items():
+        if stream_key in completed_assistant_keys:
+            continue
+        aggregated = _aggregated_assistant_delta_event(group)
+        aggregated_data = dict(dict(aggregated.get("payload") or {}).get("data") or {})
+        if str(aggregated_data.get("message") or aggregated_data.get("delta") or "").strip():
+            projected.append(aggregated)
     return sorted(projected, key=lambda item: (_timestamp_sort_value(item.get("occurredAt") or item.get("occurred_at")), int(item.get("seq") or 0), str(item.get("id") or "")))
+
+
+def _assistant_stream_key(event: dict[str, Any]) -> str:
+    payload = dict(event.get("payload") or {})
+    data = dict(payload.get("data") or {})
+    return str(data.get("invocation_id") or event.get("turn_id") or event.get("id") or "")
+
+
+def _aggregated_assistant_delta_event(group: dict[str, Any]) -> dict[str, Any]:
+    event = dict(group.get("event") or {})
+    payload = dict(event.get("payload") or {})
+    data = dict(payload.get("data") or {})
+    message = "".join(str(item) for item in group.get("deltas") or [])
+    data.update({"message": message, "delta": message})
+    payload["data"] = data
+    event["id"] = f"{event.get('id') or uuid4().hex}:assistant-stream"
+    event["message"] = "assistant_message_delta"
+    event["payload"] = payload
+    return event
 
 
 def _aggregated_tool_stream_event(group: dict[str, Any]) -> dict[str, Any]:
@@ -2695,13 +3281,16 @@ def _aggregated_tool_stream_event(group: dict[str, Any]) -> dict[str, Any]:
 
 def _is_primary_timeline_runtime_event(event: dict[str, Any]) -> bool:
     event_type = str(event.get("event_type") or event.get("eventType") or "").strip().lower()
-    if event_type == "permission_requested":
+    if event_type in {"assistant_message_delta", "assistant_message_completed", "permission_requested"}:
         return True
-    if event_type != "tool_event":
-        return False
     payload = dict(event.get("payload") or {})
     data = dict(payload.get("data") or {})
-    return str(data.get("kind") or "").strip().lower() in {
+    kind = str(data.get("kind") or "").strip().lower()
+    if event_type == "runtime_event":
+        return kind == "pending_user_input_after_next_tool_call_injected" and bool(_runtime_event_content(event_type, data))
+    if event_type != "tool_event":
+        return False
+    return kind in {
         "tool_input_streamed",
         "tool_call_started",
         "tool_use_completed",
@@ -2714,9 +3303,16 @@ def _list_workspace_runs(session: Session, definition: AgentDefinition, kind: Ag
     agent_session = _get_agent_session(session, definition, kind=kind)
     if agent_session is None:
         return []
+    hidden_run_ids = _agent_session_conversation_hidden_run_ids(agent_session)
+    clear_after = None if hidden_run_ids else _agent_session_conversation_cleared_at(agent_session)
     runs = session.scalars(
         select(AgentRun)
-        .where(AgentRun.session_id == agent_session.id, AgentRun.agent_kind == kind)
+        .where(
+            AgentRun.session_id == agent_session.id,
+            AgentRun.agent_kind == kind,
+            *(() if not hidden_run_ids else (AgentRun.id.not_in(hidden_run_ids),)),
+            *(() if clear_after is None else (AgentRun.created_at > clear_after,)),
+        )
         .order_by(AgentRun.created_at.desc(), AgentRun.id.desc())
         .limit(20)
     ).all()

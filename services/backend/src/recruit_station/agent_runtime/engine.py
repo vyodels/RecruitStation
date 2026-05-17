@@ -435,10 +435,18 @@ class InteractionEngine:
         if not messages:
             return
         pending_input_ids: list[object] = []
+        injected_messages: list[dict[str, object]] = []
         for message in messages:
             ids = message.metadata.get("pending_user_input_ids")
             if isinstance(ids, list):
                 pending_input_ids.extend(ids)
+            injected_messages.append(
+                {
+                    "role": message.role,
+                    "content": _message_text(message),
+                    "metadata": dict(message.metadata or {}),
+                }
+            )
         self.history.append(messages)
         self.transcript.record_messages(self.config.conversation_id, messages)
         yield self._output(
@@ -451,6 +459,7 @@ class InteractionEngine:
                 "tool_use_id": call.tool_use_id,
                 "tool_call_id": call.id,
                 "pending_user_input_ids": pending_input_ids,
+                "messages": injected_messages,
             },
         )
 

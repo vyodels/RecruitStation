@@ -513,6 +513,157 @@ def test_browser_hid_runtime_sequence_is_scoped_by_run_episode_account_host(tmp_
     _reset_browser_hid_sequence_state_for_tests()
 
 
+def test_browser_hid_runtime_sequence_uses_expected_origin_for_observation_scope(tmp_path, monkeypatch) -> None:
+    _reset_browser_hid_sequence_state_for_tests()
+    tool_calls: list[tuple[str, str, dict[str, Any]]] = []
+
+    def fake_list_tools(server) -> list[dict[str, Any]]:
+        if server.endpoint == "mcp://browser-runtime":
+            return [
+                {
+                    "name": "browser_snapshot",
+                    "description": "Read page snapshot.",
+                    "inputSchema": {"type": "object", "properties": {}, "additionalProperties": True},
+                    "annotations": {"readOnlyHint": True},
+                }
+            ]
+        if server.endpoint == "mcp://hid-runtime":
+            return [{"name": "hid_action", "description": "Run HID action.", "inputSchema": {"type": "object", "properties": {}, "additionalProperties": True}}]
+        return []
+
+    def fake_call_tool(server, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        tool_calls.append((server.endpoint, tool_name, dict(arguments)))
+        if tool_name == "browser_snapshot":
+            return {"success": True, "snapshot": {"text": "职位列表"}, "tabId": arguments.get("tabId")}
+        return {"success": True, "tool": tool_name}
+
+    monkeypatch.setattr("recruit_station.services.mcp_registry._mcp_list_tools", fake_list_tools)
+    monkeypatch.setattr("recruit_station.services.mcp_registry._mcp_call_tool", fake_call_tool)
+    settings = AppSettings(
+        data_dir=str(tmp_path / "data"),
+        database_url=f"sqlite:///{tmp_path / 'mcp-sequence-expected-origin.db'}",
+        provider_config={},
+    )
+    container = AppContainer.build(settings)
+    for server_key, endpoint, capabilities in (
+        ("browser", "mcp://browser-runtime", {"default": ["browser"], "read_only": ["document"]}),
+        ("virtualhid", "mcp://hid-runtime", {"default": ["scene"], "mutating": ["computer_write"]}),
+    ):
+        container.mcp_registry.create_server(
+            {
+                "server_key": server_key,
+                "name": server_key,
+                "transport_kind": "stdio",
+                "protocol": "mcp_jsonrpc",
+                "endpoint": endpoint,
+                "enabled": True,
+                "auth_config": {},
+                "server_metadata": {"runtime_tool_capabilities": capabilities},
+                "tools": [],
+            }
+        )
+
+    snapshot_args = {
+        "tabId": 42,
+        "expectedHost": "127.0.0.1",
+        "expectedOrigin": "http://127.0.0.1:50149",
+        "targetPolicy": "same-origin",
+    }
+    click_args = {
+        "target": {"host": "127.0.0.1:50149", "tabId": 42},
+        "primitives": [{"type": "click", "at": {"x": 160, "y": 80}}],
+    }
+
+    with container.session_factory() as session:
+        browser_server = next(item for item in session.query(McpServer).all() if item.server_key == "browser")
+        hid_server = next(item for item in session.query(McpServer).all() if item.server_key == "virtualhid")
+        snapshot_tool = next(item for item in session.query(McpTool).all() if item.server_id == browser_server.id and item.name == "browser_snapshot")
+        hid_tool = next(item for item in session.query(McpTool).all() if item.server_id == hid_server.id and item.name == "hid_action")
+
+        container.mcp_registry.invoke_tool(browser_server, snapshot_tool, dict(snapshot_args))
+        container.mcp_registry.invoke_tool(hid_server, hid_tool, dict(click_args))
+        container.mcp_registry.invoke_tool(browser_server, snapshot_tool, dict(snapshot_args))
+        container.mcp_registry.invoke_tool(hid_server, hid_tool, dict(click_args))
+
+    assert [call[1] for call in tool_calls] == ["browser_snapshot", "hid_action", "browser_snapshot", "hid_action"]
+    _reset_browser_hid_sequence_state_for_tests()
+
+
+def test_browser_hid_runtime_sequence_does_not_scope_by_hid_action_id(tmp_path, monkeypatch) -> None:
+    _reset_browser_hid_sequence_state_for_tests()
+    tool_calls: list[tuple[str, str, dict[str, Any]]] = []
+
+    def fake_list_tools(server) -> list[dict[str, Any]]:
+        if server.endpoint == "mcp://browser-runtime":
+            return [
+                {
+                    "name": "browser_snapshot",
+                    "description": "Read page snapshot.",
+                    "inputSchema": {"type": "object", "properties": {}, "additionalProperties": True},
+                    "annotations": {"readOnlyHint": True},
+                }
+            ]
+        if server.endpoint == "mcp://hid-runtime":
+            return [{"name": "hid_action", "description": "Run HID action.", "inputSchema": {"type": "object", "properties": {}, "additionalProperties": True}}]
+        return []
+
+    def fake_call_tool(server, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        tool_calls.append((server.endpoint, tool_name, dict(arguments)))
+        if tool_name == "browser_snapshot":
+            return {"success": True, "snapshot": {"url": "http://127.0.0.1:50149/jobs/jd-sales-001"}, "tabId": arguments.get("tabId")}
+        return {"success": True, "tool": tool_name}
+
+    monkeypatch.setattr("recruit_station.services.mcp_registry._mcp_list_tools", fake_list_tools)
+    monkeypatch.setattr("recruit_station.services.mcp_registry._mcp_call_tool", fake_call_tool)
+    settings = AppSettings(
+        data_dir=str(tmp_path / "data"),
+        database_url=f"sqlite:///{tmp_path / 'mcp-sequence-action-id.db'}",
+        provider_config={},
+    )
+    container = AppContainer.build(settings)
+    for server_key, endpoint, capabilities in (
+        ("browser", "mcp://browser-runtime", {"default": ["browser"], "read_only": ["document"]}),
+        ("virtualhid", "mcp://hid-runtime", {"default": ["scene"], "mutating": ["computer_write"]}),
+    ):
+        container.mcp_registry.create_server(
+            {
+                "server_key": server_key,
+                "name": server_key,
+                "transport_kind": "stdio",
+                "protocol": "mcp_jsonrpc",
+                "endpoint": endpoint,
+                "enabled": True,
+                "auth_config": {},
+                "server_metadata": {"runtime_tool_capabilities": capabilities},
+                "tools": [],
+            }
+        )
+
+    snapshot_args = {
+        "tabId": 42,
+        "expectedHost": "127.0.0.1",
+        "expectedOrigin": "http://127.0.0.1:50149",
+        "targetPolicy": "same-origin",
+    }
+    click_args = {
+        "id": "jd-sync-open-job-list",
+        "target": {"host": "127.0.0.1:50149", "tabId": 42},
+        "primitives": [{"type": "click", "at": {"x": 160, "y": 80}}],
+    }
+
+    with container.session_factory() as session:
+        browser_server = next(item for item in session.query(McpServer).all() if item.server_key == "browser")
+        hid_server = next(item for item in session.query(McpServer).all() if item.server_key == "virtualhid")
+        snapshot_tool = next(item for item in session.query(McpTool).all() if item.server_id == browser_server.id and item.name == "browser_snapshot")
+        hid_tool = next(item for item in session.query(McpTool).all() if item.server_id == hid_server.id and item.name == "hid_action")
+
+        container.mcp_registry.invoke_tool(browser_server, snapshot_tool, dict(snapshot_args))
+        container.mcp_registry.invoke_tool(hid_server, hid_tool, dict(click_args))
+
+    assert [call[1] for call in tool_calls] == ["browser_snapshot", "hid_action"]
+    _reset_browser_hid_sequence_state_for_tests()
+
+
 def test_browser_hid_runtime_target_identification_and_failed_observations_do_not_clear_gate(tmp_path, monkeypatch) -> None:
     _reset_browser_hid_sequence_state_for_tests()
 

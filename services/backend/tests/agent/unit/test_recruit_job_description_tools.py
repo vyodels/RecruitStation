@@ -23,6 +23,8 @@ def test_upsert_job_description_creates_and_updates_same_platform_identity(tmp_p
         tool.parameters["properties"]
     )
     assert {"compensation_text", "summary", "benefit_tags", "detail_metadata"} <= set(tool.parameters["properties"])
+    assert "list-only" in tool.description
+    assert "detail_complete=true" in tool.parameters["properties"]["sync_metadata"]["description"]
 
     created = upsert_job_description(
         container.session_factory,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+from recruit_station.agent_runtime.types import ToolCall, TurnContext
 from recruit_station.capabilities.tools import ToolDefinition, ToolRegistry, build_delegate_scene_context_tool, is_scene_context_tool, register_core_tools
 from recruit_station.core.settings import AppSettings
 from recruit_station.db.session import create_engine_from_settings, create_session_factory, initialize_database
@@ -212,6 +213,47 @@ def test_delegate_scene_context_tool_schema_mentions_browser_computer_contracts(
     assert "browser_target" in properties
     assert "artifact_expectations" in properties
     assert "candidate landing regions" in properties["context"]["description"]
+
+
+def test_delegate_scene_context_tool_inherits_runtime_browser_target() -> None:
+    captured: dict[str, object] = {}
+    registry = ToolRegistry()
+
+    def _handler(arguments: dict[str, object]) -> dict[str, object]:
+        captured.update(arguments)
+        return {"ok": True}
+
+    registry.register(build_delegate_scene_context_tool(_handler))
+    runtime_tool = registry.to_agent_runtime_tools()[0]
+    context = TurnContext(
+        turn_id="turn-1",
+        conversation_id="conversation-1",
+        tools=[],
+        runtime={
+            "browser_target": {
+                "url": "http://127.0.0.1:50149/#detail-jd-solution-002",
+                "host": "127.0.0.1:50149",
+            }
+        },
+    )
+    call = ToolCall(
+        id="tool-1",
+        turn_id="turn-1",
+        llm_invocation_id="llm-1",
+        tool_use_id="use-1",
+        name="delegate_scene_context",
+        input={"instruction": "读取招聘站点职位列表与详情。"},
+    )
+
+    result = runtime_tool.handler.handle(call, context)
+
+    assert result.is_error is False
+    assert captured["browser_target"] == {
+        "url": "http://127.0.0.1:50149/#detail-jd-solution-002",
+        "host": "127.0.0.1:50149",
+    }
+    assert captured["environment_requirements"] == {"browser_target": captured["browser_target"]}
+    assert captured["context"] == {"browser_target": captured["browser_target"]}
 
 
 def test_recruit_plugin_tools_are_marked_as_business_tools(tmp_path: Path) -> None:

@@ -167,6 +167,7 @@ export interface DesktopApiClient {
     jobDescriptionId: string,
     payload: Partial<JobDescriptionPayload>,
   ): Promise<JobDescriptionSummaryRecord>;
+  bulkDeleteJobDescriptions(jobDescriptionIds: string[]): Promise<{ deletedIds: string[]; missingIds: string[] }>;
   deleteJobDescription(jobDescriptionId: string): Promise<void>;
   listApplications(): Promise<ApplicationRecord[]>;
   listPlaybooks(): Promise<PlaybookDefinition[]>;
@@ -247,6 +248,13 @@ export interface DesktopApiClient {
     reason?: string,
   ): Promise<AgentWorkspaceControl>;
   getAgentConversation(kind: AgentKind, conversationId: string): Promise<AgentConversationRecord>;
+  streamAgentConversation(
+    kind: AgentKind,
+    conversationId: string,
+    payload: { signal?: AbortSignal },
+    onSnapshot: (record: AgentConversationRecord) => void,
+  ): Promise<void>;
+  clearAgentConversation(kind: AgentKind, conversationId: string): Promise<AgentConversationRecord>;
   cancelAutonomousRun(runId: string, reason?: string): Promise<AgentRunRecord>;
   resumeAutonomousRun(runId: string, reason?: string): Promise<AgentRunRecord>;
   cancelAgentRun(kind: AgentKind, runId: string, reason?: string): Promise<AgentRunRecord>;
@@ -1614,6 +1622,16 @@ function normalizeCommunicationTemplateRender(raw: unknown): CommunicationTempla
     messageType: String(record.messageType ?? record.message_type ?? "text"),
     content: String(record.content ?? ""),
     missingVariables: asArray<string>(record.missingVariables ?? record.missing_variables),
+  };
+}
+
+function normalizeJobDescriptionBulkDeleteResult(raw: unknown): { deletedIds: string[]; missingIds: string[] } {
+  const record = asRecord(raw);
+  const deleted = record.deletedIds ?? record.deleted_ids;
+  const missing = record.missingIds ?? record.missing_ids;
+  return {
+    deletedIds: asArray<unknown>(deleted).map((item) => String(item)).filter(Boolean),
+    missingIds: asArray<unknown>(missing).map((item) => String(item)).filter(Boolean),
   };
 }
 
@@ -3545,6 +3563,13 @@ function createFetchClient(baseUrl: string): DesktopApiClient {
         }),
         jobDescriptionId,
       ),
+    bulkDeleteJobDescriptions: async (jobDescriptionIds) =>
+      normalizeJobDescriptionBulkDeleteResult(
+        await requestJson<unknown>(baseUrl, "/api/job-descriptions/bulk-delete", {
+          method: "POST",
+          body: JSON.stringify({ jobDescriptionIds }),
+        }),
+      ),
     deleteJobDescription: async (jobDescriptionId) => {
       await requestVoid(baseUrl, `/api/job-descriptions/${encodeURIComponent(jobDescriptionId)}`, {
         method: "DELETE",
@@ -3910,7 +3935,7 @@ function createFetchClient(baseUrl: string): DesktopApiClient {
                   status: "sent" as const,
                   title: run.title,
                   metadata: {
-                    eventKind: run.status === "waiting_human" ? "confirmation" : run.status === "completed" ? "execution_result" : "thinking",
+                    eventKind: run.status === "completed" ? "execution_result" : "thinking",
                     status: run.status,
                   },
                 },
@@ -3946,6 +3971,36 @@ function createFetchClient(baseUrl: string): DesktopApiClient {
         ),
         messages: [],
       };
+    },
+    streamAgentConversation: async (kind, conversationId, { signal }, onSnapshot) => {
+      await streamSse(
+        baseUrl,
+        `/api/agents/${kind}/conversations/${encodeURIComponent(conversationId)}/stream`,
+        {
+          method: "GET",
+          signal,
+        },
+        (event) => {
+          if (event.event !== "conversation_snapshot" && event.event !== "message") {
+            return;
+          }
+          onSnapshot(normalizeAgentConversationRecord(event.data, kind, conversationId));
+        },
+      );
+    },
+    clearAgentConversation: async (kind, conversationId) => {
+      const payload = await requestJson<unknown>(
+        baseUrl,
+        `/api/agents/${kind}/conversations/${encodeURIComponent(conversationId)}/clear`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            reviewer: "desktop-user",
+            reason: "clear command",
+          }),
+        },
+      );
+      return normalizeAgentConversationRecord(payload, kind, conversationId);
     },
     cancelAutonomousRun: async (runId, reason) => {
       return createFetchClient(baseUrl).cancelAgentRun("autonomous", runId, reason);
@@ -4088,6 +4143,7 @@ function createFetchClient(baseUrl: string): DesktopApiClient {
         body: JSON.stringify({
           title: payload.title,
           instruction: payload.instruction,
+          request_message: payload.requestMessage,
           kind: payload.kind,
           jd_id: payload.jdId,
           ...(payload.candidateCountTarget != null ? { candidate_count_target: payload.candidateCountTarget } : {}),

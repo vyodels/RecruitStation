@@ -32,7 +32,7 @@ import type {
   SettingsSnapshot,
   SkillRecord,
 } from "../../lib/types";
-import { ChatComposer } from "./ChatComposer";
+import { ChatComposer, type ChatComposerCommand } from "./ChatComposer";
 import { useChatOverlay } from "./ChatOverlayContext";
 import { ChatMessageStream } from "./ChatMessageStream";
 
@@ -45,6 +45,18 @@ interface ChatOverlayProps {
 
 type PanelNoticeTone = "info" | "success" | "error";
 type AgentListFilter = "all" | "running" | "waiting" | "done" | "failed";
+type AgentRailTab = "details" | "businessActions";
+type BusinessActionFilter =
+  | "all"
+  | "jd"
+  | "candidate"
+  | "resume"
+  | "communication"
+  | "application"
+  | "evaluation"
+  | "sync"
+  | "approval"
+  | "state";
 type CapabilityCategoryKey = "business" | "system" | "skills" | "mcp" | "memory";
 type CapabilityItemKind = "tool" | "skill" | "memory" | "mcp";
 type AgentConfigSectionKey =
@@ -138,6 +150,10 @@ interface RecruitingPolicyDraft {
 type AutomationToolApprovalMode = "auto" | "approval";
 type AutomationConfigPageKey = "entry" | "jd" | "sop" | "activation" | "tools" | "base";
 const AGENT_KINDS: AgentKind[] = ["jd_sync", "autonomous", "assistant"];
+
+function isRuntimeAgentKind(kind: AgentKind): boolean {
+  return kind === "autonomous" || kind === "jd_sync";
+}
 
 interface AutomationJobStrategyDraft {
   screeningCriteria: string;
@@ -281,13 +297,6 @@ function agentModeSummary(kind: AgentKind): string {
     : kind === "jd_sync"
       ? "由人工手动启动，专门同步招聘网站 JD，不处理候选人。"
     : "由外部事件、定时调度或手工创建的自动化运行驱动，适合后台持续推进招聘流程。";
-}
-
-function agentShortCode(kind: AgentKind): string {
-  if (kind === "assistant") {
-    return "AS";
-  }
-  return kind === "jd_sync" ? "JD" : "AU";
 }
 
 function workspaceTemplate(): Record<AgentKind, AgentWorkspaceRecord | null> {
@@ -469,6 +478,30 @@ function trimTitle(value: string): string {
   return `${normalized.slice(0, 28)}…`;
 }
 
+function isClearConversationCommand(value: string): boolean {
+  const normalized = value.trim().toLowerCase();
+  return normalized === "clear" || normalized === "/clear";
+}
+
+function slashCommandQuery(value: string): string | null {
+  const trimmed = value.trimStart();
+  if (!trimmed.startsWith("/") || trimmed.includes("\n")) {
+    return null;
+  }
+  const command = trimmed.slice(1);
+  if (/\s/.test(command)) {
+    return null;
+  }
+  return command.toLowerCase();
+}
+
+function slashCommandMatches(command: ChatComposerCommand, query: string): boolean {
+  return !query
+    || command.command.toLowerCase().startsWith(query)
+    || command.title.toLowerCase().includes(query)
+    || command.description.toLowerCase().includes(query);
+}
+
 function configDraftFromSettings(settings: SettingsSnapshot): ConfigDraft {
   return {
     desktopApprovalsOnly: settings.desktopApprovalsOnly,
@@ -559,16 +592,16 @@ const DEFAULT_AUTOMATION_RUNTIME_INPUT_PREVIEW = [
 ].join("\n");
 
 const DEFAULT_AUTOMATION_SOP_PROMPT = [
-  "你是自动化招聘 Agent。每次运行必须围绕已选 JD、已配置招聘入口 URL、JD 策略、评分标准、工具权限和人工审批规则执行，不得让临时用户说明覆盖这些业务策略。",
+  "你是自动化招聘 Agent。每次运行必须围绕已选 JD、已配置招聘网站目标网页 URL、JD 策略、评分标准、工具权限和人工审批规则执行，不得让临时用户说明覆盖这些业务策略。",
   "",
-  "入口与浏览器会话：",
-  "- 只从配置的招聘入口 URL 进入招聘网站，并复用人工提前登录好的浏览器会话。",
+  "目标网页与浏览器会话：",
+  "- 从配置的招聘网站目标网页 URL 出发，并复用人工提前登录好的浏览器会话；目标网页可以是该网站任意可访问页面。",
   "- 不处理登录、验证码、账号切换、绕过风控或新建账号；遇到这些情况立即暂停并交给人工。",
-  "- 站点页面、字段、按钮和路径必须以当前页面可见证据为准，不依赖产品代码内置的站点专属选择器或解析器。",
+  "- 站点页面、字段、按钮、路径和正确业务页面必须以当前页面可见证据为准，不依赖产品代码内置的站点专属选择器或解析器。",
   "",
   "执行流程：",
   "- 确认本次运行启用的 JD、候选人目标数量与对应策略版本。",
-  "- 进入职位/候选人入口，按 JD 策略发现候选人，先写入候选人事实与来源证据。",
+  "- 根据页面可见导航进入职位或候选人页面，按 JD 策略发现候选人，先写入候选人事实与来源证据。",
   "- 完成在线简历事实采集，并按在线简历评分标准给出阶段结论。",
   "- 对在线通过或需复核的候选人索取离线简历，附件到位后按离线简历标准评分。",
   "- 汇总 JD 匹配、在线简历、离线简历、沟通证据和风险项，形成综合评分与建议动作。",
@@ -576,7 +609,7 @@ const DEFAULT_AUTOMATION_SOP_PROMPT = [
   "恢复、同步与停止：",
   "- 恢复后先核对上次动作是否已经写入业务记录，避免重复外联、重复归档或重复推进状态。",
   "- 同步新消息、简历附件、联系方式和状态变化，并保留证据来源。",
-  "- JD 被下架、候选人缺少关键证据、入口不可访问、页面证据不足、触发审批节点或无可推进动作时，暂停并交给人工。",
+  "- JD 被下架、候选人缺少关键证据、目标网页不可访问、页面证据不足、触发审批节点或无可推进动作时，暂停并交给人工。",
 ].join("\n");
 
 function automationConfigDraftTemplate(): AutomationConfigDraft {
@@ -586,9 +619,9 @@ function automationConfigDraftTemplate(): AutomationConfigDraft {
     executionSop: {
       siteEntryUrl: "",
       siteAccessRulesText: [
-        "只在配置的招聘入口 URL 和当前已登录浏览器会话内执行招聘动作。",
+        "从配置的招聘网站目标网页出发，并复用当前已登录浏览器会话；目标网页可以是该网站任意可访问页面。",
         "登录、验证码、账号切换和风控处理都由人工提前完成；Agent 不处理这些环节。",
-        "进入职位列表、候选人列表、候选人详情、消息和简历入口时必须以页面可见证据为准。",
+        "需要进入职位列表、候选人列表、候选人详情、消息或简历页面时，由 Agent 根据页面可见导航和内容自行判断。",
         "站点字段、页面名称和导航路径可由 Agent 观察判断；不得依赖产品代码内置的站点专属选择器或解析器。",
       ].join("\n"),
       stepsText: DEFAULT_AUTOMATION_SOP_PROMPT,
@@ -624,7 +657,7 @@ function automationConfigDraftTemplate(): AutomationConfigDraft {
       runtimeInputPreviewText: DEFAULT_AUTOMATION_RUNTIME_INPUT_PREVIEW,
     },
     syncPolicy: {
-      jdSyncText: "同步外部招聘网站 JD 状态、岗位上下架状态和可执行列表；JD 策略仍在本系统独立维护。",
+      jdSyncText: "从配置的招聘网站目标网页出发，根据页面可见导航和内容自行找到职位列表与职位详情，识别新增、更新和下架职位，并同步到本地 JD 库；同步过程只处理职位信息，不处理候选人。",
       imSyncText: "IM 消息双向同步：外部新消息写入本系统，本系统 outbound 消息需要同步确认记录。",
       resumeContactSyncText: "离线简历、联系方式、附件和沟通证据必须归档到候选人投递事实中，供评分和恢复上下文使用。",
     },
@@ -964,11 +997,8 @@ function buildJdSyncLaunchPayload(draft: AutomationConfigDraft): AutonomousRunSt
   }
   return {
     title: "同步招聘站点 JD",
-    instruction: [
-      "从已保存的招聘入口同步 JD。只发现和同步职位，不处理候选人筛选、评分、外联或投递推进。",
-      `招聘入口 URL：${configuredEntryUrl}`,
-      "同步完成后，再选择生效 JD 并配置 JD 策略、评分标准和完整执行 SOP。",
-    ].join("\n"),
+    requestMessage: "同步招聘站点 JD",
+    instruction: "同步招聘站点 JD",
     kind: "jd_sync",
     jdId: null,
     candidateCountTarget: null,
@@ -1021,12 +1051,12 @@ function validateAutomationLaunchReadiness(
   const blockers: string[] = [];
   const entryUrl = draft.executionSop.siteEntryUrl.trim();
   if (!entryUrl) {
-    blockers.push("配置招聘入口 URL");
+    blockers.push("配置招聘网站目标网页 URL");
   } else {
     try {
       new URL(entryUrl);
     } catch {
-      blockers.push("招聘入口 URL 必须是有效 URL");
+      blockers.push("招聘网站目标网页 URL 必须是有效 URL");
     }
   }
   if (!jobs.length) {
@@ -1085,12 +1115,12 @@ function validateJdSyncLaunchReadiness(draft: AutomationConfigDraft): string[] {
   const blockers: string[] = [];
   const entryUrl = draft.executionSop.siteEntryUrl.trim();
   if (!entryUrl) {
-    blockers.push("配置招聘入口 URL");
+    blockers.push("配置招聘网站目标网页 URL");
   } else {
     try {
       new URL(entryUrl);
     } catch {
-      blockers.push("招聘入口 URL 必须是有效 URL");
+      blockers.push("招聘网站目标网页 URL 必须是有效 URL");
     }
   }
   if (!draft.syncPolicy.jdSyncText.trim()) {
@@ -1510,6 +1540,109 @@ function businessActionLabel(category: BusinessActionTimelineItem["category"], c
     case "state":
       return copy("State", "状态变更");
   }
+}
+
+function businessActionFilterLabel(filter: BusinessActionFilter, copy: ReturnType<typeof useI18n>["copy"]): string {
+  switch (filter) {
+    case "all":
+      return copy("All", "全部");
+    case "jd":
+      return copy("JD", "JD");
+    case "candidate":
+      return copy("Candidate", "候选人");
+    case "resume":
+      return copy("Resume", "简历");
+    case "communication":
+      return copy("Message", "消息");
+    case "application":
+      return copy("Application", "投递");
+    case "evaluation":
+      return copy("Evaluation", "评估");
+    case "sync":
+      return copy("Sync", "同步");
+    case "approval":
+      return copy("Approval", "审批");
+    case "state":
+      return copy("State", "状态");
+  }
+}
+
+function businessActionCategoryMark(category: BusinessActionTimelineItem["category"]): string {
+  switch (category) {
+    case "jd":
+      return "JD";
+    case "candidate":
+      return "人";
+    case "resume":
+      return "简";
+    case "communication":
+      return "信";
+    case "application":
+      return "投";
+    case "evaluation":
+      return "评";
+    case "sync":
+      return "同";
+    case "approval":
+      return "审";
+    case "state":
+      return "态";
+  }
+}
+
+function businessActionStatusLabel(status: BusinessActionTimelineItem["status"], copy: ReturnType<typeof useI18n>["copy"]): string {
+  switch (status) {
+    case "running":
+      return copy("Running", "进行中");
+    case "success":
+      return copy("Success", "成功");
+    case "warning":
+      return copy("Needs attention", "需关注");
+    case "error":
+      return copy("Failed", "失败");
+    case "neutral":
+      return copy("Recorded", "已记录");
+  }
+}
+
+function businessActionStatusTone(status: BusinessActionTimelineItem["status"]): "positive" | "neutral" | "warning" | "critical" {
+  switch (status) {
+    case "success":
+      return "positive";
+    case "warning":
+    case "running":
+      return "warning";
+    case "error":
+      return "critical";
+    case "neutral":
+      return "neutral";
+  }
+}
+
+function runPhaseLabel(run: AgentRunRecord, copy: ReturnType<typeof useI18n>["copy"]): string {
+  const normalized = run.status.trim().toLowerCase();
+  if (normalized === "queued") {
+    return copy("Queued, not executed yet", "已排队，尚未执行");
+  }
+  if (normalized === "running" || normalized === "active") {
+    return run.startedAt ? copy("Executing", "执行中") : copy("Waiting for executor", "等待执行器接管");
+  }
+  if (normalized === "waiting_human") {
+    return copy("Waiting for approval", "等待人工审批");
+  }
+  if (normalized === "blocked" || normalized === "blocked_human" || normalized === "blocked_environment") {
+    return copy("Blocked", "受阻");
+  }
+  if (normalized === "paused") {
+    return copy("Paused", "已暂停");
+  }
+  if (normalized === "completed" || normalized === "succeeded") {
+    return copy("Completed", "已完成");
+  }
+  if (normalized === "failed" || normalized === "cancelled" || normalized === "interrupted" || normalized === "timed_out") {
+    return copy("Stopped", "已停止");
+  }
+  return run.status;
 }
 
 function businessActionFromMessage(
@@ -2020,6 +2153,8 @@ export function ChatOverlay({
   const [runActionBusyId, setRunActionBusyId] = useState<string | null>(null);
   const [workspaceControlBusyAction, setWorkspaceControlBusyAction] = useState<string | null>(null);
   const [agentListFilter, setAgentListFilter] = useState<AgentListFilter>("all");
+  const [activeRailTab, setActiveRailTab] = useState<AgentRailTab>("details");
+  const [businessActionFilter, setBusinessActionFilter] = useState<BusinessActionFilter>("all");
   const [agentSearchQuery, setAgentSearchQuery] = useState("");
   const headerDragRef = useRef<{
     pointerX: number;
@@ -2163,6 +2298,17 @@ export function ChatOverlay({
   }, [conversationLookup]);
 
   useEffect(() => {
+    if (panelNotice?.tone !== "success") {
+      return;
+    }
+    const notice = panelNotice;
+    const timeoutId = window.setTimeout(() => {
+      setPanelNotice((current) => (current === notice ? null : current));
+    }, 3000);
+    return () => window.clearTimeout(timeoutId);
+  }, [panelNotice]);
+
+  useEffect(() => {
     if (!visible) {
       return;
     }
@@ -2219,10 +2365,19 @@ export function ChatOverlay({
     () => jdSyncWorkspace?.runs.find((run) => isOpenRunStatus(run.status)) ?? null,
     [jdSyncWorkspace],
   );
-  const autonomousStartBlocked = activeAgent === "autonomous" && autonomousActiveRun != null;
-  const autonomousDraftEditable =
-    activeAgent === "autonomous" && autonomousStartBlocked && activeDraftComposerKey != null;
   const runtimeActiveRun = activeAgent === "jd_sync" ? jdSyncActiveRun : activeAgent === "autonomous" ? autonomousActiveRun : null;
+  const activeConversationRun = useMemo(() => {
+    if (!activeWorkspace || activeAgent === "assistant") {
+      return null;
+    }
+    const conversationIds = new Set(
+      [activeConversationId, activeConversationSummary?.refId].filter((value): value is string => Boolean(value)),
+    );
+    return activeWorkspace.runs.find((run) =>
+      conversationIds.has(run.id)
+      || (run.refId != null && conversationIds.has(run.refId))
+    ) ?? null;
+  }, [activeAgent, activeConversationId, activeConversationSummary?.refId, activeWorkspace]);
   const activeWorkspaceControlState = activeWorkspace?.workspaceControl?.state ?? "stopped";
   const activeWorkspaceStartBlockers =
     activeAgent === "autonomous"
@@ -2231,6 +2386,7 @@ export function ChatOverlay({
         ? jdSyncLaunchBlockers
         : [];
   const activeWorkspaceStartReady = activeWorkspaceStartBlockers.length === 0;
+  const activeWorkspaceCanStart = activeWorkspaceStartReady;
   const composerInputValue = activeDraftComposerKey != null ? draftComposerValues[activeDraftComposerKey] ?? "" : composerValue;
   const automationConfigHydrationKey = useMemo(() => {
     const definition = workspaces.autonomous?.agentDefinition;
@@ -2336,6 +2492,28 @@ export function ChatOverlay({
       });
     },
     [conversationLookup, upsertConversationSummary],
+  );
+
+  const applyConversationRecord = useCallback(
+    (agentKind: AgentKind, cacheKey: string, record: AgentConversationRecord) => {
+      const existingSummary = conversationLookupRef.current.get(cacheKey);
+      const nextConversation = {
+        ...record.conversation,
+        updatedAt: resolveConversationUpdatedAt(existingSummary, record.conversation, record.messages),
+      };
+      setLocalConversations((current) => ({
+        ...current,
+        [agentKind]: mergeConversationSummaries(current[agentKind] ?? [], [nextConversation]),
+      }));
+      setConversationCache((current) => ({
+        ...current,
+        [cacheKey]: {
+          conversation: nextConversation,
+          messages: mergeMessages(current[cacheKey]?.messages ?? [], record.messages),
+        },
+      }));
+    },
+    [],
   );
 
   const removeDraftConversation = useCallback((agentKind: AgentKind, conversationId: string) => {
@@ -2449,6 +2627,38 @@ export function ChatOverlay({
     [copy],
   );
 
+  const queueConversationStatusLabel = useCallback(
+    (conversation: AgentConversationSummary) => {
+      const normalized = String(conversation.status).trim().toLowerCase();
+      if (normalized === "idle") {
+        const preview = conversation.preview?.trim() ?? "";
+        if (conversation.refId || preview) {
+          return copy("Finished", "已结束");
+        }
+        return copy("Idle", "空闲");
+      }
+      if (normalized === "active") {
+        return copy("Running", "运行中");
+      }
+      return describeConversationStatus(conversation.status);
+    },
+    [copy, describeConversationStatus],
+  );
+
+  const describeRunStatus = useCallback(
+    (run: AgentRunRecord) => {
+      const normalized = run.status.trim().toLowerCase();
+      if (normalized === "idle") {
+        const summary = run.summary?.trim() ?? "";
+        if (run.startedAt || run.refId || summary) {
+          return copy("Finished", "已结束");
+        }
+      }
+      return describeConversationStatus(run.status);
+    },
+    [copy, describeConversationStatus],
+  );
+
   const activeRunStatusText = useMemo((): RunStatusText | null => {
     if (!activeWorkspace) {
       return null;
@@ -2479,12 +2689,12 @@ export function ChatOverlay({
       const latestRun = sortedRuns[0];
       const detailParts = [
         latestRun?.summary,
-        latestRun ? `${copy("Last run", "最近一次")}：${describeConversationStatus(latestRun.status)}` : null,
+        latestRun ? `${copy("Last run", "最近一次")}：${describeRunStatus(latestRun)}` : null,
         activeWorkspace.agent.activeTask ? `${copy("Instruction", "当前指令")}：${activeWorkspace.agent.activeTask}` : null,
       ].filter((value): value is string => Boolean(value && value.trim()));
 
       return {
-        badgeLabel: describeConversationStatus(activeWorkspace.agent.status),
+        badgeLabel: latestRun ? describeRunStatus(latestRun) : describeConversationStatus(activeWorkspace.agent.status),
         title: latestRun?.title || copy("No active run", "当前没有活跃运行"),
         detail:
           detailParts.join(" · ")
@@ -2516,7 +2726,7 @@ export function ChatOverlay({
     ].filter((value): value is string => Boolean(value && value.trim()));
 
     return {
-      badgeLabel: describeConversationStatus(highlightedRun.status),
+      badgeLabel: describeRunStatus(highlightedRun),
       title: highlightedRun.title,
       detail: detailParts.join(" · ") || copy("No execution summary yet.", "当前还没有执行摘要。"),
       metrics: [
@@ -2527,7 +2737,7 @@ export function ChatOverlay({
       ].filter((value): value is string => Boolean(value)),
       tone: toneForRunStatus(highlightedRun.status),
     };
-  }, [activeWorkspace, copy, describeConversationStatus]);
+  }, [activeWorkspace, copy, describeConversationStatus, describeRunStatus]);
 
   const shouldShowRunStatusStrip = activePanel === "conversation" || activePanel === "runs";
 
@@ -2637,22 +2847,7 @@ export function ChatOverlay({
         if (!active) {
           return;
         }
-        const existingSummary = conversationLookupRef.current.get(activeConversationCacheKey);
-        const nextConversation = {
-          ...record.conversation,
-          updatedAt: resolveConversationUpdatedAt(existingSummary, record.conversation, record.messages),
-        };
-        setLocalConversations((current) => ({
-          ...current,
-          [activeAgent]: mergeConversationSummaries(current[activeAgent] ?? [], [nextConversation]),
-        }));
-        setConversationCache((current) => ({
-          ...current,
-          [activeConversationCacheKey]: {
-            conversation: nextConversation,
-            messages: mergeMessages(current[activeConversationCacheKey]?.messages ?? [], record.messages),
-          },
-        }));
+        applyConversationRecord(activeAgent, activeConversationCacheKey, record);
       } catch (error) {
         if (active) {
           setErrorMessage(error instanceof Error ? error.message : copy("Failed to load conversation.", "加载会话失败。"));
@@ -2665,7 +2860,7 @@ export function ChatOverlay({
     };
     void syncConversation(true);
 
-    if (activeAgent !== "autonomous") {
+    if (!isRuntimeAgentKind(activeAgent)) {
       return () => {
         active = false;
       };
@@ -2679,7 +2874,40 @@ export function ChatOverlay({
       active = false;
       window.clearInterval(intervalId);
     };
-  }, [activeAgent, activeConversationCacheKey, activeConversationId, conversationPollMs, copy, visible]);
+  }, [activeAgent, activeConversationCacheKey, activeConversationId, applyConversationRecord, conversationPollMs, copy, visible]);
+
+  useEffect(() => {
+    if (!visible || !activeConversationId || !activeConversationCacheKey) {
+      return;
+    }
+    if (!isRuntimeAgentKind(activeAgent) || activeConversationId.startsWith("draft-")) {
+      return;
+    }
+
+    let active = true;
+    const controller = new AbortController();
+    void apiClient.streamAgentConversation(
+      activeAgent,
+      activeConversationId,
+      { signal: controller.signal },
+      (record) => {
+        if (!active) {
+          return;
+        }
+        applyConversationRecord(activeAgent, activeConversationCacheKey, record);
+      },
+    ).catch((error) => {
+      if (!active || controller.signal.aborted) {
+        return;
+      }
+      console.warn("Runtime conversation stream failed", error);
+    });
+
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [activeAgent, activeConversationCacheKey, activeConversationId, applyConversationRecord, visible]);
 
   useEffect(() => {
     if (!visible || pageMode) {
@@ -2775,6 +3003,73 @@ export function ChatOverlay({
     [activeConversationId, removeDraftConversation, upsertConversationSummary],
   );
 
+  const handleClearConversation = async () => {
+    const conversationId = activeConversationId;
+    setPanelNotice(null);
+    setErrorMessage(undefined);
+    if (activeDraftComposerKey != null) {
+      setDraftComposerValues((current) => {
+        const next = { ...current };
+        delete next[activeDraftComposerKey];
+        return next;
+      });
+    } else {
+      setComposerValue("");
+    }
+
+    if (!conversationId || conversationId.startsWith("draft-")) {
+      if (conversationId) {
+        removeDraftConversation(activeAgent, conversationId);
+      }
+      createDraftConversation(activeAgent);
+      setPanelNotice({
+        panel: "conversation",
+        tone: "success",
+        message: copy("Conversation cleared.", "已清空当前会话。"),
+      });
+      return;
+    }
+
+    setSending(true);
+    try {
+      const record = await apiClient.clearAgentConversation(activeAgent, conversationId);
+      const cacheKey = conversationKey(activeAgent, record.conversation.id);
+      setLocalConversations((current) => ({
+        ...current,
+        [activeAgent]: mergeConversationSummaries(current[activeAgent] ?? [], [record.conversation]),
+      }));
+      setConversationCache((current) => ({
+        ...current,
+        [cacheKey]: {
+          conversation: record.conversation,
+          messages: [],
+        },
+      }));
+      setSelectedConversation((current) => ({
+        ...current,
+        [activeAgent]: record.conversation.id,
+      }));
+      if (activeAgent !== "assistant") {
+        await loadWorkspaces();
+      }
+      setPanelNotice({
+        panel: "conversation",
+        tone: "success",
+        message: copy("Conversation history cleared.", "已清空会话历史。"),
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : copy("Failed to clear conversation.", "清空会话失败。");
+      setErrorMessage(message);
+      setPanelNotice({
+        panel: "conversation",
+        tone: "error",
+        message,
+      });
+    } finally {
+      setSending(false);
+    }
+  };
+
   const handleAssistantEvent = useCallback(
     (
       conversationId: string,
@@ -2834,6 +3129,10 @@ export function ChatOverlay({
   const handleSubmit = async () => {
     const text = composerInputValue.trim();
     if (!text) {
+      return;
+    }
+    if (isClearConversationCommand(text)) {
+      await handleClearConversation();
       return;
     }
     if (activeAgent !== "assistant" && activeWorkspaceControlState !== "running") {
@@ -3063,6 +3362,7 @@ export function ChatOverlay({
         const result = await apiClient.startAgentRun(activeAgent, {
           title: trimTitle(text),
           instruction: text,
+          requestMessage: text,
           kind: activeAgent === "jd_sync" ? "jd_sync" : "automation_recruiting",
           conversationId: conversationId.startsWith("draft-") ? null : conversationId,
         });
@@ -3168,11 +3468,11 @@ export function ChatOverlay({
       return;
     }
     const payload = buildJdSyncLaunchPayload(jdSyncConfigDraft);
-    if (!payload) {
+    if (!payload || jdSyncLaunchBlockers.length) {
       setPanelNotice({
         panel: "config",
         tone: "error",
-        message: copy("Configure and save the recruiting entry URL before syncing JD.", "请先配置并保存招聘入口 URL，再同步 JD。"),
+        message: `${copy("Complete configuration before starting JD Sync:", "启动 JD 同步前请先补全配置：")} ${jdSyncLaunchBlockers.join("；")}`,
       });
       return;
     }
@@ -3449,6 +3749,33 @@ export function ChatOverlay({
     }
   };
 
+  const handleRestartRun = async (run: AgentRunRecord) => {
+    setRunActionBusyId(run.id);
+    try {
+      if (isOpenRunStatus(run.status)) {
+        await apiClient.cancelAgentRun(activeAgent, run.id, copy("Cancelled before restarting from agent management page.", "重新开始前在 Agent 管理页中止旧运行。"));
+      }
+      await apiClient.resumeAgentRun(activeAgent, run.id, copy("Restarted from agent management page.", "在 Agent 管理页中重新开始。"));
+      if (activeWorkspaceControlState !== "running") {
+        await apiClient.controlRuntimeWorkspace(activeAgent, "continue", copy("Workspace continued for restarted run.", "为重新开始的运行继续工作区。"));
+      }
+      await loadWorkspaces();
+      setPanelNotice({
+        panel: "runs",
+        tone: "success",
+        message: copy("Run restarted.", "已重新开始运行。"),
+      });
+    } catch (error) {
+      setPanelNotice({
+        panel: "runs",
+        tone: "error",
+        message: error instanceof Error ? error.message : copy("Restart failed.", "重新开始失败。"),
+      });
+    } finally {
+      setRunActionBusyId(null);
+    }
+  };
+
   const handleStopCurrentTurn = async () => {
     if (activeAgent === "assistant") {
       assistantAbortRef.current?.abort();
@@ -3485,8 +3812,41 @@ export function ChatOverlay({
   };
 
   const handleWorkspaceControl = async (action: "start" | "pause" | "continue" | "terminate") => {
+    if ((action === "start" || action === "continue") && activeAgent !== "assistant" && activeWorkspaceStartBlockers.length) {
+      setPanelNotice({
+        panel: "runs",
+        tone: "error",
+        message: `${activeAgent === "jd_sync" ? copy("Complete configuration before starting JD Sync:", "启动 JD 同步前请先补全配置：") : copy("Complete configuration before starting automation:", "启动自动化前请先补全配置：")} ${activeWorkspaceStartBlockers.join("；")}`,
+      });
+      return;
+    }
+    if (action === "start" && activeConversationRun && !isOpenRunStatus(activeConversationRun.status)) {
+      await handleRestartRun(activeConversationRun);
+      return;
+    }
     if (activeAgent === "jd_sync" && action === "start") {
       if (jdSyncActiveRun) {
+        if (activeWorkspaceControlState !== "running") {
+          setWorkspaceControlBusyAction(action);
+          try {
+            await apiClient.controlRuntimeWorkspace("jd_sync", "start", copy("Started for JD sync agent.", "为 JD 同步 Agent 启动工作区。"));
+            await loadWorkspaces();
+            setPanelNotice({
+              panel: "runs",
+              tone: "success",
+              message: copy("JD Sync workspace has continued the open run.", "已继续 JD 同步 Agent 的未结束运行。"),
+            });
+          } catch (error) {
+            setPanelNotice({
+              panel: "runs",
+              tone: "error",
+              message: error instanceof Error ? error.message : copy("Failed to start JD Sync.", "启动 JD 同步失败。"),
+            });
+          } finally {
+            setWorkspaceControlBusyAction(null);
+          }
+          return;
+        }
         setPanelNotice({
           panel: "runs",
           tone: "info",
@@ -3506,6 +3866,9 @@ export function ChatOverlay({
       setWorkspaceControlBusyAction(action);
       try {
         await apiClient.startAgentRun("jd_sync", payload);
+        if ((workspaces.jd_sync?.workspaceControl?.state ?? "stopped") !== "running") {
+          await apiClient.controlRuntimeWorkspace("jd_sync", "start", copy("Started for JD sync agent.", "为 JD 同步 Agent 启动工作区。"));
+        }
         await loadWorkspaces();
         setPanelNotice({
           panel: "runs",
@@ -3539,8 +3902,16 @@ export function ChatOverlay({
         continue: copy("Continued from agent workspace.", "在工作区手动继续。"),
         terminate: copy("Terminated from agent workspace.", "在工作区手动终止。"),
       };
-      await apiClient.controlRuntimeWorkspace(activeAgent, action, reasonMap[action]);
+      const control = await apiClient.controlRuntimeWorkspace(activeAgent, action, reasonMap[action]);
       await loadWorkspaces();
+      if ((action === "start" || action === "continue") && control.runStartBlocked) {
+        setPanelNotice({
+          panel: "runs",
+          tone: "error",
+          message: control.runStartBlocked.reason,
+        });
+        return;
+      }
       setPanelNotice({
         panel: "runs",
         tone: "success",
@@ -3563,6 +3934,79 @@ export function ChatOverlay({
       });
     } finally {
       setWorkspaceControlBusyAction(null);
+    }
+  };
+
+  const composerCommandItems = useMemo<ChatComposerCommand[]>(() => {
+    const commands: ChatComposerCommand[] = [
+      {
+        id: "clear",
+        command: "clear",
+        title: copy("Clear conversation", "清空会话"),
+        description: copy("Reset this conversation context like Codex/Claude Code clear.", "像 Codex/Claude Code clear 一样重置当前会话上下文。"),
+      },
+    ];
+    if (activeAgent !== "assistant") {
+      commands.push(
+        {
+          id: "start",
+          command: "start",
+          title: copy("Start agent", "启动 Agent"),
+          description: activeWorkspaceStartBlockers.length
+            ? `${copy("Missing configuration:", "缺少配置：")} ${activeWorkspaceStartBlockers.join("；")}`
+            : copy("Start or restart the selected automation workspace.", "启动或重新开始当前自动化工作区。"),
+          disabled: workspaceControlBusyAction !== null || !activeWorkspaceCanStart,
+        },
+        {
+          id: "pause",
+          command: "pause",
+          title: copy("Pause agent", "暂停 Agent"),
+          description: copy("Pause the current automation workspace.", "暂停当前自动化工作区。"),
+          disabled: workspaceControlBusyAction !== null || activeWorkspaceControlState !== "running",
+        },
+        {
+          id: "continue",
+          command: "continue",
+          title: copy("Continue agent", "继续 Agent"),
+          description: activeWorkspaceStartBlockers.length
+            ? `${copy("Missing configuration:", "缺少配置：")} ${activeWorkspaceStartBlockers.join("；")}`
+            : copy("Continue a paused automation workspace.", "继续已暂停的自动化工作区。"),
+          disabled: workspaceControlBusyAction !== null || activeWorkspaceControlState !== "paused" || !activeWorkspaceCanStart,
+        },
+        {
+          id: "terminate",
+          command: "terminate",
+          title: copy("Terminate agent", "终止 Agent"),
+          description: copy("Terminate the current automation workspace and open runs.", "终止当前自动化工作区和未结束运行。"),
+          disabled: workspaceControlBusyAction !== null || activeWorkspaceControlState === "stopped",
+        },
+      );
+    }
+    return commands;
+  }, [activeAgent, activeWorkspaceCanStart, activeWorkspaceControlState, activeWorkspaceStartBlockers, copy, workspaceControlBusyAction]);
+
+  const composerMatchedCommand = useMemo(() => {
+    const query = slashCommandQuery(composerInputValue);
+    if (query == null) {
+      return null;
+    }
+    return composerCommandItems.find((command) => slashCommandMatches(command, query) && !command.disabled) ?? null;
+  }, [composerCommandItems, composerInputValue]);
+
+  const handleComposerCommand = async (commandId: string) => {
+    if (commandId === "clear") {
+      await handleClearConversation();
+      return;
+    }
+    if (commandId === "start" || commandId === "pause" || commandId === "continue" || commandId === "terminate") {
+      setComposerValue("");
+      if (activeDraftComposerKey != null) {
+        setDraftComposerValues((current) => ({
+          ...current,
+          [activeDraftComposerKey]: "",
+        }));
+      }
+      await handleWorkspaceControl(commandId);
     }
   };
 
@@ -3730,7 +4174,7 @@ export function ChatOverlay({
                 </div>
               </div>
               <StatusBadge tone={run.status === "completed" ? "positive" : run.status === "failed" ? "critical" : "warning"}>
-                {describeConversationStatus(run.status)}
+                {describeRunStatus(run)}
               </StatusBadge>
             </div>
             <div className="agent-runs__body">
@@ -3745,8 +4189,12 @@ export function ChatOverlay({
                   {copy("Updated", "更新")} · {formatDateTime(run.updatedAt)}
                 </p>
               </div>
+              <div>
+                <span>{copy("Run phase", "运行阶段")}</span>
+                <p>{runPhaseLabel(run, copy)}</p>
+              </div>
             </div>
-            {activeAgent === "autonomous" ? (
+            {activeAgent !== "assistant" ? (
               <div className="agent-runs__actions">
                 {run.refId ? (
                   <button
@@ -3779,6 +4227,14 @@ export function ChatOverlay({
                     {runActionBusyId === run.id ? copy("Working…", "处理中…") : copy("Cancel run", "中止运行")}
                   </button>
                 ) : null}
+                <button
+                  type="button"
+                  className="chat-overlay__header-button"
+                  disabled={runActionBusyId === run.id}
+                  onClick={() => void handleRestartRun(run)}
+                >
+                  {runActionBusyId === run.id ? copy("Working…", "处理中…") : copy("Restart", "重新开始")}
+                </button>
                 {isResumableRunStatus(run.status) ? (
                   <button
                     type="button"
@@ -4245,6 +4701,7 @@ export function ChatOverlay({
           }));
         };
         const siteReady = Boolean(jdSyncConfigDraft.executionSop.siteEntryUrl.trim());
+        const readinessBlockers = validateJdSyncLaunchReadiness(jdSyncConfigDraft);
         return (
           <div className="agent-config agent-config--automation">
             <div className="agent-config-automation-layout">
@@ -4276,9 +4733,17 @@ export function ChatOverlay({
                         <p>{copy("This agent only syncs job descriptions from a logged-in recruiting site.", "这个 Agent 只从已登录招聘网站同步 JD，不处理候选人。")}</p>
                       </div>
                     </div>
+                    <div className="agent-config-readiness" data-state={siteReady && !readinessBlockers.length ? "ready" : "blocked"}>
+                      <strong>{siteReady && !readinessBlockers.length ? copy("Ready to start", "可启动") : copy("Configuration missing", "配置缺失")}</strong>
+                      <span>
+                        {readinessBlockers.length
+                          ? `${copy("Complete before start:", "启动前需要补全：")} ${readinessBlockers.join("；")}`
+                          : copy("Saved site configuration can be used to start JD sync.", "已具备启动 JD 同步所需的网站配置。")}
+                      </span>
+                    </div>
                     <div className="agent-config-editor__fields">
                       <label className="agent-config-editor__field agent-config-editor__field--wide">
-                        <span>{copy("Recruiting entry URL", "招聘入口 URL")}</span>
+                        <span>{copy("Recruiting target page URL", "招聘网站目标网页 URL")}</span>
                         <FormInput
                           placeholder="https://..."
                           value={jdSyncConfigDraft.executionSop.siteEntryUrl}
@@ -4699,7 +5164,7 @@ export function ChatOverlay({
                     );
                   })}
                   {!automationJobDescriptions.length ? (
-                    <div className="chat-empty-inline">{copy("Configure the entry URL and sync JD first.", "请先配置入口 URL 并同步 JD。")}</div>
+                    <div className="chat-empty-inline">{copy("Configure the target page URL and sync JD first.", "请先配置目标网页 URL 并同步 JD。")}</div>
                   ) : null}
                 </div>
               </aside>
@@ -4788,7 +5253,7 @@ export function ChatOverlay({
                 </div>
                 <div className="agent-config-editor__fields">
                   <label className="agent-config-editor__field agent-config-editor__field--wide">
-                    <span>{copy("Recruiting entry URL", "招聘入口 URL")}</span>
+                    <span>{copy("Recruiting target page URL", "招聘网站目标网页 URL")}</span>
                     <FormInput
                       placeholder="https://..."
                       value={automationConfigDraft.executionSop.siteEntryUrl}
@@ -4846,7 +5311,7 @@ export function ChatOverlay({
                   <div className="agent-config-scheduler-toggle-grid">
                     {renderSchedulerToggle("stopOnJdOffline", copy("Stop when JD is offline", "JD 下架时停止"))}
                     {renderSchedulerToggle("pauseOnLoginRequired", copy("Pause on login required", "需要登录时暂停"))}
-                    {renderSchedulerToggle("pauseOnEntryUnavailable", copy("Pause on unavailable entry", "入口不可用时暂停"))}
+                    {renderSchedulerToggle("pauseOnEntryUnavailable", copy("Pause when target page is unavailable", "目标网页不可用时暂停"))}
                     {renderSchedulerToggle("pauseOnApprovalPending", copy("Pause on pending approval", "等待审批时暂停"))}
                     {renderSchedulerToggle("pauseOnNoProgress", copy("Pause on no progress", "无进展时暂停"))}
                   </div>
@@ -5391,8 +5856,8 @@ export function ChatOverlay({
                         "当前 JD、候选人、投递记录和对话事实会在相关场景下进入对话上下文；AI助手配置控制这些上下文如何使用。",
                       )
                     : copy(
-                        "Each autonomous run receives the selected JD standards, candidate facts, resume artifacts, communication evidence, score records, and configured recruiting entry URL.",
-                        "每次自动化运行都会带入选中的 JD 标准、候选人事实、简历附件、沟通证据、评分记录和已配置的招聘入口 URL。",
+                        "Each autonomous run receives the selected JD standards, candidate facts, resume artifacts, communication evidence, score records, and configured recruiting target page URL.",
+                        "每次自动化运行都会带入选中的 JD 标准、候选人事实、简历附件、沟通证据、评分记录和已配置的招聘网站目标网页 URL。",
                       )}
                 </div>
               </section>
@@ -5510,11 +5975,47 @@ export function ChatOverlay({
         };
       })();
 
+      const businessActionsHelpText = copy(
+        "Business actions record agent-level business outcomes such as JD writeback, candidate discovery, resume download, messaging, application stage updates, approvals, and external sync.",
+        "业务动作记录 Agent 产生的业务结果，例如 JD 写回、候选人发现、简历下载、消息发送、投递阶段更新、审批和外部同步。",
+      );
+
       return (
         <div className="agent-context-panel">
+          <div className="agent-rail-tabs" role="tablist" aria-label={copy("Right panel", "右侧栏")}>
+            <button
+              type="button"
+              role="tab"
+              data-active={activeRailTab === "details"}
+              aria-selected={activeRailTab === "details"}
+              onClick={() => setActiveRailTab("details")}
+            >
+              {copy("Workspace details", "工作区详情")}
+            </button>
+            <span className="agent-rail-tabs__item" data-active={activeRailTab === "businessActions"}>
+              <button
+                type="button"
+                role="tab"
+                data-active={activeRailTab === "businessActions"}
+                aria-selected={activeRailTab === "businessActions"}
+                onClick={() => setActiveRailTab("businessActions")}
+              >
+                {copy("Business actions", "业务动作")}
+              </button>
+              <button
+                type="button"
+                className="agent-rail-tabs__info"
+                aria-label={businessActionsHelpText}
+                title={businessActionsHelpText}
+              >
+                i
+              </button>
+            </span>
+          </div>
+          {activeRailTab === "businessActions" ? renderBusinessActionsColumn() : (
+            <>
           <div className="agent-context-panel__head">
             <div>
-              <span>{copy("Details panel", "详情面板")}</span>
               <h3>{context.title}</h3>
             </div>
             <button className="agent-context-panel__collapse" type="button" onClick={() => setRailCollapsed(true)}>
@@ -5542,6 +6043,8 @@ export function ChatOverlay({
             <button type="button" onClick={() => setActivePanel("config")}>{copy("Open config", "查看配置")}</button>
             <button type="button" onClick={() => setActivePanel("runs")}>{copy("View runs", "查看运行")}</button>
           </div>
+            </>
+          )}
         </div>
       );
     }
@@ -5797,14 +6300,12 @@ export function ChatOverlay({
               }}
             >
               <div className="agent-management-list__card-main">
-                <span className="agent-management-list__bot" aria-hidden="true">{agentShortCode(activeAgent)}</span>
                 <div>
                   <strong>{normalizeAgentTitle(activeAgent, conversation.title)}</strong>
                   <span>{copy("ID", "ID")}：{conversation.refId || conversation.id}</span>
                 </div>
               </div>
-              <StatusBadge tone={toneForRunStatus(conversation.status)}>{describeConversationStatus(conversation.status)}</StatusBadge>
-              <p>{describeConversationPreview(conversation)}</p>
+              <StatusBadge tone="neutral">{queueConversationStatusLabel(conversation)}</StatusBadge>
               <div className="agent-management-list__meta">
                 <span>{copy("Updated", "更新于")} {formatDateTime(conversation.updatedAt)}</span>
                 {conversation.unreadCount > 0 ? <span>{copy("Unread", "未读")} {conversation.unreadCount}</span> : null}
@@ -5831,24 +6332,27 @@ export function ChatOverlay({
       );
     }
 
-    const openRuns = activeWorkspace.runs.filter((run) => isOpenRunStatus(run.status)).length;
-    const pendingApprovals = activeWorkspace.approvals.filter((approval) => approval.status === "pending").length;
-    const failedRuns = activeWorkspace.runs.filter((run) => run.status === "failed" || run.status === "cancelled").length;
-    const enabledTools = activeWorkspace.tools.filter((tool) => tool.enabled).length;
-    const healthySkills = activeWorkspace.skills.filter((skill) => skill.health === "healthy").length;
     const workspaceTitle = agentDisplayName(activeAgent);
     const workspaceControl = activeWorkspace.workspaceControl;
     const controlState = workspaceControl?.state ?? "stopped";
-    const controlLabel =
-      controlState === "running"
-        ? copy("Running", "运行中")
-        : controlState === "paused"
-          ? copy("Paused", "已暂停")
-          : controlState === "terminating"
-            ? copy("Terminating", "终止中")
-            : copy("Stopped", "未开始");
-    const controlTone =
-      controlState === "running" ? "positive" : controlState === "paused" ? "warning" : "neutral";
+    const sortedRuns = [...activeWorkspace.runs].sort(
+      (left, right) => parseConversationSortTime(right.updatedAt) - parseConversationSortTime(left.updatedAt),
+    );
+    const currentRun = sortedRuns.find((run) => isOpenRunStatus(run.status)) ?? sortedRuns[0] ?? null;
+    const currentId = activeConversationSummary?.refId || currentRun?.refId || activeConversationSummary?.id || currentRun?.id || "-";
+    const workspaceTime = currentRun?.startedAt
+      || workspaceControl?.updatedAt
+      || currentRun?.updatedAt
+      || activeConversationSummary?.updatedAt
+      || activeConversation?.messages[0]?.createdAt
+      || null;
+    const headerStatusLabel = currentRun
+      ? describeRunStatus(currentRun)
+      : activeConversationSummary
+      ? queueConversationStatusLabel(activeConversationSummary)
+      : activeWorkspace.agent.status === "active"
+        ? copy("Idle", "空闲")
+        : describeConversationStatus(activeWorkspace.agent.status);
     const workspaceStartBlockers =
       activeAgent === "autonomous"
         ? automationLaunchBlockers
@@ -5859,104 +6363,19 @@ export function ChatOverlay({
 
     return (
       <section className="agent-management-workbench-head">
-        <div className="agent-management-workbench-head__main">
-          <div className="agent-management-workbench-head__title-row">
-            <h2>{workspaceTitle}</h2>
-            <StatusBadge tone={toneForHealth(activeWorkspace.agent.health)}>
-              {describeConversationStatus(activeWorkspace.agent.status)}
-            </StatusBadge>
-          </div>
-          {activeAgent !== "assistant" ? (
-            <div className="agent-workspace-control">
-              <div className="agent-workspace-control__status">
-                <StatusBadge tone={controlTone}>{controlLabel}</StatusBadge>
-                <span>{activeAgent === "jd_sync" ? copy("JD sync agent. Run it manually after saving its site configuration.", "JD 同步 Agent；保存网站配置后手动运行。") : copy("Recruiting automation agent. Configuration is inactive until this workspace is started.", "自动化招聘 Agent；配置完成后必须在这里手动开始才会执行。")}</span>
-              </div>
-              <div className="agent-workspace-control__actions">
-                {controlState === "running" ? (
-                  <>
-                    <button
-                      type="button"
-                      className="agent-workspace-control__button"
-                      disabled={workspaceControlBusyAction !== null}
-                      onClick={() => void handleWorkspaceControl("pause")}
-                    >
-                      {workspaceControlBusyAction === "pause" ? copy("Pausing", "暂停中") : copy("Pause", "暂停")}
-                    </button>
-                    <button
-                      type="button"
-                      className="agent-workspace-control__button agent-workspace-control__button--danger"
-                      disabled={workspaceControlBusyAction !== null}
-                      onClick={() => void handleWorkspaceControl("terminate")}
-                    >
-                      {workspaceControlBusyAction === "terminate" ? copy("Terminating", "终止中") : copy("Terminate", "终止")}
-                    </button>
-                  </>
-                ) : controlState === "paused" ? (
-                  <>
-                    <button
-                      type="button"
-                      className="agent-workspace-control__button agent-workspace-control__button--primary"
-                      disabled={workspaceControlBusyAction !== null}
-                      onClick={() => void handleWorkspaceControl("continue")}
-                    >
-                      {workspaceControlBusyAction === "continue" ? copy("Continuing", "继续中") : copy("Continue", "继续")}
-                    </button>
-                    <button
-                      type="button"
-                      className="agent-workspace-control__button agent-workspace-control__button--danger"
-                      disabled={workspaceControlBusyAction !== null}
-                      onClick={() => void handleWorkspaceControl("terminate")}
-                    >
-                      {workspaceControlBusyAction === "terminate" ? copy("Terminating", "终止中") : copy("Terminate", "终止")}
-                    </button>
-                  </>
-                ) : (
-                  <button
-                    type="button"
-                    className="agent-workspace-control__button agent-workspace-control__button--primary"
-                    disabled={
-                      workspaceControlBusyAction !== null
-                      || controlState === "terminating"
-                      || ((activeAgent === "autonomous" || activeAgent === "jd_sync") && !workspaceStartReady)
-                    }
-                    onClick={() => void handleWorkspaceControl("start")}
-                    title={!workspaceStartReady ? workspaceStartBlockers.join("；") : undefined}
-                  >
-                    {workspaceControlBusyAction === "start" ? copy("Starting agent", "启动中") : copy("Start agent", "启动 Agent")}
-                  </button>
-                )}
-              </div>
-              {!workspaceStartReady && controlState !== "running" ? (
-                <div className="agent-workspace-control__blockers">
-                  {copy("Complete before start:", "启动前需要补全：")} {workspaceStartBlockers.join("；")}
-                </div>
-              ) : null}
-            </div>
-          ) : null}
+        <div className="agent-management-workbench-head__title-row">
+          <h2>{workspaceTitle}</h2>
+          <StatusBadge tone={headerStatusLabel === copy("Idle", "空闲") ? "neutral" : toneForHealth(activeWorkspace.agent.health)}>
+            {headerStatusLabel}
+          </StatusBadge>
+          <span className="agent-management-workbench-head__meta-item">{copy("ID", "ID")}：{currentId}</span>
+          <span className="agent-management-workbench-head__meta-item">{copy("Time", "时间")}：{workspaceTime ? formatDateTime(workspaceTime) : "-"}</span>
         </div>
-        <div className="agent-management-workbench-head__metrics">
-          <div>
-            <span>{copy("Open runs", "待处理运行")}</span>
-            <strong>{openRuns}</strong>
+        {activeAgent !== "assistant" && !workspaceStartReady && controlState !== "running" ? (
+          <div className="agent-workspace-control__blockers">
+            {copy("Complete before start:", "启动前需要补全：")} {workspaceStartBlockers.join("；")}
           </div>
-          <div>
-            <span>{copy("Approvals", "待确认")}</span>
-            <strong>{pendingApprovals}</strong>
-          </div>
-          <div>
-            <span>{copy("Failed", "异常")}</span>
-            <strong>{failedRuns}</strong>
-          </div>
-          <div>
-            <span>{copy("Tools", "可用工具")}</span>
-            <strong>{enabledTools}</strong>
-          </div>
-          <div>
-            <span>{copy("Skills", "健康技能")}</span>
-            <strong>{healthySkills}</strong>
-          </div>
-        </div>
+        ) : null}
       </section>
     );
   };
@@ -6056,6 +6475,18 @@ export function ChatOverlay({
   );
 
   const renderBusinessActionsColumn = () => {
+    const filters: BusinessActionFilter[] = [
+      "all",
+      "jd",
+      "candidate",
+      "resume",
+      "communication",
+      "application",
+      "evaluation",
+      "sync",
+      "approval",
+      "state",
+    ];
     const approvalItems = (activeWorkspace?.approvals ?? [])
       .filter((approval) => approval.status === "pending")
       .map((approval) => businessActionFromApproval(approval, copy));
@@ -6068,37 +6499,55 @@ export function ChatOverlay({
       .forEach((item) => {
         uniqueItems.set(item.key, item);
       });
-    const visibleItems = Array.from(uniqueItems.values()).slice(-12);
+    const allItems = Array.from(uniqueItems.values());
+    const filteredItems = businessActionFilter === "all"
+      ? allItems
+      : allItems.filter((item) => item.category === businessActionFilter);
+    const visibleItems = filteredItems.slice(-12);
     return (
-      <aside className="agent-business-actions" aria-label={copy("Business actions", "业务动作")}>
-        <div className="agent-business-actions__head">
-          <strong>{copy("Business actions", "业务动作")}</strong>
-          <span>{copy("Timeline", "Timeline")} · {visibleItems.length}</span>
+      <section className="agent-business-actions" aria-label={copy("Business actions", "业务动作")}>
+        <div className="agent-business-actions__filters" role="tablist" aria-label={copy("Business action filters", "业务动作筛选")}>
+          {filters.map((filter) => (
+            <button
+              key={filter}
+              type="button"
+              role="tab"
+              data-active={businessActionFilter === filter}
+              aria-selected={businessActionFilter === filter}
+              onClick={() => setBusinessActionFilter(filter)}
+            >
+              {businessActionFilterLabel(filter, copy)}
+            </button>
+          ))}
         </div>
         <div className="agent-business-actions__list">
           {visibleItems.map((item) => (
             <div key={item.key} className="agent-business-actions__item" data-category={item.category} data-status={item.status}>
-              <div className="agent-business-actions__node" aria-hidden="true" />
+              <div className="agent-business-actions__node" aria-hidden="true">
+                {businessActionCategoryMark(item.category)}
+              </div>
               <div className="agent-business-actions__body">
-                <div className="agent-business-actions__meta">
-                  <span>{item.label}</span>
+                <div className="agent-business-actions__title-row">
+                  <strong>{item.title}</strong>
                   <time dateTime={item.time}>{formatDateTime(item.time)}</time>
                 </div>
-                <p>{item.title}</p>
+                <div className="agent-business-actions__meta">
+                  <span>{item.label}</span>
+                  <StatusBadge tone={businessActionStatusTone(item.status)}>
+                    {businessActionStatusLabel(item.status, copy)}
+                  </StatusBadge>
+                </div>
                 <small>{item.detail}</small>
               </div>
             </div>
           ))}
           {!visibleItems.length ? (
-            <div className="agent-business-actions__empty">
-              {copy(
-                "Business actions from the agent will appear here as an independent timeline: JD sync, candidate discovery and screening, resume acquisition, scoring, communication, application-stage changes, approvals, blockers, and external-system sync.",
-                "Agent 的业务动作会在这里以独立 timeline 展示：JD 同步、候选人发现与筛选、简历获取、评分、沟通、投递阶段变化、审批、阻塞和外部系统同步等。",
-              )}
-            </div>
+            <p className="agent-business-actions__empty">
+              {copy("No business actions yet.", "暂无业务动作。")}
+            </p>
           ) : null}
         </div>
-      </aside>
+      </section>
     );
   };
 
@@ -6116,7 +6565,6 @@ export function ChatOverlay({
                 variant={pageMode ? "timeline" : "cards"}
               />
             </div>
-            {pageMode ? renderBusinessActionsColumn() : null}
           </div>
         </div>
       );
@@ -6144,46 +6592,49 @@ export function ChatOverlay({
     if (activeAgent === "assistant") {
       return null;
     }
-    if (activeWorkspaceControlState === "running") {
+    if (runtimeActiveRun && activeWorkspaceControlState === "running") {
       return (
         <button
           type="button"
-          className="chat-composer__control-button"
+          className="chat-composer__control-button chat-composer__control-button--pause"
           disabled={workspaceControlBusyAction !== null}
           onClick={() => void handleWorkspaceControl("pause")}
         >
-          {workspaceControlBusyAction === "pause" ? copy("Pausing", "暂停中") : copy("Pause", "暂停")}
+          <span className="chat-composer__control-icon" data-icon="pause" aria-hidden="true" />
+          <span>{workspaceControlBusyAction === "pause" ? copy("Pausing", "暂停中") : copy("Pause agent", "暂停 Agent")}</span>
         </button>
       );
     }
-    if (activeWorkspaceControlState === "paused") {
+    if (runtimeActiveRun && activeWorkspaceControlState === "paused") {
       return (
         <button
           type="button"
-          className="chat-composer__control-button"
-          disabled={workspaceControlBusyAction !== null || !activeWorkspaceStartReady}
+          className="chat-composer__control-button chat-composer__control-button--continue"
+          disabled={workspaceControlBusyAction !== null || !activeWorkspaceCanStart}
           onClick={() => void handleWorkspaceControl("continue")}
+          title={!activeWorkspaceCanStart ? activeWorkspaceStartBlockers.join("；") : undefined}
         >
-          {workspaceControlBusyAction === "continue" ? copy("Starting", "启动中") : copy("Start", "启动")}
+          <span className="chat-composer__control-icon" data-icon="start" aria-hidden="true" />
+          <span>{workspaceControlBusyAction === "continue" ? copy("Starting", "启动中") : copy("Continue agent", "继续 Agent")}</span>
         </button>
       );
     }
     return (
       <button
         type="button"
-        className="chat-composer__control-button chat-composer__control-button--primary"
-        disabled={workspaceControlBusyAction !== null || !activeWorkspaceStartReady}
+        className="chat-composer__control-button chat-composer__control-button--primary chat-composer__control-button--start"
+        disabled={workspaceControlBusyAction !== null || !activeWorkspaceCanStart}
         onClick={() => void handleWorkspaceControl("start")}
-        title={!activeWorkspaceStartReady ? activeWorkspaceStartBlockers.join("；") : undefined}
+        title={!activeWorkspaceCanStart ? activeWorkspaceStartBlockers.join("；") : undefined}
       >
-        {workspaceControlBusyAction === "start" ? copy("Starting", "启动中") : copy("Start agent", "启动 Agent")}
+        <span className="chat-composer__control-icon" data-icon="start" aria-hidden="true" />
+        <span>{workspaceControlBusyAction === "start" ? copy("Starting", "启动中") : copy("Start agent", "启动 Agent")}</span>
       </button>
     );
   };
 
   const renderComposerExecutionAction = () => {
-    const hasActiveTurn = (activeAgent === "assistant" && sending) || (activeAgent !== "assistant" && runtimeActiveRun != null);
-    if (!hasActiveTurn) {
+    if (activeAgent !== "assistant" || !sending) {
       return null;
     }
     return (
@@ -6415,10 +6866,9 @@ export function ChatOverlay({
               </section>
             ) : null}
 
-            {errorMessage ? <div className="chat-overlay__error">{errorMessage}</div> : null}
-            {panelNotice?.panel === activePanel ? <div style={noticeStyle(panelNotice.tone)}>{panelNotice.message}</div> : null}
-
             <div ref={streamShellRef} className="chat-overlay__stream-shell" onScroll={handleStreamScroll}>
+              {errorMessage ? <div className="chat-overlay__error">{errorMessage}</div> : null}
+              {panelNotice?.panel === activePanel ? <div className="chat-overlay__notice" style={noticeStyle(panelNotice.tone)}>{panelNotice.message}</div> : null}
               {renderPanelContent()}
             </div>
 
@@ -6428,13 +6878,11 @@ export function ChatOverlay({
                 inputDisabled={
                   sending
                   || loadingWorkspace
-                  || (activeAgent !== "assistant" && activeWorkspaceControlState !== "running")
-                  || (autonomousStartBlocked && !autonomousDraftEditable)
                 }
                 submitDisabled={
                   loadingWorkspace
                   || (activeAgent === "assistant" && sending)
-                  || (activeAgent !== "assistant" && activeWorkspaceControlState !== "running")
+                  || (activeAgent !== "assistant" && activeWorkspaceControlState !== "running" && composerMatchedCommand == null)
                 }
                 submitRequiresValue
                 modelLabel={activeWorkspace?.config.modelLabel ?? activeWorkspace?.agent.defaultModel}
@@ -6450,7 +6898,16 @@ export function ChatOverlay({
                 executionAction={renderComposerExecutionAction()}
                 value={composerInputValue}
                 onChange={handleComposerChange}
-                onSubmit={() => void handleSubmit()}
+                onSubmit={() => {
+                  if (composerMatchedCommand) {
+                    void handleComposerCommand(composerMatchedCommand.id);
+                    return;
+                  }
+                  void handleSubmit();
+                }}
+                commandItems={composerCommandItems}
+                onCommand={(commandId) => void handleComposerCommand(commandId)}
+                shouldSubmitOnEnter={isClearConversationCommand}
               />
             ) : null}
           </main>
@@ -6477,7 +6934,7 @@ export function ChatOverlay({
             <button
               type="button"
               className="agent-context-restore"
-              aria-label={copy("Show details panel", "展开详情面板")}
+              aria-label={copy("Show right panel", "展开右侧栏")}
               style={{ top: `${railRestoreTop}px` }}
               onPointerDown={startRailRestoreDrag}
               onKeyDown={(event) => {

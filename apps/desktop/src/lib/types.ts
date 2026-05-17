@@ -766,6 +766,7 @@ export interface AgentPendingUserInputAfterNextToolCallRequestResult extends Ass
 export interface AutonomousRunStartRequest {
   title: string;
   instruction: string;
+  requestMessage?: string | null;
   kind?: string | null;
   jdId?: string | null;
   candidateCountTarget?: number | null;

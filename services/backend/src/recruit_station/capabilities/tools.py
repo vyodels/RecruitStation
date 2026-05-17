@@ -120,7 +120,20 @@ class ToolRegistry:
             tool: ToolDefinition
 
             def handle(self, call: AgentRuntimeToolCall, context: TurnContext) -> AgentRuntimeToolResult:
-                result = registry.execute(self.tool.name, dict(call.input or {}))
+                arguments = dict(call.input or {})
+                if self.tool.name == "delegate_scene_context":
+                    from recruit_station.product_adapters.target_contracts import merge_browser_target_into_scene_arguments
+
+                    runtime = dict(context.runtime or {})
+                    arguments = merge_browser_target_into_scene_arguments(
+                        arguments,
+                        structured_sources=(
+                            runtime,
+                            runtime.get("constraints"),
+                            runtime.get("context_hints"),
+                        ),
+                    )
+                result = registry.execute(self.tool.name, arguments)
                 return AgentRuntimeToolResult(
                     tool_call_id=call.id,
                     tool_use_id=call.tool_use_id,
@@ -479,7 +492,7 @@ def build_delegate_scene_context_tool(
                 },
                 "browser_target": {
                     "type": "object",
-                    "description": "Optional top-level shortcut for the browser target; equivalent to environment_requirements.browser_target. When the operator instruction or current contract includes an explicit web target URL, preserve it here as browser_target.url and derive host from that URL/browser evidence so stale tabs on a different origin are rejected.",
+                    "description": "Optional top-level shortcut for the browser target; equivalent to environment_requirements.browser_target. When the operator instruction or current contract includes an explicit web target URL, preserve it here as browser_target.url and derive host from that URL/browser evidence so stale tabs on a different origin are rejected. The URL is an entrypoint hint; only its full origin is the hard boundary, and same-origin paths may change during the workflow.",
                 },
                 "computer_target": {
                     "type": "object",

@@ -115,7 +115,7 @@ class ApiAppTests(unittest.TestCase):
                         '{"run_title":"同步 JD（增量）","status":"blocked","created":0,"updated":0,"skipped":0,"blocked":1,'
                         '"evidence":["当前浏览器仅有 1 个标签页：\'CLI Proxy API Management Center\'",'
                         '"活动页 URL: http://127.0.0.1:8317/management.html#/auth-files"],'
-                        '"next_step":"请先在浏览器中打开并切换到招聘平台的职位列表或职位详情页面，然后继续同步。"}'
+                        '"next_step":"请先在浏览器中打开并切换到招聘网站任意可访问页面，Agent 会根据页面导航继续同步。"}'
                     ),
                     tags=["autonomous", "global"],
                     is_active=True,

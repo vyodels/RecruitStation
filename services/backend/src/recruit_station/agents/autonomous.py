@@ -50,6 +50,7 @@ from recruit_station.product_adapters.target_contracts import derive_browser_tar
 from recruit_station.capabilities.tools import ToolRegistry
 from recruit_station.skills.context import build_skill_context_injections
 
+MCP_RESOURCE_RUNTIME_TOOL_NAMES: frozenset[str] = frozenset({"list_mcp_resources", "read_mcp_resource"})
 AUTONOMOUS_OPEN_RUN_STATUSES: tuple[str, ...] = (
     "queued",
     "running",
@@ -274,6 +275,11 @@ class AutonomousAdapter:
                     dict(envelope.get("metadata") or {}) if isinstance(envelope.get("metadata"), dict) else {},
                     envelope,
                 )
+                turn_tool_registry = _runtime_tool_registry_for_run(
+                    self.tool_registry,
+                    run=run,
+                    constraints=run_constraints,
+                )
                 adapter_context = build_autonomous_turn_context(
                     title=run_title,
                     instruction=instruction,
@@ -286,7 +292,7 @@ class AutonomousAdapter:
                     world_snapshot=world_snapshot,
                     recent_events=_fetch_recent_events(session, run_id=run.id, limit=8),
                     memory_entries=memory_entries,
-                    available_tools=sorted(self.tool_registry.tools.keys()),
+                    available_tools=sorted(turn_tool_registry.tools.keys()),
                     skill_contexts=self._skill_contexts(
                         session,
                         query=instruction,
@@ -345,7 +351,7 @@ class AutonomousAdapter:
                 try:
                     runner_result = run_agent_turn(
                         provider=self.provider,
-                        tool_registry=self.tool_registry,
+                        tool_registry=turn_tool_registry,
                         agent_definition_id=agent_definition_id,
                         conversation_id=runtime_conversation_id,
                         initial_messages=adapter_context.initial_messages,
@@ -358,7 +364,12 @@ class AutonomousAdapter:
                         output_sink=lambda output: _record_engine_output(session, run=run, turn_id=turn.turn_id, output=output),
                         engine_sink=_bind_engine,
                         structured_status_resolver=_outcome_from_structured_result_data,
-                        runtime={"permission_policy": _runtime_permission_policy(run_constraints)},
+                        runtime={
+                            "permission_policy": _runtime_permission_policy(run_constraints),
+                            "constraints": run_constraints,
+                            "context_hints": dict(run_constraints.get("context_hints") or {}),
+                            **({"browser_target": browser_target} if browser_target else {}),
+                        },
                         pending_user_input_after_next_tool_call_provider=_pending_user_input_after_next_tool_call_provider,
                         status_defaults=AgentTurnStatusDefaults(
                             completed_status="complete",
@@ -1051,6 +1062,39 @@ def _mcp_resource_contexts(mcp_registry: Any | None, *sources: dict[str, Any]) -
     if not policy.get("resources"):
         return []
     return build_mcp_resource_context(mcp_registry, policy)
+
+
+def _runtime_tool_registry_for_run(
+    registry: ToolRegistry,
+    *,
+    run: AgentRun,
+    constraints: dict[str, Any],
+) -> ToolRegistry:
+    if not _should_hide_mcp_resource_tools(run=run, constraints=constraints):
+        return registry
+    return registry.filtered(lambda tool: tool.name not in MCP_RESOURCE_RUNTIME_TOOL_NAMES)
+
+
+def _should_hide_mcp_resource_tools(*, run: AgentRun, constraints: dict[str, Any]) -> bool:
+    normalized_kind = str(run.run_type or "").strip().lower()
+    if normalized_kind == "jd_sync":
+        return True
+    if _has_browser_target(constraints):
+        return True
+    context_hints = constraints.get("context_hints")
+    if isinstance(context_hints, dict) and _has_browser_target(context_hints):
+        return True
+    return False
+
+
+def _has_browser_target(value: Any) -> bool:
+    if isinstance(value, dict):
+        if value.get("browser_target") or value.get("browserTarget") or value.get("target_recruiting_site"):
+            return True
+        return any(_has_browser_target(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_has_browser_target(item) for item in value)
+    return False
 
 
 def _approved_tool_calls_from_envelope(envelope: dict[str, Any], *, run: AgentRun) -> list[dict[str, Any]]:

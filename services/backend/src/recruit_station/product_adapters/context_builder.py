@@ -245,9 +245,36 @@ def _agent_system_prompt(
     ]
     if instruction:
         lines.append(f"Instruction: {instruction}")
+    browser_target_policy = _browser_target_policy(context_payload)
+    if browser_target_policy:
+        lines.append(browser_target_policy)
     if context_payload:
         lines.append(f"Context: {json.dumps(context_payload, ensure_ascii=False, default=str)}")
     return "\n".join(lines)
+
+
+def _browser_target_policy(context_payload: dict[str, Any]) -> str | None:
+    if not _has_browser_target(context_payload):
+        return None
+    return (
+        "Browser target policy: browser_target.url is an entrypoint hint, not an exact active-tab path requirement. "
+        "The hard boundary is the full origin derived from browser_target.url or browser_target.host, including port. "
+        "Do not treat context_hints.active_tab_url as current browser evidence unless a browser tool confirms it in this turn. "
+        "Browser availability must be checked with browser tools such as browser_get_active_tab, browser_list_tabs, or browser_snapshot; "
+        "do not use MCP resource tools like list_mcp_resources for browser capability probing. "
+        "Same-origin paths may change during the workflow; navigate or select a same-origin target when available. "
+        "If the active tab is a different origin and no available tool can move to the target origin, report an origin blocker."
+    )
+
+
+def _has_browser_target(value: Any) -> bool:
+    if isinstance(value, dict):
+        if "browser_target" in value or "browserTarget" in value:
+            return True
+        return any(_has_browser_target(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_has_browser_target(item) for item in value)
+    return False
 
 
 def _without_empty(payload: dict[str, Any]) -> dict[str, Any]:
