@@ -2378,6 +2378,11 @@ export function ChatOverlay({
       || (run.refId != null && conversationIds.has(run.refId))
     ) ?? null;
   }, [activeAgent, activeConversationId, activeConversationSummary?.refId, activeWorkspace]);
+  const activeConversationRunIsResumable = Boolean(
+    activeConversationRun
+    && activeAgent !== "assistant"
+    && isResumableRunStatus(activeConversationRun.status),
+  );
   const activeWorkspaceControlState = activeWorkspace?.workspaceControl?.state ?? "stopped";
   const activeWorkspaceStartBlockers =
     activeAgent === "autonomous"
@@ -3135,7 +3140,7 @@ export function ChatOverlay({
       await handleClearConversation();
       return;
     }
-    if (activeAgent !== "assistant" && activeWorkspaceControlState !== "running") {
+    if (activeAgent !== "assistant" && activeWorkspaceControlState !== "running" && !activeConversationRunIsResumable) {
       setPanelNotice({
         panel: "conversation",
         tone: "info",
@@ -3302,6 +3307,41 @@ export function ChatOverlay({
           },
         });
         syncConversationPreview(activeAgent, conversationId, text, trimTitle(text));
+
+        if (activeConversationRun && isResumableRunStatus(activeConversationRun.status)) {
+          const result = await apiClient.resumeAgentRun(
+            activeAgent,
+            activeConversationRun.id,
+            copy("Resumed from conversation composer.", "从会话输入框继续执行。"),
+            text,
+          );
+          if (activeWorkspaceControlState !== "running") {
+            await apiClient.controlRuntimeWorkspace(
+              activeAgent,
+              "continue",
+              copy("Workspace continued for resumed conversation run.", "为会话恢复运行继续工作区。"),
+            );
+          }
+          await loadWorkspaces();
+          appendMessage(activeAgent, result.refId ?? conversationId, {
+            id: `runtime-run-resumed-${result.id}-${Date.now()}`,
+            conversationId: result.refId ?? conversationId,
+            role: "system",
+            kind: "status",
+            content: copy(
+              "The selected run has been resumed with your message.",
+              "已使用你的消息继续当前选中的运行。",
+            ),
+            createdAt: new Date().toISOString(),
+            status: "sent",
+            metadata: {
+              eventKind: "thinking",
+              itemType: "run_resumed_with_user_message",
+              runId: result.id,
+            },
+          });
+          return;
+        }
 
         if (runtimeActiveRun) {
           const backendConversationId =
@@ -3820,7 +3860,7 @@ export function ChatOverlay({
       });
       return;
     }
-    if (action === "start" && activeConversationRun && !isOpenRunStatus(activeConversationRun.status)) {
+    if (action === "start" && activeAgent !== "jd_sync" && activeConversationRun && !isOpenRunStatus(activeConversationRun.status)) {
       await handleRestartRun(activeConversationRun);
       return;
     }
@@ -4207,10 +4247,10 @@ export function ChatOverlay({
                         || conversation.refId === run.refId
                         || conversation.refId === run.id,
                       )?.id ?? run.refId ?? run.id;
-                      focusAgent("autonomous", "conversation");
+                      focusAgent(activeAgent, "conversation");
                       setSelectedConversation((current) => ({
                         ...current,
-                        autonomous: conversationId ?? current.autonomous,
+                        [activeAgent]: conversationId ?? current[activeAgent],
                       }));
                     }}
                   >
@@ -6882,7 +6922,7 @@ export function ChatOverlay({
                 submitDisabled={
                   loadingWorkspace
                   || (activeAgent === "assistant" && sending)
-                  || (activeAgent !== "assistant" && activeWorkspaceControlState !== "running" && composerMatchedCommand == null)
+                  || (activeAgent !== "assistant" && activeWorkspaceControlState !== "running" && !activeConversationRunIsResumable && composerMatchedCommand == null)
                 }
                 submitRequiresValue
                 modelLabel={activeWorkspace?.config.modelLabel ?? activeWorkspace?.agent.defaultModel}

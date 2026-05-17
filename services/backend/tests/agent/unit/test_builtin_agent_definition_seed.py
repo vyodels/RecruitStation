@@ -5,6 +5,7 @@ from pathlib import Path
 from recruit_station.core.settings import AppSettings
 from recruit_station.db.session import create_engine_from_settings, create_session_factory, initialize_database
 from recruit_station.models.domain import AgentDefinition
+from recruit_station.agents.autonomous import _definition_system_prompt
 from recruit_station.services.container import _seed_builtin_agent_definitions
 
 
@@ -137,3 +138,31 @@ def test_seed_builtin_definitions_preserves_saved_product_config(tmp_path: Path)
         assert definition.product_config["assistant"]["prompt_config"]
         assert definition.product_projections["autonomous"]["name"] == "用户命名的自动化招聘"
         assert "assistant" in definition.product_projections
+
+
+def test_runtime_system_prompt_uses_product_prompt_config_for_jd_sync() -> None:
+    definition = AgentDefinition(
+        definition_key="recruit-station",
+        name="RecruitStation",
+        is_primary=True,
+        prompt_config={"system_prompt": "默认招聘执行提示词：必须通过 VirtualHID 做页面动作。"},
+        product_config={
+            "jd_sync": {
+                "prompt_config": {
+                    "system_prompt": "JD 同步 Agent 专用提示词：必须进入职位详情，列表不能算完成。",
+                },
+            },
+        },
+    )
+
+    jd_sync_prompt = _definition_system_prompt(definition, agent_kind="jd_sync")
+    autonomous_prompt = _definition_system_prompt(definition, agent_kind="autonomous")
+
+    assert "JD 同步 Agent 专用提示词" in jd_sync_prompt
+    assert "必须进入职位详情" in jd_sync_prompt
+    assert "不得把本轮作为成功终局" in jd_sync_prompt
+    assert "delegate_scene_context 返回部分结果" in jd_sync_prompt
+    assert "Cmd+L 聚焦地址栏" in jd_sync_prompt
+    assert "继续调用 scene 完成剩余职位" in jd_sync_prompt
+    assert "必须通过 VirtualHID 做页面动作" in jd_sync_prompt
+    assert autonomous_prompt == "默认招聘执行提示词：必须通过 VirtualHID 做页面动作。"

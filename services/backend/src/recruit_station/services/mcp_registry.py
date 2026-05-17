@@ -38,6 +38,8 @@ LEGACY_MCP_TOOL_CALL_PROTOCOL = "json_socket_tool_call"
 LEGACY_BROWSER_COMMAND_PROTOCOL = "json_socket_browser_command"
 MCP_PROTOCOL_VERSION = "2025-03-26"
 MCP_STDIO_REQUEST_TIMEOUT_SECONDS = 8.0
+MCP_HID_ACTION_TIMEOUT_BUFFER_SECONDS = 6.0
+MCP_HID_ACTION_MAX_TIMEOUT_SECONDS = 60.0
 MCP_TRANSIENT_RETRY_DELAY_SECONDS = 0.35
 VIRTUALHID_SOCKET_PRESET_KEY = "virtualhid-json-socket"
 MCP_RESOURCE_TOOL_NAMES = {"list_mcp_resources", "read_mcp_resource"}
@@ -601,7 +603,12 @@ def _mcp_read_resource(server: McpServer, uri: str) -> dict[str, Any]:
 
 
 def _mcp_call_tool(server: McpServer, tool_name: str, arguments: dict[str, Any]) -> Any:
-    result = _mcp_session_request(server, "tools/call", {"name": tool_name, "arguments": dict(arguments or {})})
+    result = _mcp_session_request(
+        server,
+        "tools/call",
+        {"name": tool_name, "arguments": dict(arguments or {})},
+        timeout_seconds=_mcp_tool_timeout_seconds(tool_name, arguments),
+    )
     structured = result.get("structuredContent")
     if bool(result.get("isError")):
         if structured is not None:
@@ -637,6 +644,27 @@ def _mcp_call_tool(server: McpServer, tool_name: str, arguments: dict[str, Any])
         if text_blocks:
             return "\n".join(block for block in text_blocks if block)
     return result
+
+
+def _mcp_tool_timeout_seconds(tool_name: str, arguments: dict[str, Any]) -> float:
+    if str(tool_name or "") != "hid_action":
+        return MCP_STDIO_REQUEST_TIMEOUT_SECONDS
+    timeout_ms = _hid_action_timeout_ms(arguments)
+    if timeout_ms <= 0:
+        return max(MCP_STDIO_REQUEST_TIMEOUT_SECONDS, 20.0)
+    requested_seconds = timeout_ms / 1000.0 + MCP_HID_ACTION_TIMEOUT_BUFFER_SECONDS
+    return min(max(MCP_STDIO_REQUEST_TIMEOUT_SECONDS, requested_seconds), MCP_HID_ACTION_MAX_TIMEOUT_SECONDS)
+
+
+def _hid_action_timeout_ms(arguments: dict[str, Any]) -> int:
+    options = arguments.get("options")
+    if not isinstance(options, dict):
+        return 0
+    value = options.get("timeoutMs") or options.get("timeout_ms")
+    try:
+        return max(int(value), 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _is_transient_mcp_error(error: BaseException) -> bool:

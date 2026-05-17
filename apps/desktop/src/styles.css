@@ -7360,6 +7360,14 @@ button.application-followup-info-card:hover {
   background: #10b981;
 }
 
+.agent-execution-event[data-result-tone="error"] .agent-execution-event__node {
+  background: var(--danger);
+}
+
+.agent-execution-event[data-result-tone="warning"] .agent-execution-event__node {
+  background: #f97316;
+}
+
 .agent-execution-event[data-event-kind="thinking"] .agent-execution-event__node {
   background: #64748b;
 }
@@ -7500,6 +7508,16 @@ button.application-followup-info-card:hover {
   background: #fbfffd;
 }
 
+.agent-execution-event[data-result-tone="error"] .agent-execution-payload {
+  border-color: color-mix(in srgb, var(--danger) 32%, var(--border-line));
+  background: color-mix(in srgb, var(--danger) 7%, #ffffff);
+}
+
+.agent-execution-event[data-result-tone="warning"] .agent-execution-payload {
+  border-color: #fdba74;
+  background: #fffaf3;
+}
+
 .agent-execution-event[data-event-kind="confirmation"] .agent-execution-payload {
   border-color: #fdba74;
   background: #fffaf3;
@@ -7527,6 +7545,17 @@ button.application-followup-info-card:hover {
   border-color: #34d399;
   background: #10b981;
   box-shadow: inset 0 0 0 4px #ffffff;
+}
+
+.agent-execution-event[data-result-tone="error"] .agent-execution-payload__icon {
+  border-radius: 50%;
+  background: var(--danger);
+  box-shadow: 0 0 0 3px var(--danger-soft);
+}
+
+.agent-execution-event[data-result-tone="warning"] .agent-execution-payload__icon {
+  background: #f97316;
+  box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.12);
 }
 
 .agent-execution-event[data-event-kind="confirmation"] .agent-execution-payload__icon {

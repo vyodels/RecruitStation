@@ -4,7 +4,7 @@ from dataclasses import dataclass, field, replace
 import json
 import re
 from threading import RLock
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 from sqlalchemy import func, select
@@ -281,10 +281,11 @@ class AutonomousAdapter:
                     constraints=run_constraints,
                 )
                 adapter_context = build_autonomous_turn_context(
+                    agent_kind=str(run.agent_kind or "autonomous"),
                     title=run_title,
                     instruction=instruction,
                     agent_name=str((agent_definition.name if agent_definition is not None else None) or "Autonomous"),
-                    system_prompt=_definition_system_prompt(agent_definition),
+                    system_prompt=_definition_system_prompt(agent_definition, agent_kind=str(run.agent_kind or "autonomous")),
                     agent_definition_id=agent_definition_id,
                     scope_kind=scope_kind,
                     scope_ref=scope_ref,
@@ -364,6 +365,10 @@ class AutonomousAdapter:
                         output_sink=lambda output: _record_engine_output(session, run=run, turn_id=turn.turn_id, output=output),
                         engine_sink=_bind_engine,
                         structured_status_resolver=_outcome_from_structured_result_data,
+                        final_output_status_resolver=_outcome_from_final_output_text,
+                        final_output_continuation_resolver=_final_output_continuation_resolver(
+                            agent_kind=str(run.agent_kind or "autonomous")
+                        ),
                         runtime={
                             "permission_policy": _runtime_permission_policy(run_constraints),
                             "constraints": run_constraints,
@@ -506,10 +511,17 @@ class AutonomousAdapter:
             stmt = select(AgentRun).where(AgentRun.status == "running").order_by(AgentRun.updated_at.desc(), AgentRun.id.desc())
             recovered = 0
             for run in session.scalars(stmt).all():
+                reason = "Recovered stale autonomous run during startup."
                 _interrupt_open_run(
                     session,
                     run=run,
-                    reason="Recovered stale autonomous run during startup.",
+                    reason=reason,
+                )
+                _cancel_open_queue_tasks_for_run(
+                    session,
+                    run=run,
+                    reviewer="startup-recovery",
+                    reason=reason,
                 )
                 recovered += 1
 
@@ -534,10 +546,17 @@ class AutonomousAdapter:
                     continue
                 if run.id == latest_open_run_id:
                     continue
+                reason = "Superseded during startup recovery because a newer open run already exists."
                 _interrupt_open_run(
                     session,
                     run=run,
-                    reason="Superseded during startup recovery because a newer open run already exists.",
+                    reason=reason,
+                )
+                _cancel_open_queue_tasks_for_run(
+                    session,
+                    run=run,
+                    reviewer="startup-recovery",
+                    reason=reason,
                 )
                 recovered += 1
             if recovered:
@@ -751,9 +770,9 @@ def _turn_status_from_outcome(outcome: AgentTurnOutcome) -> str:
     if outcome.status == "error":
         return "failed"
     if outcome.status == "escalate" or outcome.gate_signal == "escalate":
-        return "failed"
+        return "blocked"
     if outcome.gate_signal == "budget_exhausted":
-        return "failed"
+        return "blocked"
     return "running"
 
 
@@ -778,6 +797,135 @@ def _outcome_from_structured_result_data(value: Any) -> tuple[str, str] | None:
     if execution_status in {"completed", "complete", "success", "done"}:
         return "complete", "run_done"
     return None
+
+
+def _outcome_from_final_output_text(value: str) -> tuple[str, str] | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    normalized = text.lower()
+    if any(marker in normalized for marker in ("provider unavailable", "http 500", "执行失败", "运行失败")):
+        return "error", "escalate"
+    if any(marker in text for marker in ("已阻塞", "阻塞原因", "当前受阻")) or any(
+        marker in normalized for marker in ("blocked", "blocker", "blocked reason")
+    ):
+        return "escalate", "escalate"
+    return None
+
+
+def _final_output_continuation_resolver(
+    *,
+    agent_kind: str,
+) -> Callable[[str, list[dict[str, Any]], list[dict[str, Any]], int], str | None] | None:
+    if str(agent_kind or "").strip().lower() != "jd_sync":
+        return None
+
+    def _resolver(
+        final_output: str,
+        tool_calls: list[dict[str, Any]],
+        tool_results: list[dict[str, Any]],
+        attempt: int,
+        result_data: dict[str, Any] | None = None,
+    ) -> str | None:
+        if attempt >= 8:
+            return None
+        if not _jd_sync_final_output_needs_tool_continuation(final_output) and not _jd_sync_result_data_needs_tool_continuation(
+            result_data
+        ):
+            return None
+        if tool_calls or tool_results:
+            return (
+                "上一条回复仍不能作为 JD 同步终局：即使本轮已经调用过 scene 或业务工具，"
+                "只要仍未完成全量职位发现、全量详情读取、更新/下架识别或生效 JD 选择，就必须继续同一个 turn 的恢复执行，"
+                "不要输出总结或把部分结果当作结束。请基于最近工具结果继续："
+                "若 scene 返回 partial/blocked 但同源站点仍可观察，重新观察页面状态并继续用 VirtualHID 恢复；"
+                "E_TIMEOUT、E_NOT_FRONTMOST、光标/按键干扰、短暂 daemon 无响应或地址栏恢复失败都属于可恢复执行异常，"
+                "pending_confirmation 只有在当前主运行真实产生 permission_requested 时才是人工确认边界，不得把 scene 摘要里的该字样直接当作终局；"
+                "若已观察到剩余职位的同源 href，使用 Cmd+L 地址栏链路打开详情并确认；"
+                "若已有完整详情证据，调用本地 JD 工具写回。"
+                "只有登录、验证码、权限、必要执行工具未注册/缺失或目标站点不可达，才允许最终 blocked。"
+            )
+        return (
+            "上一条回复不能作为 JD 同步终局：当前仍未完成全量职位发现、全量详情读取、更新/下架识别或生效 JD 选择，"
+            "且本轮没有调用任何 scene 或业务工具。请立即继续执行，不要输出总结；"
+            "必须调用 delegate_scene_context 继续读取剩余职位详情，或在已有完整详情证据时调用本地 JD 工具写回。"
+            "如果单次点击、返回、滚动、wait 或 HID 注入失败但目标同源站点仍可访问，请继续使用 VirtualHID 恢复，"
+            "包括 Cmd+L 地址栏链路打开已观察到的同源详情 URL，并重新用 browser 观察确认。"
+            "pending_confirmation 只有在当前主运行真实产生 permission_requested 时才是人工确认边界。"
+            "只有登录、验证码、权限、必要执行工具未注册/缺失或目标站点不可达，才允许最终 blocked。"
+        )
+
+    return _resolver
+
+
+def _jd_sync_result_data_needs_tool_continuation(value: Any) -> bool:
+    if not isinstance(value, dict) or not value:
+        return False
+    status = str(value.get("status") or value.get("execution_status") or value.get("result_status") or "").strip().lower()
+    if status in {"partial", "incomplete", "needs_continuation", "blocked_partial"}:
+        return True
+    for key in ("remaining_jobs", "unread_details", "remaining_items", "pending_jobs", "unfinished_jobs"):
+        items = value.get(key)
+        if isinstance(items, (list, tuple, dict, set)) and len(items) > 0:
+            return True
+        if isinstance(items, int) and items > 0:
+            return True
+    for key in ("blockers", "limitations", "unfinished", "pending"):
+        items = value.get(key)
+        if isinstance(items, (list, tuple, dict, set)) and len(items) > 0:
+            return True
+    return False
+
+
+def _jd_sync_final_output_needs_tool_continuation(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    normalized = text.lower()
+    incomplete_markers = (
+        "未完成全量",
+        "未完成",
+        "剩余",
+        "remaining_jobs",
+        "partial",
+        "blocked",
+        "阻塞",
+        "不能宣告同步完成",
+        "不能视为同步完成",
+    )
+    if not any(marker in text or marker in normalized for marker in incomplete_markers):
+        return False
+    recoverable_execution_markers = (
+        "e_timeout",
+        "e_not_frontmost",
+        "e_daemon_unreachable",
+        "pending_confirmation",
+        "virtualhid",
+        "前台",
+        "置前",
+        "光标",
+        "按键",
+        "地址栏",
+        "daemon",
+        "执行链路",
+        "电脑执行链路",
+    )
+    if any(marker in text or marker in normalized for marker in recoverable_execution_markers):
+        return True
+    terminal_markers = (
+        "登录",
+        "验证码",
+        "权限",
+        "必要执行工具缺失",
+        "工具未注册",
+        "hid_action 缺失",
+        "browser-mcp 未注册",
+        "virtualhid 未注册",
+        "不可达",
+    )
+    if any(marker in text or marker in normalized for marker in terminal_markers):
+        return False
+    return True
 
 
 def _resolve_turn_limits(defaults: TurnLimits, trial_budget: dict[str, Any] | None) -> TurnLimits:
@@ -990,17 +1138,55 @@ def _runtime_permission_policy(run_constraints: dict[str, Any]) -> dict[str, Any
     return {"tool_approval_policy": tool_policy}
 
 
-def _definition_system_prompt(definition: AgentDefinition | None) -> str:
+def _definition_system_prompt(definition: AgentDefinition | None, *, agent_kind: str = "autonomous") -> str:
     if definition is None:
         return "你是 RecruitStation。你的核心职责是严格在招聘场景中维护候选人与投递记录事实，以投递记录为单位推进流程、记录证据，并把高风险动作交给人工确认。"
-    prompt_config = dict(definition.prompt_config or {})
-    return str(
-        prompt_config.get("system_prompt")
-        or prompt_config.get("systemPrompt")
-        or prompt_config.get("prompt")
+    product_config = dict(definition.product_config or {})
+    product_kind_config = product_config.get(agent_kind)
+    if not isinstance(product_kind_config, dict):
+        product_kind_config = {}
+    base_prompt_config = dict(definition.prompt_config or {})
+    product_prompt_config = dict(product_kind_config.get("prompt_config") or {})
+    base_prompt = str(
+        base_prompt_config.get("system_prompt")
+        or base_prompt_config.get("systemPrompt")
+        or base_prompt_config.get("prompt")
         or definition.description
         or ""
+    ).strip()
+    product_prompt = str(
+        product_prompt_config.get("system_prompt")
+        or product_prompt_config.get("systemPrompt")
+        or product_prompt_config.get("prompt")
+        or ""
+    ).strip()
+    if base_prompt and product_prompt and product_prompt != base_prompt:
+        prompt = "\n".join([base_prompt, product_prompt])
+    else:
+        prompt = product_prompt or base_prompt
+    if str(agent_kind or "").strip().lower() == "jd_sync":
+        prompt = _append_jd_sync_runtime_invariants(prompt)
+    return prompt
+
+
+def _append_jd_sync_runtime_invariants(prompt: str) -> str:
+    invariants = (
+        "JD 同步运行约束：如果只完成部分职位详情读取，可以写入已完整确认的 JD 作为进度，但不得把本轮作为成功终局。"
+        "在完成全量职位发现、全量详情读取、更新/下架识别和生效 JD 选择前，必须继续执行或返回明确的恢复条件。"
+        "遇到点击、返回、滚动、光标干扰、按键状态异常或单次注入超时等可恢复执行异常时，不得在第一次失败后结束；"
+        "应重新观察、等待稳定、释放异常按键状态、改用页面上的其他同源入口，或通过电脑执行链路打开已经观察到的同源链接后继续。"
+        "如果列表入口点击后仍无法进入已知同源详情页，应通过电脑执行链路使用地址栏打开已观察到的同源详情 URL 后继续读取，"
+        "而不是反复停留在列表页并以 partial 结束。"
+        "地址栏恢复必须是真实 HID 键盘链路：Cmd+L 聚焦地址栏，粘贴已观察到的同源 URL，回车，并重新观察确认页面。"
+        "单次 HID 或浏览器动作失败不是任务终局；只要目标站点仍可访问且还有职位详情未完整读取，就应在同一轮继续恢复和推进。"
+        "如果 delegate_scene_context 返回部分结果且仍包含 blockers、limitations 或未完成项，应把它当作继续执行信号，"
+        "继续调用 scene 完成剩余职位；HID 超时、窗口未置前、光标/按键状态干扰、短暂 daemon 无响应或地址栏恢复失败都是可恢复执行异常，"
+        "不得直接作为终局；scene 摘要里出现 pending_confirmation 或 human-only 字样，不等于 JD 同步主任务已经到达终局人工边界，"
+        "除非当前运行真实产生 permission_requested 等待人工确认事件。只有登录、验证码、权限、必要执行工具未注册/缺失、目标页面不可达，才可结束为 blocked。"
     )
+    if invariants in prompt:
+        return prompt
+    return "\n".join([part for part in (prompt, invariants) if part.strip()])
 
 
 def _memory_writeback_state(run: AgentRun) -> dict[str, Any]:
@@ -1287,7 +1473,11 @@ def _summarize_turn_events(events: list[AgentRuntimeEvent]) -> list[dict[str, An
         data = dict(payload.get("data") or {})
         if event.event_type in {"llm_invocation_started", "llm_invocation_completed", "tool_event", "permission_requested"} or (
             event.event_type == "runtime_event"
-            and str(data.get("kind") or "").startswith("pending_user_input_after_next_tool_call")
+            and (
+                str(data.get("kind") or "").startswith("pending_user_input_after_next_tool_call")
+                or str(data.get("kind") or "").startswith("provider_retry")
+                or str(data.get("kind") or "") == "provider_error_terminal"
+            )
         ):
             outline.append(
                 {

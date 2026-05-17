@@ -256,6 +256,49 @@ def test_delegate_scene_context_tool_inherits_runtime_browser_target() -> None:
     assert captured["context"] == {"browser_target": captured["browser_target"]}
 
 
+def test_jd_sync_delegate_scene_context_defaults_to_browser_and_computer_capabilities() -> None:
+    captured: dict[str, object] = {}
+    registry = ToolRegistry()
+
+    def _handler(arguments: dict[str, object]) -> dict[str, object]:
+        captured.update(arguments)
+        return {"ok": True}
+
+    registry.register(build_delegate_scene_context_tool(_handler))
+    runtime_tool = registry.to_agent_runtime_tools()[0]
+    context = TurnContext(
+        turn_id="turn-1",
+        conversation_id="conversation-1",
+        tools=[],
+        runtime={
+            "constraints": {
+                "plan_kind": "jd_sync",
+                "browser_target": {
+                    "url": "http://127.0.0.1:50149/",
+                    "host": "127.0.0.1:50149",
+                },
+            }
+        },
+    )
+    call = ToolCall(
+        id="tool-1",
+        turn_id="turn-1",
+        llm_invocation_id="llm-1",
+        tool_use_id="use-1",
+        name="delegate_scene_context",
+        input={"instruction": "读取招聘站点职位列表与详情。"},
+    )
+
+    result = runtime_tool.handler.handle(call, context)
+
+    assert result.is_error is False
+    assert captured["preferred_capabilities"] == ["browser", "computer"]
+    assert captured["browser_target"] == {
+        "url": "http://127.0.0.1:50149/",
+        "host": "127.0.0.1:50149",
+    }
+
+
 def test_recruit_plugin_tools_are_marked_as_business_tools(tmp_path: Path) -> None:
     settings = AppSettings(
         data_dir=str(tmp_path / "data"),

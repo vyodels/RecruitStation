@@ -9,7 +9,16 @@ from sqlalchemy import select
 from agent_runtime.fixtures import LLMResponse, ScriptedProvider, ToolCall
 from recruit_station.capabilities.tools import ToolDefinition
 from recruit_station.core.settings import load_settings
-from recruit_station.models.domain import AgentPendingUserInput, AgentRun, AgentRunCheckpoint, AgentRuntimeEvent, ApprovalItem, OperatorInteraction, TaskQueueItem
+from recruit_station.models.domain import (
+    AgentPendingUserInput,
+    AgentRun,
+    AgentRunCheckpoint,
+    AgentRuntimeEvent,
+    ApprovalItem,
+    OperatorInteraction,
+    TaskQueueItem,
+    utcnow,
+)
 from recruit_station.server import create_app
 
 
@@ -205,6 +214,10 @@ def test_jd_sync_run_requires_only_saved_entry_url(tmp_path, monkeypatch) -> Non
     assert "任务范围：" in runtime_metadata["instruction"]
     assert "- 从配置的招聘网站目标网页出发，目标网页可以是该网站任意可访问页面。" in runtime_metadata["instruction"]
     assert "- 根据页面可见导航和内容自行找到职位列表与职位详情。" in runtime_metadata["instruction"]
+    assert "- 如果页面动作失败但仍处于同源站点，应先恢复后继续：" in runtime_metadata["instruction"]
+    assert "单次点击、返回、滚动或注入超时不是任务终局" in runtime_metadata["instruction"]
+    assert "Cmd+L 聚焦地址栏" in runtime_metadata["instruction"]
+    assert "不得用“已完成部分同步”结束本轮" in runtime_metadata["instruction"]
     assert "- 只发现和同步 JD。" in runtime_metadata["instruction"]
     assert "- 不处理候选人筛选、评分、外联或投递推进。" in runtime_metadata["instruction"]
     assert "目标网页：" in runtime_metadata["instruction"]
@@ -214,7 +227,7 @@ def test_jd_sync_run_requires_only_saved_entry_url(tmp_path, monkeypatch) -> Non
     assert "- 不处理登录、验证码、账号切换或绕过风控" in runtime_metadata["instruction"]
     assert "- 只处理职位信息，不处理候选人" in runtime_metadata["instruction"]
     assert "JD 同步策略：" in runtime_metadata["instruction"]
-    assert "- 从配置的招聘网站目标网页出发，根据页面可见导航和内容自行找到职位列表与职位详情，识别新增、更新和下架职位；只有确认职位详情已完整采集且没有阻塞时，才同步到本地 JD 库，列表页摘要只能作为发现线索。同步过程只处理职位信息，不处理候选人。" in runtime_metadata["instruction"]
+    assert "- 从配置的招聘网站目标网页出发，根据页面可见导航和内容自行找到职位列表与职位详情，识别新增、更新和下架职位；只有确认职位详情已完整采集且没有阻塞时，才同步到本地 JD 库，列表页摘要只能作为发现线索。同步过程只处理职位信息，不处理候选人；如果只完成部分职位详情读取，可以记录已确认的职位作为进度，但不能把本轮视为完成，必须继续恢复并完成全量同步，或明确说明还需要恢复的条件。" in runtime_metadata["instruction"]
     assert "提前打开特定列表页" not in runtime_metadata["instruction"]
     assert "upsert_job_description" not in runtime_metadata["instruction"]
     assert "platform/external_id" not in runtime_metadata["instruction"]
@@ -328,6 +341,79 @@ def test_jd_sync_process_next_task_when_autonomous_workspace_is_stopped(tmp_path
     run_detail = client.get(f"/api/agents/jd_sync/runs/{run_id}")
     assert run_detail.status_code == 200
     assert run_detail.json()["turns"][0]["turn_metadata"]["final_output"] == "JD sync completed."
+
+
+def test_jd_sync_resume_with_message_reuses_failed_run_and_injects_pending_input(tmp_path, monkeypatch) -> None:
+    client = _client(tmp_path, monkeypatch, "jd-sync-resume-message")
+    patched = client.patch(
+        "/api/agents/jd_sync",
+        json={
+            "product_config": {
+                "jd_sync": {
+                    "jd_sync_config": {
+                        "executionSop": {
+                            "siteEntryUrl": "https://mock-recruiting.local/",
+                            "siteAccessRulesText": "复用已登录浏览器会话",
+                        },
+                    }
+                }
+            }
+        },
+    )
+    assert patched.status_code == 200, patched.text
+    created = client.post(
+        "/api/agents/jd_sync/runs",
+        json={"title": "Sync JD", "requestMessage": "同步招聘站点 JD", "instruction": "sync jobs"},
+    )
+    assert created.status_code == 201, created.text
+    run_id = created.json()["runId"]
+
+    with client.app.state.session_factory() as session:
+        run = session.scalars(select(AgentRun).where(AgentRun.run_id == run_id)).one()
+        first_task_id = run.queue_task_id
+        run.status = "failed"
+        run.finished_at = utcnow()
+        run.last_error = "provider unavailable"
+        session.commit()
+        assert session.scalars(select(AgentRun).where(AgentRun.agent_kind == "jd_sync")).all() == [run]
+
+    resumed = client.post(
+        f"/api/agents/jd_sync/runs/{run_id}/resume",
+        json={"reviewer": "api-test", "reason": "composer continue", "message": "继续", "priority": "next"},
+    )
+
+    assert resumed.status_code == 200, resumed.text
+    assert resumed.json()["run"]["runId"] == run_id
+    assert resumed.json()["run"]["status"] == "queued"
+    with client.app.state.session_factory() as session:
+        runs = session.scalars(select(AgentRun).where(AgentRun.agent_kind == "jd_sync")).all()
+        assert len(runs) == 1
+        run = runs[0]
+        assert run.run_id == run_id
+        assert run.finished_at is None
+        assert run.queue_task_id == first_task_id
+        assert run.wakeup_state["resume_message"] == "继续"
+        task = session.scalars(select(TaskQueueItem).where(TaskQueueItem.id == resumed.json()["task_id"])).one()
+        assert task.id == first_task_id
+        assert task.status == "pending"
+        assert task.payload["trigger_type"] == "resume"
+        assert task.payload["pending_input"] == [
+            {"input_id": None, "priority": "next", "queued_by": "api-test", "message": "继续"}
+        ]
+        assert task.payload["world_snapshot"]["pending_input"] == task.payload["pending_input"]
+    conversation = client.get("/api/agents/jd_sync/conversations/jd-sync-primary")
+    assert conversation.status_code == 200
+    messages = conversation.json()["messages"]
+    run_inputs = [message for message in messages if message.get("metadata", {}).get("message_type") == "run_input"]
+    assert len(run_inputs) == 1
+    resumed_input = next(
+        message
+        for message in messages
+        if message.get("metadata", {}).get("traceKind") == "user_message"
+        and message["content"] == "继续"
+    )
+    assert resumed_input["role"] == "user"
+    assert resumed_input["kind"] == "message"
 
 
 def test_task_queue_process_next_processes_one_queued_task(tmp_path, monkeypatch) -> None:
@@ -910,6 +996,72 @@ def test_runtime_primary_conversation_projects_assistant_delta_as_streaming_mess
     assert streaming["content"] == "正在处理"
 
 
+def test_runtime_primary_conversation_projects_provider_retry_and_failure_events(tmp_path, monkeypatch) -> None:
+    client = _client(tmp_path, monkeypatch, "conversation-provider-retry")
+    _force_start_workspace(client)
+    created = _start_autonomous_run(client, title="Retry provider", instruction="Run with transient provider issue.")
+
+    with client.app.state.session_factory() as session:
+        run = session.scalars(select(AgentRun).where(AgentRun.run_id == created["runId"])).one()
+        session.add(
+            AgentRuntimeEvent(
+                session_id=run.session_id,
+                run_id=run.id,
+                source="autonomous",
+                event_type="runtime_event",
+                message="provider_retry_scheduled",
+                seq=1,
+                payload={
+                    "type": "runtime_event",
+                    "data": {
+                        "kind": "provider_retry_scheduled",
+                        "invocation_id": "inv-provider",
+                        "attempt": 1,
+                        "max_attempts": 3,
+                        "delay_seconds": 0,
+                        "error": "HTTP 500 calling provider",
+                        "error_kind": "provider_http_error",
+                        "status_code": 500,
+                        "retryable": True,
+                    },
+                },
+            )
+        )
+        session.add(
+            AgentRuntimeEvent(
+                session_id=run.session_id,
+                run_id=run.id,
+                source="autonomous",
+                event_type="turn_failed",
+                message="HTTP 500 calling provider",
+                seq=2,
+                payload={
+                    "type": "turn_failed",
+                    "data": {
+                        "error": "HTTP 500 calling provider",
+                        "error_kind": "provider_http_error",
+                        "status_code": 500,
+                        "retryable": True,
+                    },
+                },
+            )
+        )
+        session.commit()
+
+    conversation = client.get("/api/agents/autonomous/conversations/autonomous-primary")
+
+    assert conversation.status_code == 200
+    messages = conversation.json()["messages"]
+    retry = next(message for message in messages if message.get("metadata", {}).get("traceKind") == "provider_retry_scheduled")
+    failure = next(message for message in messages if message.get("metadata", {}).get("traceKind") == "turn_failed")
+    assert retry["title"] == "模型调用重试"
+    assert "准备重试" in retry["content"]
+    assert retry["status"] == "active"
+    assert failure["title"] == "运行失败"
+    assert failure["status"] == "failed"
+    assert failure["metadata"]["payload"]["data"]["status_code"] == 500
+
+
 def test_autonomous_primary_conversation_projects_tool_call_and_result_events(tmp_path, monkeypatch) -> None:
     client = _client(tmp_path, monkeypatch, "conversation-tool-events")
     _script_autonomous_provider(
@@ -1122,6 +1274,58 @@ def test_autonomous_wait_human_resume_resolves_gate_and_requeues_run(tmp_path, m
         assert interaction.status == "resolved"
         assert task.status == "pending"
         assert task.payload["trigger_type"] == "resume"
+
+
+def test_autonomous_resume_with_message_reuses_failed_run_and_injects_pending_input(tmp_path, monkeypatch) -> None:
+    client = _client(tmp_path, monkeypatch, "autonomous-resume-message")
+    created = _start_autonomous_run(client, instruction="Review candidates and stop before external action.")
+    run_id = created["runId"]
+
+    with client.app.state.session_factory() as session:
+        run = session.scalars(select(AgentRun).where(AgentRun.run_id == run_id)).one()
+        first_task_id = run.queue_task_id
+        run.status = "failed"
+        run.finished_at = utcnow()
+        run.last_error = "provider unavailable"
+        session.commit()
+        assert session.scalars(select(AgentRun).where(AgentRun.agent_kind == "autonomous")).all() == [run]
+
+    resumed = client.post(
+        f"/api/agents/autonomous/runs/{run_id}/resume",
+        json={"reviewer": "api-test", "reason": "composer continue", "message": "继续", "priority": "next"},
+    )
+
+    assert resumed.status_code == 200, resumed.text
+    assert resumed.json()["run"]["runId"] == run_id
+    assert resumed.json()["run"]["status"] == "queued"
+    with client.app.state.session_factory() as session:
+        runs = session.scalars(select(AgentRun).where(AgentRun.agent_kind == "autonomous")).all()
+        assert len(runs) == 1
+        run = runs[0]
+        assert run.finished_at is None
+        assert run.queue_task_id == first_task_id
+        assert run.wakeup_state["resume_message"] == "继续"
+        task = session.scalars(select(TaskQueueItem).where(TaskQueueItem.id == resumed.json()["task_id"])).one()
+        assert task.id == first_task_id
+        assert task.status == "pending"
+        assert task.payload["trigger_type"] == "resume"
+        assert task.payload["pending_input"] == [
+            {"input_id": None, "priority": "next", "queued_by": "api-test", "message": "继续"}
+        ]
+        assert task.payload["world_snapshot"]["pending_input"] == task.payload["pending_input"]
+    conversation = client.get("/api/agents/autonomous/conversations/autonomous-primary")
+    assert conversation.status_code == 200
+    messages = conversation.json()["messages"]
+    run_inputs = [message for message in messages if message.get("metadata", {}).get("message_type") == "run_input"]
+    assert len(run_inputs) == 1
+    resumed_input = next(
+        message
+        for message in messages
+        if message.get("metadata", {}).get("traceKind") == "user_message"
+        and message["content"] == "继续"
+    )
+    assert resumed_input["role"] == "user"
+    assert resumed_input["kind"] == "message"
 
 
 def test_autonomous_permission_checkpoint_resumes_after_adapter_rebuild(tmp_path, monkeypatch) -> None:

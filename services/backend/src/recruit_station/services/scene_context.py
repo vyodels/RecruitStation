@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlparse
@@ -231,6 +232,7 @@ class SceneContextService:
             browser_semantics=browser_semantics,
         )
         max_llm_invocations = int(request["max_llm_invocations"] or self.limits.max_llm_invocations or 8)
+        scene_turn_timeout_seconds = int(self.limits.scene_turn_timeout_seconds or 0)
         engine_events: list[dict[str, Any]] = []
         adapter_context = build_scene_turn_context(
             request=request,
@@ -251,13 +253,71 @@ class SceneContextService:
                 max_llm_invocations=max_llm_invocations,
             )
         )
-        last_outcome = _scene_outcome_from_engine(
+        last_outcome = _scene_outcome_from_engine_with_timeout(
             engine=engine,
             instruction=adapter_context.turn_input,
             engine_events=engine_events,
             browser_semantics=browser_semantics,
+            timeout_seconds=scene_turn_timeout_seconds,
         )
         blockers = _collect_blockers(last_outcome, engine_events)
+        if _should_retry_scene_for_missing_hid(
+            outcome=last_outcome,
+            blockers=blockers,
+            events=engine_events,
+            request=request,
+            available_tools=scene_tool_registry.tools.keys(),
+        ):
+            last_outcome = _scene_outcome_from_engine_with_timeout(
+                engine=engine,
+                instruction=_missing_hid_retry_instruction(),
+                engine_events=engine_events,
+                browser_semantics=browser_semantics,
+                timeout_seconds=scene_turn_timeout_seconds,
+            )
+            blockers = _collect_blockers(last_outcome, engine_events)
+        raw_blockers = _collect_blockers(last_outcome, engine_events, ignore_recovered=False)
+        if _should_retry_scene_for_recovered_tool_error(
+            outcome=last_outcome,
+            blockers=raw_blockers,
+            events=engine_events,
+        ):
+            last_outcome = _scene_outcome_from_engine_with_timeout(
+                engine=engine,
+                instruction=_recovered_tool_error_retry_instruction(raw_blockers),
+                engine_events=engine_events,
+                browser_semantics=browser_semantics,
+                timeout_seconds=scene_turn_timeout_seconds,
+            )
+            blockers = _collect_blockers(last_outcome, engine_events)
+        raw_blockers = _collect_blockers(last_outcome, engine_events, ignore_recovered=False)
+        if _should_retry_scene_for_browser_wait_timeout(
+            outcome=last_outcome,
+            blockers=raw_blockers,
+            events=engine_events,
+        ):
+            last_outcome = _scene_outcome_from_engine_with_timeout(
+                engine=engine,
+                instruction=_browser_wait_timeout_retry_instruction(raw_blockers),
+                engine_events=engine_events,
+                browser_semantics=browser_semantics,
+                timeout_seconds=scene_turn_timeout_seconds,
+            )
+            blockers = _collect_blockers(last_outcome, engine_events)
+        raw_blockers = _collect_blockers(last_outcome, engine_events, ignore_recovered=False)
+        if _should_retry_scene_for_transient_hid_error(
+            outcome=last_outcome,
+            blockers=raw_blockers,
+            events=engine_events,
+        ):
+            last_outcome = _scene_outcome_from_engine_with_timeout(
+                engine=engine,
+                instruction=_transient_hid_error_retry_instruction(raw_blockers),
+                engine_events=engine_events,
+                browser_semantics=browser_semantics,
+                timeout_seconds=scene_turn_timeout_seconds,
+            )
+            blockers = _collect_blockers(last_outcome, engine_events)
         snapshot_ids.extend(
             _append_environment_snapshots(
                 session=session,
@@ -301,6 +361,7 @@ class SceneContextService:
     ) -> dict[str, Any]:
         result_data = _scene_result_data(outcome)
         public_status = _public_status(outcome, blockers)
+        result_data = _align_result_data_status(result_data, public_status)
         stored_status = _stored_status(public_status)
         summary = _public_summary(outcome, blockers)
         metrics = {
@@ -411,7 +472,7 @@ def _normalize_scene_request(
     title = str(arguments.get("title") or instruction[:80]).strip() or "Scene context task"
     success_criteria = _as_dict(arguments.get("success_criteria"))
     output_contract = _as_dict(arguments.get("output_contract"))
-    preferred_capabilities = _string_list(arguments.get("preferred_capabilities"))
+    preferred_capabilities = _normalize_preferred_scene_capabilities(arguments.get("preferred_capabilities"))
     environment_requirements = _as_dict(arguments.get("environment_requirements"))
     approval_policy = _as_dict(arguments.get("approval_policy"))
     context = _as_dict(arguments.get("context"))
@@ -524,7 +585,9 @@ def _build_scene_instruction(request: dict[str, Any]) -> str:
             "browser_target.url 只是入口提示，不是要求当前活动页路径必须完全等于该 URL；同 origin 下的路径可随工作流跳转。"
             "不要把同 hostname 但不同端口、不同 origin 或旧测试 tab 当成当前任务目标；"
             "browser 侧只允许只读 snapshot/query/wait/target-identification；不得把 browser 工具当作点击、导航、下载、Cookie 或外壳维护执行器。"
-            "若当前只读目标识别无法确认允许的目标页，停止当前动作并返回结构化 blocker 或请求 human 处理。"
+            "如果 browser_get_active_tab 返回的活动页不是目标 origin，这只是当前活动页不匹配，不是终局阻塞；"
+            "必须继续用 browser_list_tabs 查找同 origin 页签，找到后基于该 tabId 观察目标页，或通过 VirtualHID 切换到同 origin 页签。"
+            "只有 browser_list_tabs 也找不到同 origin 页签，或同 origin 页签不可观察/不可切换时，才返回结构化 blocker 或请求 human 处理。"
         )
     if request["anti_detection_policy"] or request["behavior_budget"]:
         parts.append(
@@ -538,8 +601,39 @@ def _build_scene_instruction(request: dict[str, Any]) -> str:
             "browser 侧只提供页面语义与 viewport/document 坐标；不要让 browser 或 recruit-station 合成 viewportInScreen。"
             "HID 目标窗口、内容视口到屏幕的映射由 VirtualHID 根据 target/geometry 自行解析。"
             "不得只传 target/context 而空缺 primitives；若缺少可执行原语，继续观察或返回结构化 blocker。"
+            "网页 HID 动作必须把目标浏览器窗口置前：hid_action.target 应携带 browser 观察得到的 tabId/windowId/windowTitle/host，"
+            "如果 browser 观察返回窗口 bounds，也必须原样携带 browserWindowBounds 作为原生窗口消歧证据；"
+            "由 VirtualHID 在执行计划中 activateTarget；不要对当前前台窗口或当前活动页做模糊点击。"
             "Chrome 外壳遮挡 preflight 由 hid_action options.browserChromeOverlayPolicy 启用，证据来自 result.preflight.browserChromeOverlay；若 preflight 结果为 blocked 或 unknown，停止当前动作，改为重新观察、等待或进入 human handling。"
             "外部执行层负责激活、滚动和最终落点。"
+        )
+        parts.append(
+            "当 scene 可用工具包含 hid_action 时，只读 browser 工具不代表不能点击或导航；"
+            "browser 负责观察，hid_action 负责执行点击、滚动、输入、返回等页面动作。"
+            "如果任务需要进入详情页、翻页或返回列表，必须先基于 browser 观察到的 link/button/clickPoint 构造 hid_action 尝试执行，"
+            "随后再用 browser 观察确认结果。只有 hid_action 缺失、缺少可执行观察证据，或 hid_action 返回明确 blocked/error 后，"
+            "才可以把页面交互能力作为 blocker。不得在未尝试 hid_action 的情况下声称当前能力仅支持只读观察。"
+        )
+        parts.append(
+            "如果 hid_action 返回 E_CURSOR_INTERFERENCE 或等价的光标/人工输入干扰错误，"
+            "这属于可恢复的瞬时执行干扰：先用 hid_state 或 browser 观察确认环境，再重试同一业务动作；"
+            "至少完成一次重新观察后的重试，仍连续失败时才把它作为 human recovery blocker。"
+        )
+        parts.append(
+            "如果 hid_action 返回 E_NOT_FRONTMOST、E_TIMEOUT、地址栏恢复后 URL 未变化，或等价的焦点/导航恢复失败，"
+            "不要把这一次工具失败直接当作业务终局。应先重新观察目标 origin 的页签、确认当前 URL/标题/可点击入口，"
+            "释放异常修饰键状态并重试同一业务动作；可切换为已观察到的同源 href 的地址栏链路，"
+            "也可回到列表页后重新进入详情。只有连续恢复后目标仍不可操作，才返回 human recovery blocker。"
+        )
+        parts.append(
+            "如果同源站点内的点击、返回、滚动或单次 HID 注入超时失败，不要直接结束场景。"
+            "应先重新观察页面状态，释放异常按键状态，等待或滚动到稳定位置，尝试页面上其他同源链接/导航入口，"
+            "或通过电脑执行链路打开 browser 观察到的同源 href；随后继续原始业务目标。"
+            "当需要通过地址栏打开已观察到的同源 href 时，应使用 VirtualHID 键盘原语完成真实用户链路："
+            "key(keyCode=37, modifiers=[\"cmd\"]) 聚焦地址栏，pasteText 写入该同源 URL，key(keyCode=36) 回车，"
+            "再通过 browser 观察确认 URL 和页面上下文；不得把未确认的地址栏尝试当作已进入详情。"
+            "如果原始目标只完成一部分且仍存在 blockers、limitations 或未完成项，最终 status 不得写 completed；"
+            "应继续恢复执行，或返回 blocked 并写明恢复条件。"
         )
     if request["target_regions"]:
         parts.append(f"候选落地区域：{_compact_value(request['target_regions'])}")
@@ -725,6 +819,372 @@ def _scene_outcome_from_engine(
         result_data=result_data,
         metadata={"interaction_engine": True, "engine_output_count": engine_output_count},
     )
+
+
+def _scene_outcome_from_engine_with_timeout(
+    *,
+    engine: InteractionEngine,
+    instruction: str,
+    engine_events: list[dict[str, Any]],
+    browser_semantics: dict[str, Any],
+    timeout_seconds: int | None,
+) -> AgentTurnOutcome:
+    effective_timeout = int(timeout_seconds or 0)
+    if effective_timeout <= 0:
+        return _scene_outcome_from_engine(
+            engine=engine,
+            instruction=instruction,
+            engine_events=engine_events,
+            browser_semantics=browser_semantics,
+        )
+
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="scene-context-turn")
+    future = executor.submit(
+        _scene_outcome_from_engine,
+        engine=engine,
+        instruction=instruction,
+        engine_events=engine_events,
+        browser_semantics=browser_semantics,
+    )
+    try:
+        return future.result(timeout=effective_timeout)
+    except FutureTimeoutError:
+        engine.interrupt("scene_context_timeout")
+        future.cancel()
+        message = f"E_SCENE_TIMEOUT: scene_context turn exceeded timeoutSeconds={effective_timeout}"
+        engine_events.append(
+            {
+                "type": "runtime_event",
+                "engine_output_seq": len(engine_events) + 1,
+                "payload": {
+                    "kind": "scene_context_timeout",
+                    "status": "blocked",
+                    "message": message,
+                    "timeout_seconds": effective_timeout,
+                },
+                "recorded_at": utcnow().isoformat(),
+            }
+        )
+        return AgentTurnOutcome(
+            status="escalate",
+            gate_signal="escalate",
+            final_output=message,
+            result_data={
+                "status": "blocked",
+                "blockers": [{"kind": "scene_context_timeout", "message": message}],
+                "remaining_work": ["resume_scene_after_timeout"],
+            },
+            metadata={"interaction_engine": True, "engine_output_count": len(engine_events), "timeout_seconds": effective_timeout},
+        )
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+
+def _should_retry_scene_for_missing_hid(
+    *,
+    outcome: AgentTurnOutcome,
+    blockers: list[dict[str, Any]],
+    events: list[dict[str, Any]],
+    request: dict[str, Any],
+    available_tools: Any,
+) -> bool:
+    if "hid_action" not in set(available_tools):
+        return False
+    if "computer" not in _scene_capabilities(request.get("preferred_capabilities")):
+        return False
+    if _public_status(outcome, blockers) != "blocked":
+        return False
+    if _has_scene_hid_attempt(events):
+        return False
+    return _has_actionable_browser_signal(events)
+
+
+def _missing_hid_retry_instruction() -> str:
+    return (
+        "你的上一轮只使用 browser 观察后准备返回 blocked，但本 scene 可用 hid_action，"
+        "不能在未尝试 HID 的情况下把“需要页面点击、滚动、返回、进入详情或翻页”报告为能力不足。"
+        "请继续当前场景：基于最近 browser 观察到的 link/button/clickPoint 构造 hid_action。"
+        "如果目标元素 inViewport=false，先执行 HID scroll 或等价可恢复动作，再重新 browser 观察；"
+        "如果元素在 viewport 内，执行 HID click 后重新 browser 观察确认结果。"
+        "hid_action.target 必须携带 browser 观察得到的 tabId/windowId/windowTitle/host。"
+        "只有在至少一次 hid_action 返回明确 blocked/error，或确实没有任何可执行页面证据后，才可以报告 blocker。"
+    )
+
+
+def _should_retry_scene_for_recovered_tool_error(
+    *,
+    outcome: AgentTurnOutcome,
+    blockers: list[dict[str, Any]],
+    events: list[dict[str, Any]],
+) -> bool:
+    if not any(str(item.get("kind") or "") == "tool_error" for item in blockers):
+        return False
+    if _scene_result_status(outcome) in {"completed", "complete", "success", "succeeded"}:
+        return False
+    return _has_recovered_tool_error(events)
+
+
+def _recovered_tool_error_retry_instruction(blockers: list[dict[str, Any]]) -> str:
+    tool_names = _dedupe_strings(str(item.get("tool_name") or "") for item in blockers if item.get("tool_name"))
+    tool_label = ", ".join(tool_names) if tool_names else "某个工具"
+    return (
+        f"上一轮曾出现 {tool_label} 的临时错误，但后续工具调用已经恢复并取得新的页面观察结果。"
+        "不要把已经被后续成功动作恢复的历史错误作为最终 blocker。"
+        "请基于最新 browser 观察继续完成原始场景目标；如果已经进入详情页，继续读取详情并推进下一步。"
+        "只有当前最新动作仍失败、页面不可达、登录/权限阻断，或没有可执行证据时，才可以返回 blocked。"
+        "请返回结构化 JSON，总结当前真实进度、已恢复的错误、下一步执行结果和剩余 blocker。"
+    )
+
+
+def _should_retry_scene_for_browser_wait_timeout(
+    *,
+    outcome: AgentTurnOutcome,
+    blockers: list[dict[str, Any]],
+    events: list[dict[str, Any]],
+) -> bool:
+    if _public_status(outcome, blockers) != "blocked":
+        return False
+    if not _has_browser_wait_timeout_blocker(blockers):
+        return False
+    return _has_successful_tool_result(events, "hid_action") or _has_actionable_browser_signal(events)
+
+
+def _browser_wait_timeout_retry_instruction(blockers: list[dict[str, Any]]) -> str:
+    tool_names = _dedupe_strings(str(item.get("tool_name") or "") for item in blockers if item.get("tool_name"))
+    tool_label = ", ".join(tool_names) if tool_names else "browser wait"
+    return (
+        f"上一轮 {tool_label} 超时只能说明等待确认失败，不能直接作为当前 scene 的终局 blocker。"
+        "不要再次用同一个 wait 工具空等；请立即用 browser_snapshot 或 browser_list_tabs 重新确认当前 tab URL、标题和页面内容。"
+        "如果已经进入详情页，继续读取详情并完成原始目标；如果仍在列表页，基于最新 clickPoint/同源详情入口继续用 hid_action 重试。"
+        "只有 browser_snapshot/list_tabs 也失败、页面不可达、登录/权限阻断，或 HID 最新动作明确失败时，才可以返回 blocked。"
+        "请返回结构化 JSON，说明 wait 超时后的实际页面状态、恢复动作和剩余 blocker。"
+    )
+
+
+def _should_retry_scene_for_transient_hid_error(
+    *,
+    outcome: AgentTurnOutcome,
+    blockers: list[dict[str, Any]],
+    events: list[dict[str, Any]],
+) -> bool:
+    if _public_status(outcome, blockers) != "blocked":
+        return False
+    if not _has_transient_hid_blocker(blockers) and not _has_transient_hid_text(outcome.final_output):
+        return False
+    if _has_recovered_tool_error(events):
+        return False
+    return _has_actionable_browser_signal(events) or _has_any_successful_browser_observation(events)
+
+
+def _transient_hid_error_retry_instruction(blockers: list[dict[str, Any]]) -> str:
+    messages = _dedupe_strings(str(item.get("message") or "")[:160] for item in blockers if item.get("message"))
+    blocker_label = "；".join(messages[:2]) if messages else "HID 瞬时执行异常"
+    return (
+        f"上一轮遇到 {blocker_label}，这类 HID/前台/超时/光标状态问题不能直接作为当前 scene 的终局 blocker。"
+        "请继续当前场景而不是总结结束：先用 browser_snapshot 或 browser_list_tabs 重新确认同 origin 页签的 URL、标题、页面内容和可点击入口；"
+        "必要时调用 hid_state 或释放异常修饰键状态，然后基于最新 browser 证据重试同一业务动作。"
+        "如果已观察到剩余详情页的同源 href，可通过真实 HID 地址栏链路打开该 URL：Cmd+L、粘贴 URL、回车，并再次 browser 观察确认。"
+        "只有重试后仍连续失败、目标页面不可达、登录/权限阻断，或缺少任何可执行页面证据，才可以返回 blocked。"
+    )
+
+
+def _has_transient_hid_blocker(blockers: list[dict[str, Any]]) -> bool:
+    transient_markers = (
+        "e_timeout",
+        "timeout",
+        "timed out",
+        "超时",
+        "e_not_frontmost",
+        "not frontmost",
+        "frontmost",
+        "未置前",
+        "e_cursor_interference",
+        "cursor interference",
+        "光标",
+        "modifier",
+        "修饰键",
+        "daemon 无响应",
+        "daemon unreachable",
+        "native host unavailable",
+        "native-host",
+        "hid",
+        "virtualhid",
+    )
+    for blocker in blockers:
+        tool_name = str(blocker.get("tool_name") or "").lower()
+        message = str(blocker.get("message") or "").lower()
+        if tool_name != "hid_action" and "hid" not in message and "virtualhid" not in message:
+            continue
+        if any(marker in message for marker in transient_markers):
+            return True
+    return False
+
+
+def _has_transient_hid_text(value: Any) -> bool:
+    text = str(value or "").lower()
+    if not text:
+        return False
+    return any(
+        marker in text
+        for marker in (
+            "e_timeout",
+            "e_not_frontmost",
+            "e_cursor_interference",
+            "injector action exceeded",
+            "not frontmost",
+            "daemon 无响应",
+            "virtualhid",
+            "电脑执行链路",
+        )
+    )
+
+
+def _has_browser_wait_timeout_blocker(blockers: list[dict[str, Any]]) -> bool:
+    for blocker in blockers:
+        tool_name = str(blocker.get("tool_name") or "")
+        message = str(blocker.get("message") or "").lower()
+        if tool_name in {"browser_wait_for_url", "browser_wait_for_navigation"} and (
+            "timed out" in message or "timeout" in message or "超时" in message
+        ):
+            return True
+    return False
+
+
+def _has_successful_tool_result(events: list[dict[str, Any]], tool_name: str) -> bool:
+    for event in events:
+        if str(event.get("type") or "") != "tool_event":
+            continue
+        payload = _as_dict(event.get("payload"))
+        if payload.get("kind") != "tool_result_ready":
+            continue
+        if str(payload.get("tool_name") or "") != tool_name:
+            continue
+        if not bool(payload.get("is_error")) and _tool_result_content_succeeded(payload.get("content")):
+            return True
+    return False
+
+
+def _has_scene_hid_attempt(events: list[dict[str, Any]]) -> bool:
+    return any(
+        str(_as_dict(event.get("payload")).get("tool_name") or "") == "hid_action"
+        for event in events
+        if str(event.get("type") or "") == "tool_event"
+    )
+
+
+def _has_actionable_browser_signal(events: list[dict[str, Any]]) -> bool:
+    for event in reversed(events):
+        if str(event.get("type") or "") != "tool_event":
+            continue
+        payload = _as_dict(event.get("payload"))
+        if payload.get("kind") != "tool_result_ready":
+            continue
+        tool_name = str(payload.get("tool_name") or "")
+        if not tool_name.startswith("browser_"):
+            continue
+        if _browser_content_has_actionable_signal(payload.get("content")):
+            return True
+    return False
+
+
+def _has_any_successful_browser_observation(events: list[dict[str, Any]]) -> bool:
+    return any(
+        str(_as_dict(event.get("payload")).get("tool_name") or "").startswith("browser_")
+        and _tool_event_result_succeeded(event)
+        for event in events
+        if str(event.get("type") or "") == "tool_event"
+    )
+
+
+def _has_recovered_tool_error(events: list[dict[str, Any]]) -> bool:
+    failed_at: dict[str, int] = {}
+    recovered_at: dict[str, int] = {}
+    for event in events:
+        if str(event.get("type") or "") != "tool_event":
+            continue
+        payload = _as_dict(event.get("payload"))
+        if payload.get("kind") != "tool_result_ready":
+            continue
+        tool_name = str(payload.get("tool_name") or "")
+        if not tool_name:
+            continue
+        seq = _safe_int(event.get("engine_output_seq"))
+        if bool(payload.get("is_error")) or not _tool_result_content_succeeded(payload.get("content")):
+            failed_at[tool_name] = seq
+            continue
+        if tool_name in failed_at and seq > failed_at[tool_name] and _tool_result_content_succeeded(payload.get("content")):
+            recovered_at[tool_name] = seq
+    if not recovered_at:
+        return False
+    latest_recovery = max(recovered_at.values())
+    has_later_browser_observation = any(
+        str(_as_dict(event.get("payload")).get("tool_name") or "").startswith("browser_")
+        and _safe_int(event.get("engine_output_seq")) > latest_recovery
+        and _tool_event_result_succeeded(event)
+        for event in events
+        if str(event.get("type") or "") == "tool_event"
+    )
+    return has_later_browser_observation or bool(recovered_at)
+
+
+def _tool_event_result_succeeded(event: dict[str, Any]) -> bool:
+    payload = _as_dict(event.get("payload"))
+    return (
+        payload.get("kind") == "tool_result_ready"
+        and not bool(payload.get("is_error"))
+        and _tool_result_content_succeeded(payload.get("content"))
+    )
+
+
+def _tool_result_content_succeeded(content: Any) -> bool:
+    if isinstance(content, dict):
+        status = str(content.get("status") or "").strip().lower()
+        if status in {"error", "failed", "failure", "blocked", "timeout"} or status.startswith(("failed_", "blocked_")):
+            return False
+        if content.get("success") is False or content.get("ok") is False or content.get("isError") is True:
+            return False
+        error_text = str(content.get("error") or content.get("message") or "").lower()
+        if any(marker in error_text for marker in ("e_timeout", "e_not_frontmost", "e_cursor_interference")):
+            return False
+    return True
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _browser_content_has_actionable_signal(value: Any) -> bool:
+    if isinstance(value, dict):
+        for key in ("clickables", "matches", "elements", "action_hints", "affordances"):
+            items = value.get(key)
+            if isinstance(items, list) and any(_is_actionable_browser_item(item) for item in items):
+                return True
+        snapshot = value.get("snapshot")
+        if isinstance(snapshot, dict) and _browser_content_has_actionable_signal(snapshot):
+            return True
+    if isinstance(value, list):
+        return any(_browser_content_has_actionable_signal(item) for item in value)
+    return False
+
+
+def _is_actionable_browser_item(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    if value.get("disabled") is True:
+        return False
+    role = str(value.get("role") or "").strip().lower()
+    tag = str(value.get("tag") or "").strip().lower()
+    kind = str(value.get("kind") or "").strip().lower()
+    if role in {"button", "link", "menuitem", "tab", "combobox"}:
+        return True
+    if tag in {"a", "button", "select", "input"}:
+        return True
+    if kind in {"button", "link", "navigation", "action"}:
+        return True
+    return bool(value.get("href") or value.get("clickPoint") or value.get("selector") or value.get("ref"))
 
 
 def _runtime_output_event(output: InteractionOutput) -> dict[str, Any]:
@@ -1161,6 +1621,19 @@ def _mask_scene_browser_target_mismatch(
     observed_url = _browser_result_url(result)
     if observed_url is None or _scene_url_matches_target_origin(observed_url, target_origin=target_origin):
         return result
+    if tool_name == "browser_get_active_tab":
+        return {
+            **result,
+            "success": True,
+            "targetMatch": False,
+            "sceneTarget": {"origin": target_origin},
+            "observedUrl": observed_url,
+            "message": (
+                "Current active tab is outside the scene browser_target origin. "
+                "This is not a terminal blocker; call browser_list_tabs to locate an allowlisted same-origin tab, "
+                "then observe that tab or use VirtualHID to switch to it."
+            ),
+        }
     return {
         "success": False,
         "error": "scene_browser_target_mismatch",
@@ -1242,7 +1715,15 @@ def _normalize_scene_hid_action_arguments(
 
     if host:
         if target or tab_id is not None:
-            target.setdefault("host", host)
+            target["host"] = host
+            target.setdefault("bundleId", "com.google.Chrome")
+            tab_info = dict((browser_semantics.get("tabs") or {}).get(tab_id) or {}) if tab_id is not None else {}
+            window_id = _optional_int(target.get("windowId") or target.get("window_id") or tab_info.get("windowId") or tab_info.get("window_id"))
+            if window_id is not None:
+                target.setdefault("windowId", window_id)
+            window_bounds = _resolve_browser_window_bounds(target=target, context=context, tab_info=tab_info)
+            if window_bounds:
+                target.setdefault("browserWindowBounds", window_bounds)
             window_title = _resolve_web_window_title(
                 context=context,
                 target=target,
@@ -1254,7 +1735,7 @@ def _normalize_scene_hid_action_arguments(
             if window_title:
                 target.setdefault("windowTitle", window_title)
             normalized["target"] = target
-        context.setdefault("host", host)
+        context["host"] = host
         if url:
             context.setdefault("url", url)
         normalized["context"] = context
@@ -1267,11 +1748,44 @@ def _normalize_scene_hid_action_arguments(
             normalized.pop("y", None)
             normalized.pop("button", None)
 
-    if geometry:
+    if geometry or (
+        _scene_hid_action_targets_browser(normalized)
+        and _browser_viewport_has_size(browser_semantics=browser_semantics, tab_id=tab_id)
+    ):
         _apply_browser_viewport_geometry(geometry, browser_semantics=browser_semantics, tab_id=tab_id)
         normalized["geometry"] = geometry
+    _strip_scene_hid_humanization_overrides(normalized)
+    _normalize_scene_hid_post_mode(normalized)
 
     return normalized
+
+
+def _strip_scene_hid_humanization_overrides(arguments: dict[str, Any]) -> None:
+    options = arguments.get("options")
+    if isinstance(options, dict):
+        options.pop("behaviorMode", None)
+        options.pop("behavior_mode", None)
+        options.pop("profile", None)
+        arguments["options"] = options
+    primitives = arguments.get("primitives")
+    if isinstance(primitives, list):
+        for primitive in primitives:
+            if isinstance(primitive, dict):
+                primitive.pop("profile", None)
+
+
+def _normalize_scene_hid_post_mode(arguments: dict[str, Any]) -> None:
+    if not _scene_hid_action_targets_browser(arguments):
+        return
+    primitives = [item for item in list(arguments.get("primitives") or []) if isinstance(item, dict)]
+    if not any(str(item.get("type") or "").strip() in {"click", "drag", "type", "pasteText", "key"} for item in primitives):
+        return
+    options = _as_dict(arguments.get("options"))
+    requested = str(options.get("postMode") or options.get("post_mode") or "").strip().lower()
+    if requested in {"", "global"}:
+        options.pop("post_mode", None)
+        options["postMode"] = "auto"
+        arguments["options"] = options
 
 
 def _initial_browser_semantics(request: dict[str, Any]) -> dict[str, Any]:
@@ -1328,6 +1842,8 @@ def _remember_browser_tab(browser_semantics: dict[str, Any], tab: dict[str, Any]
     url = _optional_string(tab.get("url"))
     host = _optional_string(tab.get("host")) or _host_from_url(url)
     viewport = _as_dict(tab.get("viewport"))
+    window = _as_dict(tab.get("window"))
+    window_bounds = _browser_window_bounds_from_window(window) or _browser_window_bounds_from_viewport(viewport)
     if host:
         browser_semantics["last_host"] = host
     if url:
@@ -1342,6 +1858,8 @@ def _remember_browser_tab(browser_semantics: dict[str, Any], tab: dict[str, Any]
         browser_semantics["last_window_title_host"] = host
     if viewport:
         browser_semantics["last_viewport"] = viewport
+    if window_bounds:
+        browser_semantics["last_window_bounds"] = window_bounds
     if tab_id is None:
         return
     tabs = browser_semantics.setdefault("tabs", {})
@@ -1356,6 +1874,8 @@ def _remember_browser_tab(browser_semantics: dict[str, Any], tab: dict[str, Any]
                 "title": title,
                 "windowTitle": window_title,
                 "windowId": _optional_int(tab.get("windowId") or tab.get("window_id")),
+                "window": window or None,
+                "browserWindowBounds": window_bounds,
                 "active": bool(tab.get("active")),
                 "viewport": viewport or None,
             }.items()
@@ -1377,9 +1897,16 @@ def _resolve_web_host(
 ) -> str | None:
     browser_target = dict(request.get("browser_target") or {})
     tab_info = dict((browser_semantics.get("tabs") or {}).get(tab_id) or {}) if tab_id is not None else {}
+    allowed_host = _scene_target_host(request)
+    for candidate in (context.get("host"), target.get("host")):
+        host = _optional_string(candidate, max_length=255)
+        if not host:
+            continue
+        if _can_coerce_to_scene_host(host, allowed_host):
+            return allowed_host
+        return host
     candidates = [
-        context.get("host"),
-        target.get("host"),
+        allowed_host,
         browser_target.get("host"),
         tab_info.get("host"),
         _host_from_url(context.get("url")),
@@ -1393,6 +1920,105 @@ def _resolve_web_host(
         if host:
             return host
     return None
+
+
+def _resolve_browser_window_bounds(*, target: dict[str, Any], context: dict[str, Any], tab_info: dict[str, Any]) -> dict[str, Any] | None:
+    for candidate in (
+        target.get("browserWindowBounds"),
+        target.get("browser_window_bounds"),
+        target.get("windowBounds"),
+        target.get("window_bounds"),
+        context.get("browserWindowBounds"),
+        context.get("browser_window_bounds"),
+        tab_info.get("browserWindowBounds"),
+        tab_info.get("browser_window_bounds"),
+        tab_info.get("windowBounds"),
+        tab_info.get("window_bounds"),
+        _browser_window_bounds_from_window(_as_dict(tab_info.get("window"))),
+    ):
+        bounds = _normalize_browser_window_bounds(candidate)
+        if bounds:
+            return bounds
+    return None
+
+
+def _browser_window_bounds_from_window(window: dict[str, Any]) -> dict[str, Any] | None:
+    if not window:
+        return None
+    return _normalize_browser_window_bounds(
+        {
+            "x": window.get("left"),
+            "y": window.get("top"),
+            "width": window.get("width"),
+            "height": window.get("height"),
+        }
+    )
+
+
+def _browser_window_bounds_from_viewport(viewport: dict[str, Any]) -> dict[str, Any] | None:
+    if not viewport:
+        return None
+    return _normalize_browser_window_bounds(
+        {
+            "x": viewport.get("screenX"),
+            "y": viewport.get("screenY"),
+            "width": viewport.get("outerWidth"),
+            "height": viewport.get("outerHeight"),
+        }
+    )
+
+
+def _normalize_browser_window_bounds(value: Any) -> dict[str, Any] | None:
+    bounds = _as_dict(value)
+    if not bounds:
+        return None
+    x = _optional_number(bounds.get("x") if bounds.get("x") is not None else bounds.get("left"))
+    y = _optional_number(bounds.get("y") if bounds.get("y") is not None else bounds.get("top"))
+    width = _optional_number(bounds.get("width"))
+    height = _optional_number(bounds.get("height"))
+    if x is None or y is None or width is None or height is None or width <= 0 or height <= 0:
+        return None
+    return {"x": x, "y": y, "width": width, "height": height}
+
+
+def _can_coerce_to_scene_host(candidate: Any, allowed_host: str | None) -> bool:
+    normalized_candidate = _normalize_host_boundary(_host_from_url(candidate) or candidate)
+    normalized_allowed = _normalize_host_boundary(_host_from_url(allowed_host) or allowed_host)
+    if not normalized_candidate or not normalized_allowed:
+        return False
+    if normalized_candidate == normalized_allowed:
+        return True
+    candidate_name = _hostname_part(normalized_candidate)
+    allowed_name = _hostname_part(normalized_allowed)
+    return bool(
+        candidate_name
+        and allowed_name
+        and candidate_name == allowed_name
+        and not _host_has_explicit_port(normalized_candidate)
+        and _host_has_explicit_port(normalized_allowed)
+    )
+
+
+def _hostname_part(value: Any) -> str | None:
+    host = _normalize_host_boundary(_host_from_url(value) or value)
+    if not host:
+        return None
+    try:
+        parsed = urlparse(f"//{host}")
+        return parsed.hostname.lower() if parsed.hostname else None
+    except ValueError:
+        return host.split(":", 1)[0].lower() if ":" in host else host.lower()
+
+
+def _host_has_explicit_port(value: Any) -> bool:
+    host = _normalize_host_boundary(_host_from_url(value) or value)
+    if not host:
+        return False
+    try:
+        parsed = urlparse(f"//{host}")
+        return parsed.port is not None
+    except ValueError:
+        return False
 
 
 def _resolve_web_url(
@@ -1484,8 +2110,7 @@ def _apply_browser_viewport_geometry(
     coord_space = str(geometry.get("coordSpace") or geometry.get("coord_space") or "viewport").strip().lower()
     if coord_space == "screen" or geometry.get("viewportInScreen") or geometry.get("viewport_in_screen"):
         return
-    tab_info = dict((browser_semantics.get("tabs") or {}).get(tab_id) or {}) if tab_id is not None else {}
-    viewport = _as_dict(tab_info.get("viewport")) or _as_dict(browser_semantics.get("last_viewport"))
+    viewport = _browser_viewport_from_semantics(browser_semantics=browser_semantics, tab_id=tab_id)
     width = _optional_number(viewport.get("innerWidth"))
     height = _optional_number(viewport.get("innerHeight"))
     geometry.setdefault("scrollOffset", {"x": _optional_number(viewport.get("scrollX")) or 0, "y": _optional_number(viewport.get("scrollY")) or 0})
@@ -1494,6 +2119,16 @@ def _apply_browser_viewport_geometry(
     visual_viewport = _as_dict(viewport.get("visualViewport"))
     if "pageScale" not in geometry and "page_scale" not in geometry:
         geometry["pageScale"] = _optional_number(visual_viewport.get("scale")) or 1
+
+
+def _browser_viewport_from_semantics(*, browser_semantics: dict[str, Any], tab_id: int | None) -> dict[str, Any]:
+    tab_info = dict((browser_semantics.get("tabs") or {}).get(tab_id) or {}) if tab_id is not None else {}
+    return _as_dict(tab_info.get("viewport")) or _as_dict(browser_semantics.get("last_viewport"))
+
+
+def _browser_viewport_has_size(*, browser_semantics: dict[str, Any], tab_id: int | None) -> bool:
+    viewport = _browser_viewport_from_semantics(browser_semantics=browser_semantics, tab_id=tab_id)
+    return _optional_number(viewport.get("innerWidth")) is not None and _optional_number(viewport.get("innerHeight")) is not None
 
 
 def _snapshot_candidates(*, tool_name: str, output: Any) -> list[dict[str, Any]]:
@@ -1564,8 +2199,14 @@ def _snapshot_candidates(*, tool_name: str, output: Any) -> list[dict[str, Any]]
     ]
 
 
-def _collect_blockers(outcome: AgentTurnOutcome, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _collect_blockers(
+    outcome: AgentTurnOutcome,
+    events: list[dict[str, Any]],
+    *,
+    ignore_recovered: bool = True,
+) -> list[dict[str, Any]]:
     blockers: list[dict[str, Any]] = []
+    recovered_tools = _recovered_error_tools(events) if ignore_recovered else set()
     for event in events:
         event_type = str(event.get("type") or "")
         payload = _as_dict(event.get("payload"))
@@ -1578,7 +2219,12 @@ def _collect_blockers(outcome: AgentTurnOutcome, events: list[dict[str, Any]]) -
                     "severity": payload.get("severity"),
                 }
             )
-        if event_type == "tool_event" and payload.get("kind") == "tool_result_ready" and bool(payload.get("is_error")):
+        if event_type == "tool_event" and payload.get("kind") == "tool_result_ready" and (
+            bool(payload.get("is_error")) or not _tool_result_content_succeeded(payload.get("content"))
+        ):
+            tool_name = str(payload.get("tool_name") or "")
+            if tool_name in recovered_tools:
+                continue
             blockers.append(
                 {
                     "kind": "tool_error",
@@ -1593,6 +2239,26 @@ def _collect_blockers(outcome: AgentTurnOutcome, events: list[dict[str, Any]]) -
     return blockers
 
 
+def _recovered_error_tools(events: list[dict[str, Any]]) -> set[str]:
+    failed_at: dict[str, int] = {}
+    recovered: set[str] = set()
+    for event in events:
+        if str(event.get("type") or "") != "tool_event":
+            continue
+        payload = _as_dict(event.get("payload"))
+        if payload.get("kind") != "tool_result_ready":
+            continue
+        tool_name = str(payload.get("tool_name") or "")
+        if not tool_name:
+            continue
+        seq = _safe_int(event.get("engine_output_seq"))
+        if bool(payload.get("is_error")) or not _tool_result_content_succeeded(payload.get("content")):
+            failed_at[tool_name] = seq
+        elif tool_name in failed_at and seq > failed_at[tool_name] and _tool_result_content_succeeded(payload.get("content")):
+            recovered.add(tool_name)
+    return recovered
+
+
 def _should_continue(outcome: AgentTurnOutcome) -> bool:
     return outcome.status == "continue" and outcome.gate_signal == "continue"
 
@@ -1600,6 +2266,8 @@ def _should_continue(outcome: AgentTurnOutcome) -> bool:
 def _public_status(outcome: AgentTurnOutcome, blockers: list[dict[str, Any]]) -> str:
     result_status = _scene_result_status(outcome)
     if result_status in {"completed", "complete", "success", "succeeded"}:
+        if blockers:
+            return "blocked"
         return "completed"
     if result_status in {"blocked", "wait_human", "waiting_human", "paused"} or result_status.startswith("blocked_"):
         return "blocked"
@@ -1607,9 +2275,11 @@ def _public_status(outcome: AgentTurnOutcome, blockers: list[dict[str, Any]]) ->
         return "error"
     if outcome.status in {"error", "cancelled"}:
         return "error"
+    if blockers:
+        return "blocked"
     if outcome.status == "complete":
         return "completed"
-    if outcome.status in {"wait_human", "escalate"} or blockers:
+    if outcome.status in {"wait_human", "escalate"}:
         return "blocked"
     return "incomplete"
 
@@ -1657,6 +2327,19 @@ def _scene_result_data(outcome: AgentTurnOutcome) -> dict[str, Any]:
     if isinstance(outcome.result_data, dict) and outcome.result_data:
         return dict(outcome.result_data)
     return {}
+
+
+def _align_result_data_status(result_data: dict[str, Any], public_status: str) -> dict[str, Any]:
+    if public_status == "completed" or not result_data:
+        return result_data
+    reported_status = str(result_data.get("status") or "").strip().lower()
+    if reported_status in {"completed", "complete", "success", "succeeded"}:
+        return {
+            **result_data,
+            "reported_status": result_data.get("status"),
+            "status": public_status,
+        }
+    return result_data
 
 
 def _scene_final_control_payload(outcome: AgentTurnOutcome) -> dict[str, Any] | None:
@@ -1852,6 +2535,22 @@ def _scene_capabilities(value: Any) -> set[str]:
     if capabilities & {"browser_mcp", "browser_read", "document"}:
         capabilities.add("browser")
     return capabilities
+
+
+def _normalize_preferred_scene_capabilities(value: Any) -> list[str]:
+    capabilities = _scene_capabilities(value)
+    ordered: list[str] = []
+    if "browser" in capabilities:
+        ordered.append("browser")
+    if "computer" in capabilities:
+        ordered.append("computer")
+    for item in _string_list(value):
+        normalized = item.strip().lower().replace("-", "_")
+        if normalized in {"browser", "browser_mcp", "browser_read", "document", "computer", "hid", "virtual_hid", "virtualhid", "computer_hid", "computer_write"}:
+            continue
+        if item not in ordered:
+            ordered.append(item)
+    return ordered
 
 
 def _scene_execution_contract(request: dict[str, Any]) -> dict[str, Any]:

@@ -70,6 +70,22 @@ class ToolDefinition:
         }
 
 
+def _runtime_requires_browser_computer_scene(runtime: dict[str, Any]) -> bool:
+    constraints = runtime.get("constraints")
+    if not isinstance(constraints, dict):
+        constraints = {}
+    context_hints = runtime.get("context_hints")
+    if not isinstance(context_hints, dict):
+        context_hints = {}
+    plan_kind = str(
+        runtime.get("plan_kind")
+        or constraints.get("plan_kind")
+        or context_hints.get("plan_kind")
+        or ""
+    ).strip().lower()
+    return plan_kind == "jd_sync"
+
+
 @dataclass(slots=True)
 class ToolRegistry:
     tools: dict[str, ToolDefinition] = field(default_factory=dict)
@@ -133,6 +149,10 @@ class ToolRegistry:
                             runtime.get("context_hints"),
                         ),
                     )
+                    if _runtime_requires_browser_computer_scene(runtime) and not arguments.get("preferred_capabilities"):
+                        arguments["preferred_capabilities"] = ["browser", "computer"]
+                    if _runtime_requires_browser_computer_scene(runtime) and not arguments.get("max_llm_invocations"):
+                        arguments["max_llm_invocations"] = 20
                 result = registry.execute(self.tool.name, arguments)
                 return AgentRuntimeToolResult(
                     tool_call_id=call.id,
@@ -471,7 +491,11 @@ def build_delegate_scene_context_tool(
 ) -> ToolDefinition:
     return ToolDefinition(
         name=name,
-        description="Delegate a capability-oriented runtime scene task to an isolated scene context and return a structured scene result.",
+        description=(
+            "Delegate a capability-oriented runtime scene task to an isolated scene context and return a structured scene result. "
+            "For multi-step site tasks, completed means the full requested scene goal is complete. "
+            "Partial progress with blockers, limitations, or remaining required steps must be treated as blocked/continuable, not as terminal success."
+        ),
         parameters={
             "type": "object",
             "properties": {

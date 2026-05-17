@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+import inspect
 from typing import Any
 
 from recruit_station.agent_runtime.engine import InteractionEngine, InteractionEngineConfig
@@ -27,6 +28,7 @@ class AgentEngineResult:
     status: str
     gate_signal: str | None
     final_output: str
+    final_result_data: dict[str, Any]
     tool_calls: list[dict[str, Any]]
     tool_results: list[dict[str, Any]]
     pending_tool_calls: list[dict[str, Any]]
@@ -53,6 +55,8 @@ def run_agent_turn(
     output_sink: Callable[[InteractionOutput], None] | None = None,
     engine_sink: Callable[[InteractionEngine], None] | None = None,
     structured_status_resolver: Callable[[Any], tuple[str, str] | None] | None = None,
+    final_output_status_resolver: Callable[[str], tuple[str, str] | None] | None = None,
+    final_output_continuation_resolver: Callable[[str, list[dict[str, Any]], list[dict[str, Any]], int], str | None] | None = None,
     status_defaults: AgentTurnStatusDefaults | None = None,
     include_tool_result_metadata: bool = False,
     runtime: dict[str, Any] | None = None,
@@ -86,12 +90,8 @@ def run_agent_turn(
         engine_sink(engine)
 
     output_iter: Iterable[InteractionOutput]
-    if resolve_permission:
-        output_iter = engine.resolvePermission(approved=True)
-    else:
-        output_iter = engine.submitMessage(turn_input)
-
     final_output = ""
+    final_result_data: dict[str, Any] = {}
     status = defaults.completed_status
     gate_signal = defaults.completed_gate_signal
     tool_calls: list[dict[str, Any]] = []
@@ -99,53 +99,104 @@ def run_agent_turn(
     pending_tool_calls: list[dict[str, Any]] = []
     engine_output_count = 0
     last_seq = initial_seq - 1
+    continuation_attempt = 0
+    next_turn_input = turn_input
+    resolve_permission_next = resolve_permission
 
-    for output in output_iter:
-        engine_output_count += 1
-        last_seq = max(last_seq, int(output.seq or last_seq))
-        if output_sink is not None:
-            output_sink(output)
+    while True:
+        if resolve_permission_next:
+            output_iter = engine.resolvePermission(approved=True)
+        else:
+            output_iter = engine.submitMessage(next_turn_input)
+        resolve_permission_next = False
 
-        if output.type == "assistant_message_completed":
-            final_output = str(output.data.get("message") or "")
-            continue
-        if output.type == "llm_invocation_completed" and structured_status_resolver is not None:
-            resolved = structured_status_resolver(output.data.get("result_data"))
+        turn_start_tool_call_count = len(tool_calls)
+        turn_start_tool_result_count = len(tool_results)
+        final_output = ""
+        final_result_data = {}
+        status = defaults.completed_status
+        gate_signal = defaults.completed_gate_signal
+        pending_tool_calls = []
+
+        for output in output_iter:
+            engine_output_count += 1
+            last_seq = max(last_seq, int(output.seq or last_seq))
+            if output_sink is not None:
+                output_sink(output)
+
+            if output.type == "assistant_message_completed":
+                final_output = str(output.data.get("message") or "")
+                continue
+            if output.type == "llm_invocation_completed" and structured_status_resolver is not None:
+                final_result_data = dict(output.data.get("result_data") or {})
+                resolved = structured_status_resolver(final_result_data)
+                if resolved is not None:
+                    status, gate_signal = resolved
+                continue
+            if output.type == "llm_invocation_completed":
+                final_result_data = dict(output.data.get("result_data") or {})
+                continue
+            if output.type == "tool_event":
+                data = dict(output.data)
+                if data.get("kind") in {"tool_call_started", "tool_use_completed"}:
+                    tool_calls.append(data)
+                elif data.get("kind") == "tool_result_ready":
+                    result = {
+                        "tool_name": data.get("tool_name"),
+                        "output": data.get("content"),
+                        "is_error": data.get("is_error", False),
+                    }
+                    if include_tool_result_metadata:
+                        result["metadata"] = {}
+                    tool_results.append(result)
+                continue
+            if output.type == "permission_requested":
+                status = defaults.permission_status
+                gate_signal = defaults.permission_gate_signal
+                pending_tool_calls = [_permission_payload(dict(output.data))]
+                tool_calls = list(pending_tool_calls)
+                continue
+            if output.type == "turn_failed":
+                status = defaults.failed_status
+                gate_signal = defaults.failed_gate_signal
+                continue
+            if output.type == "turn_interrupted":
+                status = defaults.interrupted_status
+                gate_signal = defaults.interrupted_gate_signal
+
+        if (
+            final_output_status_resolver is not None
+            and status == defaults.completed_status
+            and gate_signal == defaults.completed_gate_signal
+        ):
+            resolved = final_output_status_resolver(final_output)
             if resolved is not None:
                 status, gate_signal = resolved
-            continue
-        if output.type == "tool_event":
-            data = dict(output.data)
-            if data.get("kind") in {"tool_call_started", "tool_use_completed"}:
-                tool_calls.append(data)
-            elif data.get("kind") == "tool_result_ready":
-                result = {
-                    "tool_name": data.get("tool_name"),
-                    "output": data.get("content"),
-                    "is_error": data.get("is_error", False),
-                }
-                if include_tool_result_metadata:
-                    result["metadata"] = {}
-                tool_results.append(result)
-            continue
-        if output.type == "permission_requested":
-            status = defaults.permission_status
-            gate_signal = defaults.permission_gate_signal
-            pending_tool_calls = [_permission_payload(dict(output.data))]
-            tool_calls = list(pending_tool_calls)
-            continue
-        if output.type == "turn_failed":
-            status = defaults.failed_status
-            gate_signal = defaults.failed_gate_signal
-            continue
-        if output.type == "turn_interrupted":
-            status = defaults.interrupted_status
-            gate_signal = defaults.interrupted_gate_signal
+
+        current_turn_tool_calls = tool_calls[turn_start_tool_call_count:]
+        current_turn_tool_results = tool_results[turn_start_tool_result_count:]
+        continuation = (
+            _resolve_final_output_continuation(
+                final_output_continuation_resolver,
+                final_output,
+                current_turn_tool_calls,
+                current_turn_tool_results,
+                continuation_attempt,
+                final_result_data,
+            )
+            if final_output_continuation_resolver is not None
+            else None
+        )
+        if not continuation:
+            break
+        continuation_attempt += 1
+        next_turn_input = continuation
 
     return AgentEngineResult(
         status=status,
         gate_signal=gate_signal,
         final_output=final_output,
+        final_result_data=final_result_data,
         tool_calls=tool_calls,
         tool_results=tool_results,
         pending_tool_calls=pending_tool_calls,
@@ -153,6 +204,23 @@ def run_agent_turn(
         last_seq=last_seq,
         engine=engine,
     )
+
+
+def _resolve_final_output_continuation(
+    resolver: Callable[..., str | None],
+    final_output: str,
+    tool_calls: list[dict[str, Any]],
+    tool_results: list[dict[str, Any]],
+    attempt: int,
+    result_data: dict[str, Any],
+) -> str | None:
+    try:
+        parameters = inspect.signature(resolver).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    if len(parameters) >= 5:
+        return resolver(final_output, tool_calls, tool_results, attempt, result_data)
+    return resolver(final_output, tool_calls, tool_results, attempt)
 
 
 def runtime_output_payload(output: InteractionOutput) -> dict[str, Any]:

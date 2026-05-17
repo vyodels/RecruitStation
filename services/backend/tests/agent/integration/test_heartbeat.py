@@ -109,6 +109,57 @@ def test_heartbeat_honors_global_pause(tmp_path: Path) -> None:
         session.close()
 
 
+def test_autonomous_recover_stale_interrupts_run_and_clears_running_queue_task(tmp_path: Path) -> None:
+    session = _make_session(tmp_path)
+    try:
+        definition = AgentDefinition(definition_key="primary", name="Primary", is_primary=True)
+        session.add(definition)
+        session.flush()
+        agent_session = AgentSession(agent_definition_id=definition.id)
+        session.add(agent_session)
+        session.flush()
+        run = AgentRun(
+            session_id=agent_session.id,
+            run_id="run-stale",
+            agent_kind="jd_sync",
+            status="running",
+            queue_task_id="task-stale",
+        )
+        session.add(run)
+        session.commit()
+        task = TaskQueueRepository(session).enqueue(
+            task_id="task-stale",
+            task_type="autonomous_turn",
+            payload={"run_pk": run.id, "run_id": run.run_id},
+            status="running",
+        )
+        task.locked_by = "heartbeat"
+        task.locked_at = utcnow() - timedelta(minutes=10)
+        session.commit()
+
+        agent = AutonomousAdapter(
+            session_factory=create_session_factory(session.get_bind()),
+            provider=ScriptedProvider(provider_name="scripted", responses=[]),
+            tool_registry=ToolRegistry(),
+            plugin_host=PluginHost(),
+        )
+
+        assert agent.recover_stale() == 1
+
+        session.expire_all()
+        refreshed_run = session.get(AgentRun, run.id)
+        refreshed_task = TaskQueueRepository(session).get("task-stale")
+        assert refreshed_run is not None
+        assert refreshed_task is not None
+        assert refreshed_run.status == "interrupted"
+        assert refreshed_run.last_error == "Recovered stale autonomous run during startup."
+        assert refreshed_task.status == "failed"
+        assert refreshed_task.locked_by is None
+        assert refreshed_task.locked_at is None
+    finally:
+        session.close()
+
+
 def test_heartbeat_records_browser_hid_readiness_and_still_runs_agent(tmp_path: Path) -> None:
     session = _make_session(tmp_path)
     try:

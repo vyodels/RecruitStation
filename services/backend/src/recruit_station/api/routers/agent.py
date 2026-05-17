@@ -61,7 +61,7 @@ RUNTIME_AGENT_KINDS: tuple[AgentKind, ...] = ("autonomous", "jd_sync")
 AUTONOMOUS_PRIMARY_CONVERSATION_ID = "autonomous-primary"
 JD_SYNC_PRIMARY_CONVERSATION_ID = "jd-sync-primary"
 SHARED_WORKSPACE_SCOPE_REF = "workspace:shared"
-DEFAULT_JD_SYNC_POLICY_TEXT = "从配置的招聘网站目标网页出发，根据页面可见导航和内容自行找到职位列表与职位详情，识别新增、更新和下架职位；只有确认职位详情已完整采集且没有阻塞时，才同步到本地 JD 库，列表页摘要只能作为发现线索。同步过程只处理职位信息，不处理候选人。"
+DEFAULT_JD_SYNC_POLICY_TEXT = "从配置的招聘网站目标网页出发，根据页面可见导航和内容自行找到职位列表与职位详情，识别新增、更新和下架职位；只有确认职位详情已完整采集且没有阻塞时，才同步到本地 JD 库，列表页摘要只能作为发现线索。同步过程只处理职位信息，不处理候选人；如果只完成部分职位详情读取，可以记录已确认的职位作为进度，但不能把本轮视为完成，必须继续恢复并完成全量同步，或明确说明还需要恢复的条件。"
 TECHNICAL_JD_SYNC_TEXT_MARKERS = (
     "upsert_job_description",
     "platform/external_id",
@@ -181,6 +181,8 @@ class AutonomousTriggerRequest(BaseModel):
 class RunControlRequest(BaseModel):
     reviewer: str = "desktop-user"
     reason: str | None = None
+    message: str | None = None
+    priority: str = "next"
 
 
 class ConversationClearRequest(BaseModel):
@@ -781,6 +783,45 @@ def build_router(container: AppContainer) -> APIRouter:
             )
             definition = _resolve_agent_definition(session, kind)
             envelope = _resume_envelope_for_run(run=run, definition=definition, checkpoint=checkpoint)
+            envelope["trigger_type"] = "resume"
+            resume_message = str(payload.message or "").strip()
+            if resume_message:
+                pending_input = list(envelope.get("pending_input") or []) if isinstance(envelope.get("pending_input"), list) else []
+                pending_input.append(
+                    {
+                        "input_id": None,
+                        "priority": str(payload.priority or "next").strip().lower() or "next",
+                        "queued_by": payload.reviewer,
+                        "message": resume_message,
+                    }
+                )
+                envelope["pending_input"] = pending_input
+                metadata = dict(envelope.get("metadata") or {}) if isinstance(envelope.get("metadata"), dict) else {}
+                metadata["resumed_with_user_message"] = True
+                metadata["resume_message"] = resume_message
+                envelope["metadata"] = metadata
+                world_snapshot = dict(envelope.get("world_snapshot") or {}) if isinstance(envelope.get("world_snapshot"), dict) else {}
+                world_snapshot["pending_input"] = pending_input
+                envelope["world_snapshot"] = world_snapshot
+                session.add(
+                    AgentRuntimeEvent(
+                        session_id=run.session_id,
+                        run_id=run.id,
+                        source="operator",
+                        event_type="runtime_event",
+                        message="run_resume_user_message",
+                        seq=0,
+                        payload={
+                            "type": "runtime_event",
+                            "data": {
+                                "kind": "run_resume_user_message",
+                                "message": resume_message,
+                                "priority": str(payload.priority or "next").strip().lower() or "next",
+                                "queued_by": payload.reviewer,
+                            },
+                        },
+                    )
+                )
             run.status = "queued"
             run.finished_at = None
             run.blocked_reason = None
@@ -789,6 +830,7 @@ def build_router(container: AppContainer) -> APIRouter:
                 "resumed_at": utcnow().isoformat(),
                 "resumed_by": payload.reviewer,
                 "checkpoint_id": None if checkpoint is None else checkpoint.id,
+                **({"resume_message": resume_message} if resume_message else {}),
             }
             task = _enqueue_run_task(session, run=run, envelope=envelope)
             session.commit()
@@ -1419,6 +1461,14 @@ def _build_jd_sync_user_instruction(
         "任务范围：",
         "- 从配置的招聘网站目标网页出发，目标网页可以是该网站任意可访问页面。",
         "- 根据页面可见导航和内容自行找到职位列表与职位详情。",
+        "- 职位列表只用于发现待同步职位，不能把列表页摘要或职位数量当作完成。",
+        "- 对每个仍在招聘的职位，必须进入或打开职位详情并完整读取岗位详情后，才能同步到本地 JD 库。",
+        "- 如果只读到列表但尚未读取详情，应继续执行；只有遇到登录、权限、必要执行工具缺失或页面不可达等明确问题才标记为阻塞。",
+        "- 进入详情页、翻页或返回列表等页面动作应使用系统提供的浏览器观察和电脑/HID执行链路；不得因为浏览器观察工具只读就结束任务。",
+        "- 如果页面动作失败但仍处于同源站点，应先恢复后继续：重新观察页面、等待页面稳定、释放异常按键状态、选择页面上的其他同源入口、滚动到稳定位置，或通过电脑执行链路打开已经观察到的同源链接。",
+        "- 如果列表入口点击后仍无法进入已知同源详情页，应通过电脑执行链路使用地址栏打开已观察到的同源详情 URL 后继续读取；地址栏恢复必须是真实 HID 键盘链路：Cmd+L 聚焦地址栏，粘贴已观察到的同源 URL，回车，再重新观察确认页面。",
+        "- 单次点击、返回、滚动或注入超时不是任务终局；只要目标站点仍可访问且还有职位详情未完整读取，就应在本轮继续恢复和推进。",
+        "- 可以先写入已经完整读取详情的职位作为进度；但在没有完成全量职位发现、全量详情读取、更新/下架识别和生效 JD 选择前，不得用“已完成部分同步”结束本轮。",
         "- 只发现和同步 JD。",
         "- 不处理候选人筛选、评分、外联或投递推进。",
         "",
@@ -2754,7 +2804,7 @@ def _autonomous_event_message(conversation_id: str, event: dict[str, Any]) -> di
         "content": _runtime_event_content(event_type, data) or str(event.get("message") or event.get("event_type") or "Autonomous event"),
         "created_at": created_at,
         "createdAt": created_at,
-        "status": _event_message_status(event_type),
+        "status": _runtime_event_message_status(event_type, data),
         "metadata": {
             "eventKind": _runtime_event_kind(event_type, payload),
             "traceKind": _runtime_event_trace_kind(event_type, payload),
@@ -2776,7 +2826,7 @@ def _runtime_event_role(event_type: str, data: dict[str, Any]) -> str:
     payload_kind = str(data.get("kind") or "").strip().lower()
     if normalized in {"assistant_message_delta", "assistant_message_completed"}:
         return "assistant"
-    if normalized == "runtime_event" and payload_kind == "pending_user_input_after_next_tool_call_injected":
+    if normalized == "runtime_event" and payload_kind in {"pending_user_input_after_next_tool_call_injected", "run_resume_user_message"}:
         return "user"
     return "system"
 
@@ -2788,6 +2838,16 @@ def _runtime_event_title(event_type: str, data: dict[str, Any]) -> str | None:
         return None
     if kind == "pending_user_input_after_next_tool_call_injected":
         return None
+    if kind == "run_resume_user_message":
+        return None
+    if kind == "provider_retry_scheduled":
+        return "模型调用重试"
+    if kind == "provider_retry_exhausted":
+        return "模型调用失败"
+    if kind == "provider_error_terminal":
+        return "模型调用异常"
+    if kind in {"turn_failed", "adapter_failed", "turn_interrupted"}:
+        return "运行失败"
     if kind == "tool_input_streamed":
         return f"准备工具调用：{tool_name}" if tool_name else "准备工具调用"
     if kind == "tool_use_completed":
@@ -2833,6 +2893,28 @@ def _runtime_event_content(event_type: str, data: dict[str, Any]) -> str | None:
             if lines:
                 return "\n".join(lines)
         return None
+    if kind == "run_resume_user_message":
+        return str(data.get("message") or "").strip() or None
+    if kind in {"provider_retry_scheduled", "provider_retry_exhausted", "provider_error_terminal"}:
+        error = str(data.get("error") or "").strip()
+        attempt = data.get("attempt")
+        max_attempts = data.get("max_attempts")
+        delay = data.get("delay_seconds")
+        lines: list[str] = []
+        if kind == "provider_retry_scheduled":
+            lines.append(f"模型调用失败，准备重试（{attempt}/{max_attempts}）。")
+            if delay is not None:
+                lines.append(f"等待：{delay} 秒")
+        elif kind == "provider_retry_exhausted":
+            lines.append(f"模型调用重试后仍失败（{attempt}/{max_attempts}）。")
+        else:
+            lines.append("模型调用失败，错误不可重试。")
+        if error:
+            lines.append(f"错误：{error}")
+        return "\n".join(lines)
+    if kind in {"turn_failed", "adapter_failed", "turn_interrupted"}:
+        error = str(data.get("error") or data.get("reason") or "").strip()
+        return error or None
     if kind == "tool_input_streamed":
         content = _compact_event_payload(data.get("content"))
         lines = [f"工具：{tool_name}" if tool_name else "工具输入生成中"]
@@ -2912,8 +2994,12 @@ def _runtime_event_kind(event_type: str, payload: dict[str, Any]) -> str:
         return "thinking"
     if normalized == "assistant_message_completed":
         return "execution_result"
-    if payload_kind == "pending_user_input_after_next_tool_call_injected":
+    if payload_kind in {"pending_user_input_after_next_tool_call_injected", "run_resume_user_message"}:
         return "human"
+    if payload_kind in {"provider_retry_scheduled", "provider_retry_exhausted", "provider_error_terminal"}:
+        return "execution_result"
+    if normalized in {"turn_failed", "adapter_failed", "turn_interrupted"}:
+        return "execution_result"
     if "permission" in source or "waiting_human" in source or "blocked" in source:
         return "confirmation"
     if payload_kind in {"tool_input_streamed", "tool_call_started", "tool_use_completed"}:
@@ -2935,7 +3021,7 @@ def _runtime_event_trace_kind(event_type: str, payload: dict[str, Any]) -> str:
     payload_kind = str(data.get("kind") or payload.get("kind") or "").strip().lower()
     if normalized in {"assistant_message_delta", "assistant_message_completed"}:
         return "assistant_message"
-    if payload_kind == "pending_user_input_after_next_tool_call_injected":
+    if payload_kind in {"pending_user_input_after_next_tool_call_injected", "run_resume_user_message"}:
         return "user_message"
     if normalized == "permission_requested":
         return "permission_requested"
@@ -2943,6 +3029,10 @@ def _runtime_event_trace_kind(event_type: str, payload: dict[str, Any]) -> str:
         return "tool_call"
     if payload_kind in {"tool_result_ready", "tool_error"}:
         return "tool_result"
+    if payload_kind in {"provider_retry_scheduled", "provider_retry_exhausted", "provider_error_terminal"}:
+        return payload_kind
+    if normalized in {"turn_failed", "adapter_failed", "turn_interrupted"}:
+        return normalized
     return _runtime_event_kind(event_type, payload)
 
 
@@ -2975,9 +3065,18 @@ def _event_message_status(event_type: str) -> str:
         return "completed"
     if normalized == "permission_requested":
         return "waiting_human"
-    if normalized in {"turn_failed", "turn_interrupted"}:
+    if normalized in {"turn_failed", "turn_interrupted", "adapter_failed"}:
         return "failed"
     return _workspace_status(normalized)
+
+
+def _runtime_event_message_status(event_type: str, data: dict[str, Any]) -> str:
+    kind = str(data.get("kind") or "").strip().lower()
+    if kind == "provider_retry_scheduled":
+        return "active"
+    if kind in {"provider_retry_exhausted", "provider_error_terminal"}:
+        return "failed"
+    return _event_message_status(event_type)
 
 
 def _agent_message_sort_key(message: dict[str, Any]) -> tuple[float, str, str]:
@@ -3123,7 +3222,10 @@ def _serialize_autonomous_primary_conversation_record(
                 AgentRuntimeEvent.event_type.in_((
                     "assistant_message_delta",
                     "assistant_message_completed",
+                    "adapter_failed",
                     "runtime_event",
+                    "turn_failed",
+                    "turn_interrupted",
                     "tool_event",
                     "permission_requested",
                 )),
@@ -3287,7 +3389,12 @@ def _is_primary_timeline_runtime_event(event: dict[str, Any]) -> bool:
     data = dict(payload.get("data") or {})
     kind = str(data.get("kind") or "").strip().lower()
     if event_type == "runtime_event":
-        return kind == "pending_user_input_after_next_tool_call_injected" and bool(_runtime_event_content(event_type, data))
+        return (
+            kind in {"pending_user_input_after_next_tool_call_injected", "run_resume_user_message"}
+            and bool(_runtime_event_content(event_type, data))
+        ) or kind in {"provider_retry_scheduled", "provider_retry_exhausted", "provider_error_terminal"}
+    if event_type in {"turn_failed", "adapter_failed", "turn_interrupted"}:
+        return True
     if event_type != "tool_event":
         return False
     return kind in {

@@ -393,6 +393,7 @@ function messageKindLabel(message: AgentConversationMessage, copy: ReturnType<ty
 }
 
 type TimelineEventKind = "thinking" | "tool_call" | "execution_result" | "human" | "confirmation";
+type TimelineResultTone = "success" | "error" | "warning" | "neutral";
 
 interface TimelineRenderItem {
   id: string;
@@ -591,6 +592,37 @@ function resolveToolGroupEventKind(messages: AgentConversationMessage[]): Timeli
   return "tool_call";
 }
 
+function resolveTimelineResultTone(message: AgentConversationMessage): TimelineResultTone {
+  const data = timelinePayloadData(message);
+  const statusHints = [
+    message.status,
+    metadataString(message, ["status", "runStatus", "run_status", "turnStatus", "turn_status", "state", "outcome_kind"]),
+    metadataString(message, ["traceKind", "payloadKind", "itemType", "eventType", "eventKind"]),
+    String(data?.kind ?? ""),
+    String(data?.status ?? ""),
+    String(data?.error_kind ?? ""),
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  if (
+    message.status === "failed"
+    || metadataString(message, ["isError"]) === "true"
+    || data?.is_error === true
+    || data?.retryable === false
+    || /failed|failure|cancelled|interrupted|timed_out|timeout|error|turn_failed|tool_error|provider_error_terminal|provider_retry_exhausted/.test(statusHints)
+  ) {
+    return "error";
+  }
+  if (/provider_retry_scheduled|blocked|waiting_human|wait_human|permission|confirm/.test(statusHints)) {
+    return "warning";
+  }
+  if (resolveTimelineEventKind(message) === "execution_result") {
+    return "success";
+  }
+  return "neutral";
+}
+
 function compactValue(value: unknown): string | null {
   if (value == null) {
     return null;
@@ -735,6 +767,12 @@ function timelineLabel(message: AgentConversationMessage, copy: ReturnType<typeo
     case "tool_call":
       return copy("Tool Call", "工具调用");
     case "execution_result":
+      if (resolveTimelineResultTone(message) === "error") {
+        return isToolRelatedTimelineMessage(message) ? copy("Tool Error", "工具异常") : copy("Run Failed", "运行失败");
+      }
+      if (resolveTimelineResultTone(message) === "warning") {
+        return copy("Run Status", "运行状态");
+      }
       return isToolRelatedTimelineMessage(message) ? copy("Tool Result", "工具结果") : copy("Run Result", "运行结果");
     case "confirmation":
       return copy("Needs Confirmation", "需要确认");
@@ -754,6 +792,14 @@ function timelineSummary(message: AgentConversationMessage, copy: ReturnType<typ
     case "tool_call":
       return copy("Calling connected tool", "调用已连接工具");
     case "execution_result":
+      if (resolveTimelineResultTone(message) === "error") {
+        return isToolRelatedTimelineMessage(message)
+          ? copy("Connected tool returned an error", "已连接工具返回异常")
+          : copy("Agent stopped with an error", "Agent 因错误停止");
+      }
+      if (resolveTimelineResultTone(message) === "warning") {
+        return copy("Agent is retrying a transient issue", "Agent 正在重试暂时性异常");
+      }
       return isToolRelatedTimelineMessage(message)
         ? copy("Connected tool returned result", "已连接工具返回结果")
         : copy("Agent returned business output", "Agent 返回业务产出");
@@ -815,6 +861,7 @@ function formatTimelineTime(value: string): string {
 
 function renderTimelinePayload(message: AgentConversationMessage, blocks: Block[], copy: ReturnType<typeof useI18n>["copy"]): React.ReactNode {
   const eventKind = resolveTimelineEventKind(message);
+  const resultTone = resolveTimelineResultTone(message);
   const isToolRelated = isToolRelatedTimelineMessage(message);
   const isRunResult = eventKind === "execution_result" && !isToolRelated;
   const metadataPairs = timelineMetadataPairs(message);
@@ -830,7 +877,11 @@ function renderTimelinePayload(message: AgentConversationMessage, blocks: Block[
     eventKind === "tool_call"
       ? copy("Parameters", "参数")
       : isRunResult
-        ? copy("Business output", "业务产出")
+        ? resultTone === "error"
+          ? copy("Error result", "错误结果")
+          : resultTone === "warning"
+            ? copy("Retrying", "重试中")
+            : copy("Business output", "业务产出")
       : eventKind === "confirmation"
         ? copy("Human-in-the-loop", "Human-in-the-loop")
         : null;
@@ -1084,7 +1135,15 @@ function renderToolGroupPayload(item: TimelineRenderItem, copy: ReturnType<typeo
   );
 }
 
-function TimelineNodeIcon({ kind }: { kind: TimelineEventKind }): JSX.Element {
+function TimelineNodeIcon({ kind, tone = "neutral" }: { kind: TimelineEventKind; tone?: TimelineResultTone }): JSX.Element {
+  if (kind === "execution_result" && tone === "error") {
+    return (
+      <svg viewBox="0 0 18 18" aria-hidden="true">
+        <path d="M9 3.2 15 14H3L9 3.2Z" />
+        <path d="M9 7v3.2M9 12.3h.01" />
+      </svg>
+    );
+  }
   switch (kind) {
     case "tool_call":
       return (
@@ -1155,6 +1214,7 @@ export function ChatMessageStream({ loading, messages, renderTimelineAttachment,
           const message = item.primary;
           const blocks = contentToBlocks(message.content);
           const eventKind = item.kind;
+          const resultTone = resolveTimelineResultTone(message);
           const suppressSummary = item.toolGroup || (eventKind === "execution_result" && !isToolRelatedTimelineMessage(message));
           return (
             <article
@@ -1162,11 +1222,12 @@ export function ChatMessageStream({ loading, messages, renderTimelineAttachment,
               className="agent-execution-event"
               data-role={message.role}
               data-event-kind={eventKind}
+              data-result-tone={eventKind === "execution_result" ? resultTone : undefined}
               data-status={message.status}
               data-tool-group={item.toolGroup ? "true" : undefined}
             >
               <div className="agent-execution-event__node">
-                <TimelineNodeIcon kind={eventKind} />
+                <TimelineNodeIcon kind={eventKind} tone={resultTone} />
               </div>
               <div className="agent-execution-event__body">
                 <div className="agent-execution-event__head">

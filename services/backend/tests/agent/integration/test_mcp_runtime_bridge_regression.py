@@ -827,6 +827,31 @@ def test_mcp_call_tool_preserves_structured_content_on_is_error(monkeypatch) -> 
     assert result["result"]["preflight"]["browserChromeOverlay"]["evidence"] == "toolbar-overlap"
 
 
+def test_mcp_call_tool_extends_stdio_timeout_for_hid_action(monkeypatch) -> None:
+    server = McpServer(
+        server_key="virtualhid",
+        name="VirtualHID",
+        transport_kind="stdio",
+        protocol="mcp_jsonrpc",
+        endpoint="mcp://hid-runtime",
+        enabled=True,
+        auth_config={},
+        server_metadata={},
+    )
+    captured: dict[str, Any] = {}
+
+    def fake_session_request(server, method: str, params: dict[str, Any] | None = None, *, timeout_seconds: float = 8.0) -> dict[str, Any]:
+        captured["timeout_seconds"] = timeout_seconds
+        return {"structuredContent": {"success": True}}
+
+    monkeypatch.setattr("recruit_station.services.mcp_registry._mcp_session_request", fake_session_request)
+
+    result = _mcp_call_tool(server, "hid_action", {"options": {"timeoutMs": 12000}, "primitives": []})
+
+    assert result == {"success": True}
+    assert captured["timeout_seconds"] == 18.0
+
+
 def test_standard_mcp_tool_retries_once_on_transient_failure(tmp_path, monkeypatch) -> None:
     discovered_tools = [
         {

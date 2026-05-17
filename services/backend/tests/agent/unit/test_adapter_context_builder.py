@@ -68,6 +68,28 @@ def test_autonomous_context_renders_payload_and_json_turn_input() -> None:
     assert context.context_payload["memory_layers"]["long_term"].startswith("memory index")
 
 
+def test_runtime_context_preserves_product_agent_kind() -> None:
+    context = build_autonomous_turn_context(
+        agent_kind="jd_sync",
+        title="同步招聘站点 JD",
+        instruction="同步招聘站点 JD",
+        scope_kind="global",
+        scope_ref="workspace:shared",
+        constraints={},
+        world_snapshot={},
+        recent_events=[],
+        memory_entries=[],
+        available_tools=["delegate_scene_context"],
+        skill_contexts=[],
+        available_mcps=["browser", "virtualhid"],
+    )
+
+    payload = json.loads(context.turn_input)
+    assert payload["instruction"] == "同步招聘站点 JD"
+    assert context.context_payload["agent"]["kind"] == "jd_sync"
+    assert '"kind": "jd_sync"' in str(context.initial_messages[0].content)
+
+
 def test_autonomous_context_treats_browser_target_url_as_entrypoint_hint() -> None:
     context = build_autonomous_turn_context(
         title="Recruiting workflow",
@@ -91,6 +113,10 @@ def test_autonomous_context_treats_browser_target_url_as_entrypoint_hint() -> No
     assert "not an exact active-tab path requirement" in system_prompt
     assert "full origin" in system_prompt
     assert "Do not treat context_hints.active_tab_url as current browser evidence" in system_prompt
+    assert "Available runtime tools: delegate_scene_context" in system_prompt
+    assert "delegate_scene_context is the browser/HID execution gateway" in system_prompt
+    assert "partial progress with blockers or limitations" in system_prompt
+    assert "alternate same-origin affordance" in system_prompt
 
 
 def test_shared_context_builder_uses_canonical_instruction_payload() -> None:
@@ -151,3 +177,35 @@ def test_scene_context_renders_scene_payload_without_memory_or_skills() -> None:
     assert "scene_request" in str(context.initial_messages[0].content)
     assert "memory_entries" not in str(context.initial_messages[0].content)
     assert "skill_contexts" not in str(context.initial_messages[0].content)
+
+
+def test_scene_context_prompt_lists_full_available_tools() -> None:
+    context = build_scene_turn_context(
+        request={
+            "instruction": "Inspect",
+            "input": {},
+            "context": {},
+            "output_contract": {},
+            "environment_requirements": {},
+            "anti_detection_policy": {},
+            "behavior_budget": {},
+        },
+        episode_id="episode-1",
+        task_spec_id="task-1",
+        max_llm_invocations=4,
+        recent_events=[],
+        available_tools=[
+            "browser_get_active_tab",
+            "browser_list_tabs",
+            "browser_query_elements",
+            "browser_snapshot",
+            "hid_action",
+        ],
+        available_mcps=["browser-mcp", "VirtualHID"],
+        instruction="Inspect page and click when needed",
+    )
+
+    system_prompt = str(context.initial_messages[0].content)
+    assert "Available scene tools:" in system_prompt
+    assert "hid_action" in system_prompt
+    assert "Available MCP capabilities: browser-mcp, VirtualHID" in system_prompt

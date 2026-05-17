@@ -119,6 +119,109 @@ def test_scene_context_creates_episode_records_without_learning_side_effects(tmp
         assert observed_snapshot.environment_descriptor["environment_kind"] == "job_detail"
 
 
+def test_scene_context_canonicalizes_browser_hid_capability_aliases(tmp_path: Path) -> None:
+    session_factory = _session_factory(tmp_path)
+    provider = ScriptedProvider(
+        provider_name="scene-scripted",
+        responses=[LLMResponse(content="需要继续执行页面动作。")],
+    )
+    service = SceneContextService(
+        session_factory=session_factory,
+        provider=provider,
+        tool_registry=ToolRegistry(),
+        plugin_host=PluginHost(),
+    )
+
+    service.delegate(
+        {
+            "instruction": "读取职位列表并进入详情。",
+            "preferred_capabilities": ["browser-mcp", "VirtualHID"],
+            "browser_target": {"url": "http://127.0.0.1:50149/"},
+        }
+    )
+
+    with session_factory() as session:
+        task_spec = session.query(TaskSpec).one()
+        episode = session.query(ExecutionEpisode).one()
+
+    assert task_spec.preferred_capabilities == ["browser", "computer"]
+    assert episode.runtime_metadata["preferred_capabilities"] == ["browser", "computer"]
+    assert episode.runtime_metadata["execution_contract"]["execution_kind"] == "browser_computer_scene_execution"
+    assert "目标浏览器窗口置前" in task_spec.instruction
+    assert "activateTarget" in task_spec.instruction
+    assert "不得在未尝试 hid_action 的情况下声称当前能力仅支持只读观察" in task_spec.instruction
+    assert "E_CURSOR_INTERFERENCE" in task_spec.instruction
+    assert "至少完成一次重新观察后的重试" in task_spec.instruction
+    assert "E_NOT_FRONTMOST" in task_spec.instruction
+    assert "地址栏恢复后 URL 未变化" in task_spec.instruction
+    assert 'key(keyCode=37, modifiers=["cmd"])' in task_spec.instruction
+    assert "不得把未确认的地址栏尝试当作已进入详情" in task_spec.instruction
+
+
+def test_scene_context_active_tab_mismatch_is_recoverable_target_identification(tmp_path: Path) -> None:
+    session_factory = _session_factory(tmp_path)
+    provider = ScriptedProvider(
+        provider_name="scene-scripted",
+        responses=[
+            LLMResponse(
+                tool_calls=[
+                    ToolCall(id="active", name="browser_get_active_tab", arguments={}),
+                    ToolCall(id="tabs", name="browser_list_tabs", arguments={}),
+                ],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(content="已找到同源页签，可继续观察。"),
+        ],
+    )
+    tools = ToolRegistry()
+    tools.register(
+        ToolDefinition(
+            name="browser_get_active_tab",
+            description="Get active browser tab.",
+            parameters={"type": "object", "properties": {}, "additionalProperties": False},
+            handler=lambda arguments: {"success": True, "tab": {"tabId": 1, "url": "http://127.0.0.1:5174/"}},
+            metadata={"capabilities": ["browser", "document"], "external_tool": True, "real_environment": True},
+        )
+    )
+    tools.register(
+        ToolDefinition(
+            name="browser_list_tabs",
+            description="List browser tabs.",
+            parameters={"type": "object", "properties": {}, "additionalProperties": False},
+            handler=lambda arguments: {"success": True, "tabs": [{"tabId": 2, "url": "http://127.0.0.1:50149/jobs"}]},
+            metadata={"capabilities": ["browser", "document"], "external_tool": True, "real_environment": True},
+        )
+    )
+    service = SceneContextService(
+        session_factory=session_factory,
+        provider=provider,
+        tool_registry=tools,
+        plugin_host=PluginHost(),
+    )
+
+    result = service.delegate(
+        {
+            "instruction": "找到目标招聘站点页签。",
+            "preferred_capabilities": ["browser"],
+            "browser_target": {"url": "http://127.0.0.1:50149/"},
+        }
+    )
+
+    assert result["status"] == "completed"
+    with session_factory() as session:
+        episode = session.query(ExecutionEpisode).one()
+        active_result = next(
+            item["payload"]["content"]
+            for item in episode.observations
+            if item["type"] == "tool_event"
+            and item["payload"]["kind"] == "tool_result_ready"
+            and item["payload"]["tool_name"] == "browser_get_active_tab"
+        )
+    assert active_result["success"] is True
+    assert active_result["targetMatch"] is False
+    assert "not a terminal blocker" in active_result["message"]
+
+
 def test_scene_context_only_uses_round_budget_when_explicit(tmp_path: Path) -> None:
     session_factory = _session_factory(tmp_path)
     provider = ScriptedProvider(provider_name="scene-scripted", responses=[LLMResponse()])
@@ -332,6 +435,123 @@ def test_scene_context_does_not_mark_failed_provider_result_data_as_completed(tm
     with session_factory() as session:
         episode = session.query(ExecutionEpisode).one()
         assert episode.status == "failed"
+
+
+def test_scene_context_does_not_mark_completed_result_with_unrecovered_blocker_as_completed(tmp_path: Path) -> None:
+    session_factory = _session_factory(tmp_path)
+    provider = ScriptedProvider(
+        provider_name="scene-scripted",
+        responses=[
+            LLMResponse(
+                tool_calls=[ToolCall(id="hid", name="hid_action", arguments={"id": "return-to-list"})],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(
+                content="已完成部分同步。",
+                result_data={"status": "completed", "summary": "已完成部分同步。"},
+            ),
+        ],
+    )
+    tools = ToolRegistry()
+    tools.register(
+        ToolDefinition(
+            name="hid_action",
+            description="Execute HID action.",
+            parameters={"type": "object", "properties": {}, "additionalProperties": True},
+            handler=lambda arguments: (_ for _ in ()).throw(RuntimeError("PERMISSION_DENIED: login required")),
+            metadata={"capabilities": ["scene", "computer", "computer_write"], "external_tool": True, "real_environment": True},
+        )
+    )
+    service = SceneContextService(
+        session_factory=session_factory,
+        provider=provider,
+        tool_registry=tools,
+        plugin_host=PluginHost(),
+    )
+
+    result = service.delegate({"instruction": "返回列表并继续读取剩余 JD。", "preferred_capabilities": ["computer"]})
+
+    assert result["status"] == "blocked"
+    assert result["result_data"]["status"] == "blocked"
+    assert result["result_data"]["reported_status"] == "completed"
+    assert result["blockers"][0]["kind"] == "tool_error"
+
+    with session_factory() as session:
+        episode = session.query(ExecutionEpisode).one()
+        assert episode.status == "blocked"
+
+
+def test_scene_context_retries_once_when_model_blocks_on_single_transient_hid_error(tmp_path: Path) -> None:
+    session_factory = _session_factory(tmp_path)
+    hid_calls: list[dict[str, object]] = []
+    provider = ScriptedProvider(
+        provider_name="scene-scripted",
+        responses=[
+            LLMResponse(
+                tool_calls=[
+                    ToolCall(id="snapshot-1", name="browser_snapshot", arguments={"tabId": 1}),
+                    ToolCall(id="hid-1", name="hid_action", arguments={"id": "open-detail"}),
+                ],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(content="已阻塞：E_NOT_FRONTMOST: target app is not frontmost"),
+            LLMResponse(
+                tool_calls=[
+                    ToolCall(id="snapshot-2", name="browser_snapshot", arguments={"tabId": 1}),
+                    ToolCall(id="hid-2", name="hid_action", arguments={"id": "open-detail-retry"}),
+                ],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(content="已恢复并完成详情读取。"),
+        ],
+    )
+
+    def _hid_handler(arguments: dict[str, object]) -> dict[str, object]:
+        hid_calls.append(dict(arguments))
+        if len(hid_calls) == 1:
+            raise RuntimeError("E_NOT_FRONTMOST: target app is not frontmost")
+        return {"ok": True, "events": [{"type": "mouseMoved"}, {"type": "leftMouseUp"}]}
+
+    tools = ToolRegistry()
+    tools.register(
+        ToolDefinition(
+            name="browser_snapshot",
+            description="Capture current browser scene.",
+            parameters={"type": "object", "properties": {"tabId": {"type": "number"}}, "additionalProperties": False},
+            handler=lambda arguments: {
+                "success": True,
+                "snapshot": {
+                    "url": "https://recruit.example.test/jobs",
+                    "title": "Jobs",
+                    "clickables": [{"role": "link", "href": "https://recruit.example.test/jobs/1", "label": "国际销售工程师"}],
+                },
+            },
+            metadata={"capabilities": ["browser", "document"], "external_tool": True, "real_environment": True},
+        )
+    )
+    tools.register(
+        ToolDefinition(
+            name="hid_action",
+            description="Execute HID action.",
+            parameters={"type": "object", "properties": {}, "additionalProperties": True},
+            handler=_hid_handler,
+            metadata={"capabilities": ["scene", "computer", "computer_write"], "external_tool": True, "real_environment": True},
+        )
+    )
+    service = SceneContextService(
+        session_factory=session_factory,
+        provider=provider,
+        tool_registry=tools,
+        plugin_host=PluginHost(),
+    )
+
+    result = service.delegate({"instruction": "进入职位详情。", "preferred_capabilities": ["browser", "computer"]})
+
+    assert result["status"] == "completed"
+    assert result["summary"] == "已恢复并完成详情读取。"
+    assert result["blockers"] == []
+    assert len(hid_calls) == 2
+    assert "不能直接作为当前 scene 的终局 blocker" in provider.captured_requests[2].messages[-1].content
 
 
 def test_scene_context_does_not_parse_final_text_json_as_result_data_or_writeback(tmp_path: Path) -> None:
@@ -751,7 +971,8 @@ def test_scene_context_passes_browser_semantics_into_hid_action(tmp_path: Path) 
                             "id": "click-download",
                             "target": {"tabId": 613},
                             "geometry": {"coordSpace": "viewport", "pageScale": 1},
-                            "options": {"postMode": "auto", "dryRun": True},
+                            "options": {"postMode": "global", "dryRun": True, "behaviorMode": "normal", "profile": {"speed": "caller-owned"}},
+                            "primitives": [{"type": "click", "at": {"x": 1642, "y": 56}, "button": "left", "profile": {"speed": "caller-owned"}}],
                             "x": 1642,
                             "y": 56,
                         },
@@ -776,15 +997,18 @@ def test_scene_context_passes_browser_semantics_into_hid_action(tmp_path: Path) 
                     "viewport": {
                         "innerWidth": 1440,
                         "innerHeight": 900,
+                        "outerWidth": 1510,
+                        "outerHeight": 1120,
                         "scrollX": 0,
                         "scrollY": 128,
-                        "screenX": 100,
-                        "screenY": 80,
+                        "screenX": 1280,
+                        "screenY": -1180,
                         "viewportInScreen": {"x": 112, "y": 144, "width": 1440, "height": 900},
                         "visualViewport": {"scale": 1},
                     },
                 },
                 "tabId": arguments.get("tabId"),
+                "target": {"tabId": arguments.get("tabId"), "windowId": 88, "url": "https://recruit.example.test/candidate/613", "title": "Candidate Detail"},
             },
             metadata={"capabilities": ["browser", "document"], "external_tool": True, "real_environment": True},
         )
@@ -835,10 +1059,16 @@ def test_scene_context_passes_browser_semantics_into_hid_action(tmp_path: Path) 
     assert captured_hid_arguments
     hid_arguments = captured_hid_arguments[0]
     assert hid_arguments["target"]["host"] == "recruit.example.test"
+    assert hid_arguments["target"]["bundleId"] == "com.google.Chrome"
+    assert hid_arguments["target"]["windowId"] == 88
     assert hid_arguments["target"]["windowTitle"] == "Candidate Detail"
+    assert hid_arguments["target"]["browserWindowBounds"] == {"x": 1280, "y": -1180, "width": 1510, "height": 1120}
     assert hid_arguments["context"]["host"] == "recruit.example.test"
     assert hid_arguments["context"]["url"] == "https://recruit.example.test/candidate/613"
     assert hid_arguments["primitives"] == [{"type": "click", "at": {"x": 1642, "y": 56}, "button": "left"}]
+    assert "behaviorMode" not in hid_arguments["options"]
+    assert "profile" not in hid_arguments["options"]
+    assert hid_arguments["options"]["postMode"] == "auto"
     assert "viewportInScreen" not in hid_arguments["geometry"]
     assert hid_arguments["geometry"]["scrollOffset"] == {"x": 0, "y": 128}
     assert hid_arguments["geometry"]["viewportSize"] == {"x": 0, "y": 0, "width": 1440, "height": 900}
@@ -851,6 +1081,436 @@ def test_scene_context_passes_browser_semantics_into_hid_action(tmp_path: Path) 
             and item["payload"]["tool_name"] == "hid_action"
             for item in episode.actions
         )
+
+
+def test_scene_context_adds_viewport_geometry_to_keyboard_hid_action(tmp_path: Path) -> None:
+    session_factory = _session_factory(tmp_path)
+    captured_hid_arguments: list[dict[str, object]] = []
+    provider = ScriptedProvider(
+        provider_name="scene-scripted",
+        responses=[
+            LLMResponse(
+                tool_calls=[
+                    ToolCall(id="snapshot", name="browser_snapshot", arguments={"tabId": 613}),
+                    ToolCall(
+                        id="open-detail",
+                        name="hid_action",
+                        arguments={
+                            "id": "open-jd-detail",
+                            "target": {"tabId": 613, "windowId": 88, "windowTitle": "职位列表 · Recruiting Workspace"},
+                            "primitives": [
+                                {"type": "key", "keyCode": 37, "modifiers": ["cmd"]},
+                                {"type": "pasteText", "text": "https://recruit.example.test/jobs/jd-2", "restoreClipboard": True},
+                                {"type": "key", "keyCode": 36},
+                            ],
+                        },
+                    ),
+                ],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(content="已完成键盘导航。"),
+        ],
+    )
+    tools = ToolRegistry()
+    tools.register(
+        ToolDefinition(
+            name="browser_snapshot",
+            description="Capture current browser scene.",
+            parameters={"type": "object", "properties": {"tabId": {"type": "number"}}, "additionalProperties": True},
+            handler=lambda arguments: {
+                "success": True,
+                "snapshot": {
+                    "url": "https://recruit.example.test/jobs",
+                    "title": "职位列表 · Recruiting Workspace",
+                    "viewport": {
+                        "innerWidth": 1526,
+                        "innerHeight": 1039,
+                        "scrollX": 0,
+                        "scrollY": 0,
+                        "visualViewport": {"scale": 1},
+                    },
+                },
+                "tabId": arguments.get("tabId"),
+                "target": {
+                    "tabId": arguments.get("tabId"),
+                    "windowId": 88,
+                    "url": "https://recruit.example.test/jobs",
+                    "title": "职位列表 · Recruiting Workspace",
+                },
+            },
+            metadata={"capabilities": ["browser", "document"], "external_tool": True, "real_environment": True},
+        )
+    )
+    tools.register(
+        ToolDefinition(
+            name="hid_action",
+            description="Execute HID action.",
+            parameters={"type": "object", "properties": {}, "additionalProperties": True},
+            handler=lambda arguments: captured_hid_arguments.append(dict(arguments)) or {"ok": True},
+            metadata={"capabilities": ["scene", "computer", "computer_write"], "external_tool": True, "real_environment": True},
+        )
+    )
+
+    service = SceneContextService(
+        session_factory=session_factory,
+        provider=provider,
+        tool_registry=tools,
+        plugin_host=PluginHost(),
+    )
+
+    result = service.delegate(
+        {
+            "title": "键盘打开 JD 详情",
+            "instruction": "使用地址栏打开同源 JD 详情。",
+            "preferred_capabilities": ["browser", "computer"],
+            "browser_target": {"url": "https://recruit.example.test/jobs", "tabId": 613},
+        }
+    )
+
+    assert result["status"] == "completed"
+    assert captured_hid_arguments
+    hid_arguments = captured_hid_arguments[0]
+    assert hid_arguments["target"]["bundleId"] == "com.google.Chrome"
+    assert hid_arguments["target"]["host"] == "recruit.example.test"
+    assert hid_arguments["geometry"]["viewportSize"] == {"x": 0, "y": 0, "width": 1526, "height": 1039}
+    assert hid_arguments["geometry"]["scrollOffset"] == {"x": 0, "y": 0}
+
+
+def test_scene_context_coerces_hid_host_to_full_scene_origin_when_port_is_missing(tmp_path: Path) -> None:
+    session_factory = _session_factory(tmp_path)
+    captured_hid_arguments: list[dict[str, object]] = []
+    provider = ScriptedProvider(
+        provider_name="scene-scripted",
+        responses=[
+            LLMResponse(
+                tool_calls=[
+                    ToolCall(id="tabs", name="browser_list_tabs", arguments={}),
+                    ToolCall(id="observe", name="browser_snapshot", arguments={"tabId": 99}),
+                    ToolCall(
+                        id="click",
+                        name="hid_action",
+                        arguments={
+                            "target": {"host": "127.0.0.1", "tabId": 99, "windowTitle": "职位列表 · Recruiting Workspace"},
+                            "context": {"host": "127.0.0.1"},
+                            "geometry": {"coordSpace": "viewport", "pageScale": 1},
+                            "primitives": [{"type": "click", "at": {"x": 420, "y": 360}, "button": "left"}],
+                        },
+                    ),
+                ],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(content="已进入详情。"),
+        ],
+    )
+    tools = ToolRegistry()
+    tools.register(
+        ToolDefinition(
+            name="browser_list_tabs",
+            description="List tabs.",
+            parameters={"type": "object", "properties": {}, "additionalProperties": True},
+            handler=lambda arguments: {
+                "success": True,
+                "tabs": [
+                    {
+                        "id": 99,
+                        "tabId": 99,
+                        "windowId": 1136766964,
+                        "url": "http://127.0.0.1:50149/jobs",
+                        "title": "职位列表 · Recruiting Workspace",
+                        "active": True,
+                    }
+                ],
+            },
+            metadata={"capabilities": ["browser", "document"], "external_tool": True, "real_environment": True},
+        )
+    )
+    tools.register(
+        ToolDefinition(
+            name="browser_snapshot",
+            description="Snapshot.",
+            parameters={"type": "object", "properties": {}, "additionalProperties": True},
+            handler=lambda arguments: {
+                "success": True,
+                "snapshot": {"url": "http://127.0.0.1:50149/jobs", "title": "职位列表 · Recruiting Workspace"},
+                "tabId": arguments.get("tabId"),
+                "target": {
+                    "tabId": arguments.get("tabId"),
+                    "windowId": 1136766964,
+                    "url": "http://127.0.0.1:50149/jobs",
+                    "title": "职位列表 · Recruiting Workspace",
+                },
+            },
+            metadata={"capabilities": ["browser", "document"], "external_tool": True, "real_environment": True},
+        )
+    )
+    tools.register(
+        ToolDefinition(
+            name="hid_action",
+            description="HID action.",
+            parameters={"type": "object", "properties": {}, "additionalProperties": True},
+            handler=lambda arguments: captured_hid_arguments.append(dict(arguments)) or {"success": True},
+            metadata={"capabilities": ["scene", "computer", "computer_write"], "external_tool": True, "real_environment": True},
+        )
+    )
+    service = SceneContextService(
+        session_factory=session_factory,
+        provider=provider,
+        tool_registry=tools,
+        plugin_host=PluginHost(),
+    )
+
+    result = service.delegate(
+        {
+            "title": "进入 JD 详情",
+            "instruction": "进入首个职位详情。",
+            "preferred_capabilities": ["browser", "computer"],
+            "browser_target": {"url": "http://127.0.0.1:50149/", "host": "127.0.0.1:50149"},
+        }
+    )
+
+    assert result["status"] == "completed"
+    assert captured_hid_arguments
+    hid_arguments = captured_hid_arguments[0]
+    assert hid_arguments["target"]["host"] == "127.0.0.1:50149"
+    assert hid_arguments["context"]["host"] == "127.0.0.1:50149"
+    assert hid_arguments["target"]["windowId"] == 1136766964
+
+
+def test_scene_context_retries_blocked_browser_only_turn_with_hid_action(tmp_path: Path) -> None:
+    session_factory = _session_factory(tmp_path)
+    captured_hid_arguments: list[dict[str, object]] = []
+    provider = ScriptedProvider(
+        provider_name="scene-scripted",
+        responses=[
+            LLMResponse(
+                tool_calls=[
+                    ToolCall(id="tabs", name="browser_list_tabs", arguments={}),
+                    ToolCall(id="snapshot", name="browser_snapshot", arguments={"tabId": 1}),
+                ],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(content='{"status":"blocked","summary":"需要进入详情，但当前只看到列表。"}'),
+            LLMResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="hid",
+                        name="hid_action",
+                        arguments={
+                            "id": "click-detail",
+                            "target": {"tabId": 1},
+                            "geometry": {"coordSpace": "viewport"},
+                            "primitives": [{"type": "click", "at": {"x": 420, "y": 260}, "button": "left"}],
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(content='{"status":"completed","summary":"已尝试 HID 并完成后续观察。"}'),
+        ],
+    )
+    tools = ToolRegistry()
+    tools.register(
+        ToolDefinition(
+            name="browser_list_tabs",
+            description="List browser tabs.",
+            parameters={"type": "object", "properties": {}, "additionalProperties": False},
+            handler=lambda arguments: {
+                "success": True,
+                "tabs": [{"tabId": 1, "windowId": 88, "url": "https://recruit.example.test/jobs", "title": "Jobs", "active": True}],
+            },
+            metadata={"capabilities": ["browser", "document"], "external_tool": True, "real_environment": True},
+        )
+    )
+    tools.register(
+        ToolDefinition(
+            name="browser_snapshot",
+            description="Capture current browser scene.",
+            parameters={"type": "object", "properties": {"tabId": {"type": "number"}}, "additionalProperties": False},
+            handler=lambda arguments: {
+                "success": True,
+                "snapshot": {
+                    "url": "https://recruit.example.test/jobs",
+                    "title": "Jobs",
+                    "viewport": {"scrollX": 0, "scrollY": 0, "innerWidth": 1200, "innerHeight": 800},
+                    "clickables": [
+                        {
+                            "ref": "@detail",
+                            "tag": "a",
+                            "role": "link",
+                            "text": "查看职位详情",
+                            "href": "https://recruit.example.test/jobs/1",
+                            "disabled": False,
+                            "inViewport": True,
+                            "clickPoint": {"viewport": {"x": 420, "y": 260}},
+                        }
+                    ],
+                },
+                "tabId": arguments.get("tabId"),
+                "target": {"tabId": arguments.get("tabId"), "windowId": 88, "url": "https://recruit.example.test/jobs", "title": "Jobs"},
+            },
+            metadata={"capabilities": ["browser", "document"], "external_tool": True, "real_environment": True},
+        )
+    )
+    tools.register(
+        ToolDefinition(
+            name="hid_action",
+            description="Execute HID action.",
+            parameters={"type": "object", "properties": {}, "additionalProperties": True},
+            handler=lambda arguments: captured_hid_arguments.append(dict(arguments)) or {"ok": True},
+            metadata={"capabilities": ["scene", "computer", "computer_write"], "external_tool": True, "real_environment": True},
+        )
+    )
+
+    service = SceneContextService(
+        session_factory=session_factory,
+        provider=provider,
+        tool_registry=tools,
+        plugin_host=PluginHost(),
+    )
+
+    result = service.delegate(
+        {
+            "title": "进入详情",
+            "instruction": "进入职位详情并读取内容。",
+            "preferred_capabilities": ["browser", "computer"],
+            "browser_target": {"url": "https://recruit.example.test/jobs"},
+        }
+    )
+
+    assert result["status"] == "completed"
+    assert captured_hid_arguments
+    assert captured_hid_arguments[0]["target"]["host"] == "recruit.example.test"
+
+
+def test_scene_context_retries_when_transient_hid_error_is_recovered(tmp_path: Path) -> None:
+    session_factory = _session_factory(tmp_path)
+    hid_calls: list[dict[str, object]] = []
+
+    provider = ScriptedProvider(
+        provider_name="scene-scripted",
+        responses=[
+            LLMResponse(
+                tool_calls=[
+                    ToolCall(id="tabs", name="browser_list_tabs", arguments={}),
+                    ToolCall(id="initial-snapshot", name="browser_snapshot", arguments={"tabId": 1}),
+                    ToolCall(
+                        id="hid-timeout",
+                        name="hid_action",
+                        arguments={
+                            "id": "open-detail",
+                            "target": {"host": "recruit.example.test", "tabId": 1, "windowId": 88},
+                            "geometry": {"coordSpace": "viewport"},
+                            "primitives": [{"type": "click", "at": {"x": 420, "y": 260}, "button": "left"}],
+                            "options": {"timeoutMs": 10_000},
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="hid-retry",
+                        name="hid_action",
+                        arguments={
+                            "id": "open-detail-retry",
+                            "target": {"host": "recruit.example.test", "tabId": 1, "windowId": 88},
+                            "geometry": {"coordSpace": "viewport"},
+                            "primitives": [{"type": "click", "at": {"x": 420, "y": 260}, "button": "left"}],
+                            "options": {"timeoutMs": 20_000},
+                        },
+                    ),
+                    ToolCall(id="snapshot", name="browser_snapshot", arguments={"tabId": 1}),
+                ],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(content="已阻塞：E_TIMEOUT: injector action exceeded timeoutMs=10000"),
+            LLMResponse(content="已根据恢复后的详情页观察继续完成。"),
+        ],
+    )
+
+    def _hid_handler(arguments: dict[str, object]) -> dict[str, object]:
+        hid_calls.append(dict(arguments))
+        if len(hid_calls) == 1:
+            raise RuntimeError("E_TIMEOUT: injector action exceeded timeoutMs=10000")
+        return {"ok": True, "events": [{"type": "mouseMoved"}, {"type": "leftMouseUp"}]}
+
+    tools = ToolRegistry()
+    tools.register(
+        ToolDefinition(
+            name="browser_list_tabs",
+            description="List browser tabs.",
+            parameters={"type": "object", "properties": {}, "additionalProperties": False},
+            handler=lambda arguments: {
+                "success": True,
+                "tabs": [
+                    {
+                        "tabId": 1,
+                        "windowId": 88,
+                        "url": "https://recruit.example.test/jobs",
+                        "title": "Jobs",
+                        "active": True,
+                    }
+                ],
+            },
+            metadata={"capabilities": ["browser", "document"], "external_tool": True, "real_environment": True},
+        )
+    )
+    tools.register(
+        ToolDefinition(
+            name="hid_action",
+            description="Execute HID action.",
+            parameters={"type": "object", "properties": {}, "additionalProperties": True},
+            handler=_hid_handler,
+            metadata={"capabilities": ["scene", "computer", "computer_write"], "external_tool": True, "real_environment": True},
+        )
+    )
+    tools.register(
+        ToolDefinition(
+            name="browser_snapshot",
+            description="Capture current browser scene.",
+            parameters={"type": "object", "properties": {"tabId": {"type": "number"}}, "additionalProperties": False},
+            handler=lambda arguments: {
+                "success": True,
+                "snapshot": {
+                    "url": "https://recruit.example.test/jobs/1",
+                    "title": "JD Detail",
+                    "viewport": {"scrollX": 0, "scrollY": 0, "innerWidth": 1200, "innerHeight": 800},
+                    "text": "职位详情\\n国际销售工程师\\n岗位说明完整",
+                    "clickables": [],
+                },
+                "tabId": arguments.get("tabId"),
+                "target": {"tabId": arguments.get("tabId"), "windowId": 88, "url": "https://recruit.example.test/jobs/1", "title": "JD Detail"},
+            },
+            metadata={"capabilities": ["browser", "document"], "external_tool": True, "real_environment": True},
+        )
+    )
+
+    service = SceneContextService(
+        session_factory=session_factory,
+        provider=provider,
+        tool_registry=tools,
+        plugin_host=PluginHost(),
+    )
+
+    result = service.delegate(
+        {
+            "title": "进入详情",
+            "instruction": "进入职位详情并读取内容。",
+            "preferred_capabilities": ["browser", "computer"],
+            "browser_target": {"url": "https://recruit.example.test/jobs"},
+        }
+    )
+
+    assert result["status"] == "completed"
+    assert result["summary"] == "已根据恢复后的详情页观察继续完成。"
+    assert result["blockers"] == []
+    assert len(hid_calls) == 2
+
+    with session_factory() as session:
+        episode = session.query(ExecutionEpisode).one()
+        assert episode.status == "completed"
+        assert episode.last_error is None
 
 
 def test_scene_context_does_not_inherit_window_title_from_different_host(tmp_path: Path) -> None:

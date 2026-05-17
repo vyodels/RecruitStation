@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from recruit_station.agent_runtime.engine import InteractionEngine, InteractionEngineConfig, transcript_from_checkpoint
+from recruit_station.agent_runtime.engine import InteractionEngine, InteractionEngineConfig, ProviderRetryPolicy, transcript_from_checkpoint
+from recruit_station.agent_runtime.providers import ProviderError
 from recruit_station.agent_runtime.tools import FunctionToolHandler
 from recruit_station.agent_runtime.transcript import InMemoryTranscript
 from recruit_station.agent_runtime.types import (
+    InteractionOutput,
     LLMInvocationResult,
     LLMMessage,
     LLMRequest,
@@ -22,13 +24,28 @@ from recruit_station.agent_runtime.types import (
 
 @dataclass(slots=True)
 class FixtureLLMProvider:
-    responses: list[LLMResponse]
+    responses: list[LLMResponse | Exception]
     provider_name: str = "test"
     captured_requests: list[LLMRequest] = field(default_factory=list)
 
     def invoke(self, request: LLMRequest) -> LLMInvocationResult:
         self.captured_requests.append(request)
-        return LLMInvocationResult(events=[], response=self.responses.pop(0))
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return LLMInvocationResult(events=[], response=response)
+
+
+def _collect_outputs_until_error(engine: InteractionEngine, message: str) -> list[InteractionOutput]:
+    outputs: list[InteractionOutput] = []
+    iterator = engine.submitMessage(message)
+    while True:
+        try:
+            outputs.append(next(iterator))
+        except StopIteration:
+            return outputs
+        except ProviderError:
+            return outputs
 
 
 def test_submit_message_completes_with_assistant_output() -> None:
@@ -50,6 +67,92 @@ def test_submit_message_completes_with_assistant_output() -> None:
     assert [item.type for item in outputs if item.type.startswith("turn_")] == ["turn_started", "turn_completed"]
     assert any(item.type == "assistant_message_completed" and item.data["message"] == "hello" for item in outputs)
     assert provider.captured_requests[0].messages[-1].content == "hi"
+
+
+def test_provider_retryable_error_retries_before_turn_failure() -> None:
+    provider = FixtureLLMProvider(
+        responses=[
+            ProviderError("HTTP 500 calling provider", status_code=500, error_kind="provider_http_error", retryable=True),
+            LLMResponse(
+                id="resp-1",
+                request_id="",
+                invocation_id="",
+                assistant_message=LLMMessage(role="assistant", content="recovered"),
+                usage=TokenUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            ),
+        ]
+    )
+    engine = InteractionEngine(
+        InteractionEngineConfig(
+            conversation_id="conv-retry",
+            provider=provider,
+            provider_retry_policy=ProviderRetryPolicy(max_attempts=2, base_delay_seconds=0, max_delay_seconds=0),
+        )
+    )
+
+    outputs = list(engine.submitMessage("retry once"))
+
+    assert len(provider.captured_requests) == 2
+    assert any(item.type == "runtime_event" and item.data["kind"] == "provider_retry_scheduled" for item in outputs)
+    assert any(item.type == "assistant_message_completed" and item.data["message"] == "recovered" for item in outputs)
+    assert not any(item.type == "turn_failed" for item in outputs)
+
+
+def test_provider_non_retryable_error_fails_without_retry() -> None:
+    provider = FixtureLLMProvider(
+        responses=[
+            ProviderError("HTTP 401 calling provider", status_code=401, error_kind="provider_http_error", retryable=False),
+        ]
+    )
+    engine = InteractionEngine(
+        InteractionEngineConfig(
+            conversation_id="conv-nonretry",
+            provider=provider,
+            provider_retry_policy=ProviderRetryPolicy(max_attempts=3, base_delay_seconds=0, max_delay_seconds=0),
+        )
+    )
+
+    outputs = _collect_outputs_until_error(engine, "fail")
+
+    assert len(provider.captured_requests) == 1
+    assert any(
+        item.type == "runtime_event" and item.data["kind"] == "provider_error_terminal"  # type: ignore[attr-defined]
+        for item in outputs
+    )
+    failed = next(item for item in outputs if item.type == "turn_failed")  # type: ignore[attr-defined]
+    assert failed.data["status_code"] == 401  # type: ignore[attr-defined]
+    assert failed.data["retryable"] is False  # type: ignore[attr-defined]
+
+
+def test_provider_retry_exhaustion_fails_after_max_attempts() -> None:
+    provider = FixtureLLMProvider(
+        responses=[
+            ProviderError("HTTP 500 calling provider", status_code=500, error_kind="provider_http_error", retryable=True),
+            ProviderError("HTTP 500 calling provider", status_code=500, error_kind="provider_http_error", retryable=True),
+        ]
+    )
+    engine = InteractionEngine(
+        InteractionEngineConfig(
+            conversation_id="conv-exhaust",
+            provider=provider,
+            provider_retry_policy=ProviderRetryPolicy(max_attempts=2, base_delay_seconds=0, max_delay_seconds=0),
+        )
+    )
+
+    outputs = _collect_outputs_until_error(engine, "fail after retry")
+
+    assert len(provider.captured_requests) == 2
+    assert any(
+        item.type == "runtime_event" and item.data["kind"] == "provider_retry_scheduled"  # type: ignore[attr-defined]
+        for item in outputs
+    )
+    assert any(
+        item.type == "runtime_event" and item.data["kind"] == "provider_retry_exhausted"  # type: ignore[attr-defined]
+        for item in outputs
+    )
+    failed = next(item for item in outputs if item.type == "turn_failed")  # type: ignore[attr-defined]
+    assert failed.data["status_code"] == 500  # type: ignore[attr-defined]
+    assert failed.data["retryable"] is True  # type: ignore[attr-defined]
 
 
 def test_pre_start_interrupt_is_preserved() -> None:

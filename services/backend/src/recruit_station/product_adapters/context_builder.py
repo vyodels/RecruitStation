@@ -115,6 +115,7 @@ def build_assistant_turn_context(
 
 def build_autonomous_turn_context(
     *,
+    agent_kind: str = "autonomous",
     title: str | None,
     instruction: str,
     agent_name: str = "Autonomous",
@@ -140,7 +141,7 @@ def build_autonomous_turn_context(
         "mcp_resource_contexts": list(mcp_resource_contexts or []),
     }
     return build_agent_turn_context(
-        agent_kind="autonomous",
+        agent_kind=agent_kind,
         agent_name=agent_name,
         system_prompt=system_prompt,
         title=title,
@@ -199,6 +200,8 @@ def build_scene_turn_context(
         [
             "You are executing an isolated scene context for RecruitStation.",
             "Use only scene tools and return a business-level summary. Avoid DOM, tab, click path, or raw environment details unless they are required blocker evidence.",
+            f"Available scene tools: {', '.join(available_tools) if available_tools else '(none)'}",
+            f"Available MCP capabilities: {', '.join(available_mcps) if available_mcps else '(none)'}",
             f"Context: {_compact_value(payload)}",
         ]
     )
@@ -245,6 +248,18 @@ def _agent_system_prompt(
     ]
     if instruction:
         lines.append(f"Instruction: {instruction}")
+    available_tools = context_payload.get("available_tools")
+    if isinstance(available_tools, list):
+        lines.append(
+            "Available runtime tools: "
+            + (", ".join(str(item) for item in available_tools if str(item).strip()) or "(none)")
+        )
+    available_mcps = context_payload.get("available_mcps")
+    if isinstance(available_mcps, list):
+        lines.append(
+            "Available MCP capabilities: "
+            + (", ".join(str(item) for item in available_mcps if str(item).strip()) or "(none)")
+        )
     browser_target_policy = _browser_target_policy(context_payload)
     if browser_target_policy:
         lines.append(browser_target_policy)
@@ -262,7 +277,11 @@ def _browser_target_policy(context_payload: dict[str, Any]) -> str | None:
         "Do not treat context_hints.active_tab_url as current browser evidence unless a browser tool confirms it in this turn. "
         "Browser availability must be checked with browser tools such as browser_get_active_tab, browser_list_tabs, or browser_snapshot; "
         "do not use MCP resource tools like list_mcp_resources for browser capability probing. "
+        "If direct browser/HID tools are not exposed in this parent turn but delegate_scene_context is available, "
+        "delegate_scene_context is the browser/HID execution gateway; call it with the browser_target and preferred_capabilities ['browser', 'computer'] instead of reporting missing direct browser/HID tools. "
         "Same-origin paths may change during the workflow; navigate or select a same-origin target when available. "
+        "If a scene returns partial progress with blockers or limitations, do not treat that as a successful terminal result; continue with a recovery plan or return a clear blocked state. "
+        "Recoverable browser/HID failures should be handled by re-observing, waiting for stability, releasing stuck modifier state, choosing an alternate same-origin affordance, or using HID to open an observed same-origin link. "
         "If the active tab is a different origin and no available tool can move to the target origin, report an origin blocker."
     )
 

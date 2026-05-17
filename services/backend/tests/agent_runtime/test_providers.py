@@ -1,7 +1,102 @@
 from __future__ import annotations
 
-from recruit_station.agent_runtime.providers import AnthropicProvider, OpenAIProvider, ProviderConfig
+from io import BytesIO
+from urllib.error import HTTPError, URLError
+
+import pytest
+
+from recruit_station.agent_runtime.providers import AnthropicProvider, OpenAIProvider, ProviderConfig, ProviderError, _post_json
 from recruit_station.agent_runtime.types import LLMMessage, LLMRequest, ToolSchema, ToolUse
+
+
+def test_post_json_maps_retryable_http_errors(monkeypatch) -> None:
+    def raise_http_error(*args, **kwargs):
+        raise HTTPError(
+            url="https://api.test/v1/responses",
+            code=500,
+            msg="server error",
+            hdrs={},
+            fp=BytesIO(b'{"error":{"message":"temporary outage"}}'),
+        )
+
+    monkeypatch.setattr("recruit_station.agent_runtime.providers._open_url", raise_http_error)
+
+    with pytest.raises(ProviderError) as raised:
+        _post_json("https://api.test/v1/responses", {}, headers={}, timeout_seconds=1)
+
+    assert raised.value.status_code == 500
+    assert raised.value.error_kind == "provider_http_error"
+    assert raised.value.retryable is True
+
+
+def test_post_json_maps_terminal_http_errors(monkeypatch) -> None:
+    def raise_http_error(*args, **kwargs):
+        raise HTTPError(
+            url="https://api.test/v1/responses",
+            code=401,
+            msg="unauthorized",
+            hdrs={},
+            fp=BytesIO(b"unauthorized"),
+        )
+
+    monkeypatch.setattr("recruit_station.agent_runtime.providers._open_url", raise_http_error)
+
+    with pytest.raises(ProviderError) as raised:
+        _post_json("https://api.test/v1/responses", {}, headers={}, timeout_seconds=1)
+
+    assert raised.value.status_code == 401
+    assert raised.value.error_kind == "provider_http_error"
+    assert raised.value.retryable is False
+
+
+def test_post_json_maps_transport_error_as_retryable(monkeypatch) -> None:
+    def raise_url_error(*args, **kwargs):
+        raise URLError("connection reset")
+
+    monkeypatch.setattr("recruit_station.agent_runtime.providers._open_url", raise_url_error)
+
+    with pytest.raises(ProviderError) as raised:
+        _post_json("https://api.test/v1/responses", {}, headers={}, timeout_seconds=1)
+
+    assert raised.value.error_kind == "provider_transport_error"
+    assert raised.value.retryable is True
+
+
+def test_post_json_maps_stream_unexpected_eof_as_retryable_transport_error(monkeypatch) -> None:
+    class BrokenSSEResponse:
+        headers = {"Content-Type": "text/event-stream"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def readline(self):
+            raise RuntimeError("unexpected EOF")
+
+    monkeypatch.setattr("recruit_station.agent_runtime.providers._open_url", lambda *args, **kwargs: BrokenSSEResponse())
+
+    with pytest.raises(ProviderError) as raised:
+        _post_json("https://api.test/v1/responses", {}, headers={}, timeout_seconds=1)
+
+    assert raised.value.error_kind == "provider_transport_error"
+    assert raised.value.retryable is True
+
+
+def test_openai_stream_transient_failure_event_is_retryable() -> None:
+    provider = OpenAIProvider(
+        ProviderConfig(provider_name="openai", model="gpt", base_url="https://api.openai.com/v1", api_key="key"),
+        transport=lambda *args, **kwargs: [
+            {"type": "response.failed", "error": {"message": "Post https://api.test/responses: unexpected EOF"}}
+        ],
+    )
+
+    with pytest.raises(ProviderError) as raised:
+        provider.invoke(_request())
+
+    assert raised.value.error_kind == "provider_stream_error"
+    assert raised.value.retryable is True
 
 
 def test_openai_responses_stream_maps_text_tool_and_usage() -> None:

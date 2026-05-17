@@ -3,10 +3,12 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from itertools import count
+import time
 from typing import Iterator
 from uuid import uuid4
 
 from .history import ConversationHistory
+from .providers import ProviderError
 from .tools import ToolRegistry
 from .transcript import InMemoryTranscript, Transcript, TranscriptState
 from .types import (
@@ -21,6 +23,21 @@ from .types import (
     ToolUse,
     TurnContext,
 )
+
+
+@dataclass(slots=True)
+class ProviderRetryPolicy:
+    max_attempts: int = 3
+    base_delay_seconds: float = 0.5
+    max_delay_seconds: float = 4.0
+    multiplier: float = 2.0
+
+    def next_delay(self, attempt: int, *, retry_after_seconds: float | None = None) -> float:
+        if retry_after_seconds is not None:
+            return min(max(retry_after_seconds, 0.0), self.max_delay_seconds)
+        bounded_attempt = max(attempt - 1, 0)
+        delay = self.base_delay_seconds * (self.multiplier ** bounded_attempt)
+        return min(delay, self.max_delay_seconds)
 
 
 @dataclass(slots=True)
@@ -50,6 +67,7 @@ class InteractionEngineConfig:
     max_llm_invocations: int = 12
     max_history_messages: int | None = None
     compaction_summary_max_chars: int = 2000
+    provider_retry_policy: ProviderRetryPolicy | None = field(default_factory=ProviderRetryPolicy)
     initial_seq: int = 1
     runtime: dict[str, object] = field(default_factory=dict)
     pending_user_input_after_next_tool_call_provider: Callable[
@@ -110,7 +128,7 @@ class InteractionEngine:
             yield self._output("turn_started", turn_id, {})
             yield from self._run_turn(turn_id)
         except Exception as exc:
-            yield self._output("turn_failed", turn_id, {"error": str(exc)})
+            yield self._output("turn_failed", turn_id, _turn_failed_payload(exc))
             raise
         finally:
             self.active_turn_id = None
@@ -168,7 +186,7 @@ class InteractionEngine:
                     return
             yield from self._run_turn(pending.turn_id, start_invocation_index=pending.next_invocation_index)
         except Exception as exc:
-            yield self._output("turn_failed", pending.turn_id, {"error": str(exc)})
+            yield self._output("turn_failed", pending.turn_id, _turn_failed_payload(exc))
             raise
         finally:
             self.active_turn_id = None
@@ -230,7 +248,7 @@ class InteractionEngine:
             if self._abort_requested():
                 yield self._interrupted_output(turn_id)
                 return
-            result = self.config.provider.invoke(request)
+            result = yield from self._invoke_provider_with_retry(turn_id, invocation_id, invocation_index, request)
             if self._abort_requested():
                 yield self._interrupted_output(turn_id)
                 return
@@ -329,6 +347,55 @@ class InteractionEngine:
                     yield self._interrupted_output(turn_id)
                     return
         yield self._output("turn_failed", turn_id, {"error": "max_llm_invocations_exhausted"})
+
+    def _invoke_provider_with_retry(
+        self,
+        turn_id: str,
+        invocation_id: str,
+        invocation_index: int,
+        request: LLMRequest,
+    ) -> Iterator[InteractionOutput | LLMInvocationResult]:
+        policy = self.config.provider_retry_policy
+        max_attempts = max(int(policy.max_attempts), 1) if policy is not None else 1
+        attempt = 1
+        while True:
+            try:
+                return self.config.provider.invoke(request)
+            except ProviderError as exc:
+                if self._abort_requested():
+                    raise
+                if not exc.retryable or attempt >= max_attempts:
+                    yield self._output(
+                        "runtime_event",
+                        turn_id,
+                        {
+                            "kind": "provider_retry_exhausted" if exc.retryable else "provider_error_terminal",
+                            "invocation_id": invocation_id,
+                            "invocation_index": invocation_index,
+                            "attempt": attempt,
+                            "max_attempts": max_attempts,
+                            **_provider_error_payload(exc),
+                        },
+                    )
+                    raise
+                delay = policy.next_delay(attempt, retry_after_seconds=exc.retry_after_seconds) if policy is not None else 0.0
+                yield self._output(
+                    "runtime_event",
+                    turn_id,
+                    {
+                        "kind": "provider_retry_scheduled",
+                        "invocation_id": invocation_id,
+                        "invocation_index": invocation_index,
+                        "attempt": attempt,
+                        "next_attempt": attempt + 1,
+                        "max_attempts": max_attempts,
+                        "delay_seconds": delay,
+                        **_provider_error_payload(exc),
+                    },
+                )
+                if delay > 0:
+                    time.sleep(delay)
+                attempt += 1
 
     def _compact_history_if_needed(self) -> dict[str, object] | None:
         max_messages = self.config.max_history_messages
@@ -673,6 +740,25 @@ def _message_from_payload(payload: dict[str, object]) -> LLMMessage:
         ],
         metadata=dict(payload.get("metadata") or {}),
     )
+
+
+def _provider_error_payload(exc: ProviderError) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "error": str(exc),
+        "error_kind": exc.error_kind,
+        "retryable": exc.retryable,
+    }
+    if exc.status_code is not None:
+        payload["status_code"] = exc.status_code
+    if exc.retry_after_seconds is not None:
+        payload["retry_after_seconds"] = exc.retry_after_seconds
+    return payload
+
+
+def _turn_failed_payload(exc: Exception) -> dict[str, object]:
+    if isinstance(exc, ProviderError):
+        return _provider_error_payload(exc)
+    return {"error": str(exc)}
 
 
 def _positive_int(value: object, *, default: int) -> int:

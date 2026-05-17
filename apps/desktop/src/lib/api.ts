@@ -256,9 +256,9 @@ export interface DesktopApiClient {
   ): Promise<void>;
   clearAgentConversation(kind: AgentKind, conversationId: string): Promise<AgentConversationRecord>;
   cancelAutonomousRun(runId: string, reason?: string): Promise<AgentRunRecord>;
-  resumeAutonomousRun(runId: string, reason?: string): Promise<AgentRunRecord>;
+  resumeAutonomousRun(runId: string, reason?: string, message?: string): Promise<AgentRunRecord>;
   cancelAgentRun(kind: AgentKind, runId: string, reason?: string): Promise<AgentRunRecord>;
-  resumeAgentRun(kind: AgentKind, runId: string, reason?: string): Promise<AgentRunRecord>;
+  resumeAgentRun(kind: AgentKind, runId: string, reason?: string, message?: string): Promise<AgentRunRecord>;
   createAssistantConversation(payload: { userId: string; title?: string | null }): Promise<AssistantConversationRecord>;
   streamAssistantTurn(
     payload: {
@@ -4005,8 +4005,8 @@ function createFetchClient(baseUrl: string): DesktopApiClient {
     cancelAutonomousRun: async (runId, reason) => {
       return createFetchClient(baseUrl).cancelAgentRun("autonomous", runId, reason);
     },
-    resumeAutonomousRun: async (runId, reason) => {
-      return createFetchClient(baseUrl).resumeAgentRun("autonomous", runId, reason);
+    resumeAutonomousRun: async (runId, reason, message) => {
+      return createFetchClient(baseUrl).resumeAgentRun("autonomous", runId, reason, message);
     },
     cancelAgentRun: async (kind, runId, reason) => {
       const payload = asRecord(
@@ -4017,11 +4017,11 @@ function createFetchClient(baseUrl: string): DesktopApiClient {
       );
       return normalizeAgentRunRecord(payload.run ?? {}, kind);
     },
-    resumeAgentRun: async (kind, runId, reason) => {
+    resumeAgentRun: async (kind, runId, reason, message) => {
       const payload = asRecord(
         await requestJson<unknown>(baseUrl, `/api/agents/${kind}/runs/${encodeURIComponent(runId)}/resume`, {
           method: "POST",
-          body: JSON.stringify({ reviewer: "desktop-user", reason }),
+          body: JSON.stringify({ reviewer: "desktop-user", reason, message }),
         }),
       );
       return normalizeAgentRunRecord(payload.run ?? {}, kind);
