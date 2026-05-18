@@ -895,6 +895,114 @@ def test_browser_hid_runtime_target_identification_and_failed_observations_do_no
     _reset_browser_hid_sequence_state_for_tests()
 
 
+def test_browser_hid_runtime_allows_keyboard_recovery_after_target_identification(tmp_path, monkeypatch) -> None:
+    _reset_browser_hid_sequence_state_for_tests()
+
+    browser_tools = [
+        {
+            "name": "browser_get_active_tab",
+            "description": "Get active tab.",
+            "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+            "annotations": {"readOnlyHint": True},
+        }
+    ]
+    hid_tools = [
+        {
+            "name": "hid_action",
+            "description": "Run HID action.",
+            "inputSchema": {"type": "object", "properties": {}, "additionalProperties": True},
+        }
+    ]
+    tool_calls: list[tuple[str, str, dict[str, Any]]] = []
+
+    def fake_list_tools(server) -> list[dict[str, Any]]:
+        if server.endpoint == "mcp://browser-runtime":
+            return browser_tools
+        if server.endpoint == "mcp://hid-runtime":
+            return hid_tools
+        return []
+
+    def fake_call_tool(server, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        tool_calls.append((server.endpoint, tool_name, dict(arguments)))
+        if tool_name == "browser_get_active_tab":
+            return {
+                "success": True,
+                "target": {
+                    "url": "http://127.0.0.1:50149/jobs/jd-sales-001",
+                    "host": "127.0.0.1:50149",
+                    "tabId": 42,
+                    "windowId": 7,
+                    "title": "职位详情 · Recruiting Workspace",
+                },
+            }
+        return {"success": True, "tool": tool_name}
+
+    monkeypatch.setattr("recruit_station.services.mcp_registry._mcp_list_tools", fake_list_tools)
+    monkeypatch.setattr("recruit_station.services.mcp_registry._mcp_call_tool", fake_call_tool)
+
+    settings = AppSettings(
+        data_dir=str(tmp_path / "data"),
+        database_url=f"sqlite:///{tmp_path / 'mcp-browser-hid-keyboard-recovery.db'}",
+        provider_config={},
+    )
+    container = AppContainer.build(settings)
+    container.mcp_registry.create_server(
+        {
+            "server_key": "browser",
+            "name": "Browser MCP",
+            "transport_kind": "stdio",
+            "protocol": "mcp_jsonrpc",
+            "endpoint": "mcp://browser-runtime",
+            "enabled": True,
+            "auth_config": {},
+            "server_metadata": {"runtime_tool_capabilities": {"default": ["browser"], "read_only": ["document"]}},
+            "tools": [],
+        }
+    )
+    container.mcp_registry.create_server(
+        {
+            "server_key": "virtualhid",
+            "name": "VirtualHID",
+            "transport_kind": "stdio",
+            "protocol": "mcp_jsonrpc",
+            "endpoint": "mcp://hid-runtime",
+            "enabled": True,
+            "auth_config": {},
+            "server_metadata": {"runtime_tool_capabilities": {"default": ["scene"], "mutating": ["computer_write"]}},
+            "tools": [],
+        }
+    )
+
+    keyboard_args = {
+        "target": {"host": "127.0.0.1:50149"},
+        "context": {"host": "127.0.0.1:50149"},
+        "primitives": [
+            {"type": "key", "keyCode": 37, "modifiers": ["cmd"]},
+            {"type": "pasteText", "text": "http://127.0.0.1:50149/jobs", "restoreClipboard": True},
+            {"type": "key", "keyCode": 36},
+        ],
+    }
+
+    with container.session_factory() as session:
+        browser_server = next(item for item in session.query(McpServer).all() if item.server_key == "browser")
+        active_tool = next(item for item in session.query(McpTool).all() if item.server_id == browser_server.id and item.name == "browser_get_active_tab")
+        hid_server = next(item for item in session.query(McpServer).all() if item.server_key == "virtualhid")
+        hid_tool = next(item for item in session.query(McpTool).all() if item.server_id == hid_server.id and item.name == "hid_action")
+
+        container.mcp_registry.invoke_tool(browser_server, active_tool, {})
+        container.mcp_registry.invoke_tool(hid_server, hid_tool, keyboard_args)
+        with pytest.raises(McpBridgeError, match="followed by a browser observation"):
+            container.mcp_registry.invoke_tool(hid_server, hid_tool, keyboard_args)
+
+    assert [call[1] for call in tool_calls] == ["browser_get_active_tab", "hid_action"]
+    hid_arguments = tool_calls[1][2]
+    assert hid_arguments["target"]["tabId"] == 42
+    assert hid_arguments["target"]["windowId"] == 7
+    assert hid_arguments["target"]["windowTitle"] == "职位详情 · Recruiting Workspace"
+
+    _reset_browser_hid_sequence_state_for_tests()
+
+
 def test_mcp_call_tool_preserves_structured_content_on_is_error(monkeypatch) -> None:
     server = McpServer(
         server_key="virtualhid",

@@ -67,7 +67,7 @@ RUNTIME_AGENT_KINDS: tuple[str, ...] = ("autonomous", "jd_sync")
 AUTONOMOUS_PRIMARY_CONVERSATION_ID = "autonomous-primary"
 JD_SYNC_PRIMARY_CONVERSATION_ID = "jd-sync-primary"
 TRANSIENT_PROVIDER_RETRY_MAX_ATTEMPTS = 3
-JD_SYNC_RECOVERABLE_SCENE_RETRY_MAX_ATTEMPTS = 8
+JD_SYNC_RECOVERABLE_SCENE_RETRY_MAX_ATTEMPTS = 16
 
 
 @dataclass(slots=True)
@@ -1244,24 +1244,36 @@ def _jd_sync_scene_result_needs_continuation(value: Any) -> bool:
 
 
 def _jd_sync_text_has_terminal_scene_boundary(text: str) -> bool:
+    normalized = str(text or "").strip().lower()
+    if not normalized:
+        return False
+    if _jd_sync_text_has_negated_terminal_scene_boundary(normalized):
+        return False
+    if re.search(r"(要求|需要|必须|重新|无法|不能|不可|阻塞|blocked|blocker)[^。\n]{0,24}(登录|验证码|账号切换|绕过风控|权限不足)", normalized):
+        return True
+    if re.search(r"(登录|验证码|账号切换|绕过风控|权限不足)[^。\n]{0,24}(要求|需要|必须|重新|无法|不能|不可|阻塞|blocked|blocker)", normalized):
+        return True
     return any(
-        marker in text
+        marker in normalized
         for marker in (
-            "登录",
-            "验证码",
-            "账号切换",
-            "绕过风控",
-            "权限不足",
             "permission_requested",
             "necessary execution tool missing",
             "必要执行工具缺失",
-            "工具未注册",
             "hid_action 缺失",
             "browser-mcp 未注册",
             "virtualhid 未注册",
             "目标站点不可达",
-            "页面不可达",
             "site unreachable",
+        )
+    ) or bool(re.search(r"(页面|目标站点|目标网页)[^。\n]{0,12}(不可达|无法访问|访问失败)", normalized))
+
+
+def _jd_sync_text_has_negated_terminal_scene_boundary(text: str) -> bool:
+    return bool(
+        re.search(
+            r"(没有|未发现|无|并未|不涉及|无需|不需要|不是|尚未出现)[^。\n]{0,18}"
+            r"(登录|验证码|账号切换|绕过风控|权限不足|权限|必要执行工具缺失|工具未注册|目标站点不可达|页面不可达|不可达)",
+            text,
         )
     )
 
@@ -1619,6 +1631,7 @@ def _append_jd_sync_runtime_invariants(prompt: str) -> str:
         "如果 delegate_scene_context 返回部分结果且仍包含 blockers、limitations 或未完成项，应把它当作继续执行信号，"
         "继续调用 scene 完成剩余职位；HID 超时、窗口未置前、光标/按键状态干扰、短暂 daemon 无响应或地址栏恢复失败都是可恢复执行异常，"
         "可恢复异常只能作为下一步恢复策略的输入，不能作为当前 turn 的结束理由；只要目标站点仍可观察且仍有职位未完整读取，就应继续恢复和推进，"
+        "如果已经从列表发现多个职位，但本地写回数量少于发现数量或仍有任一职位缺少详情页证据，应继续打开剩余职位详情，不能输出最终总结；"
         "不得直接作为终局；scene 摘要里出现 pending_confirmation 或 human-only 字样，不等于 JD 同步主任务已经到达终局人工边界，"
         "除非当前运行真实产生 permission_requested 等待人工确认事件。只有登录、验证码、权限、必要执行工具未注册/缺失、目标页面不可达，才可结束为 blocked。"
     )

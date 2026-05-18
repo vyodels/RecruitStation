@@ -759,6 +759,11 @@ def _is_browser_observation_tool(server: McpServer, tool_name: str) -> bool:
     return _is_browser_mcp_tool(server, name) and name in _BROWSER_OBSERVATION_TOOL_NAMES
 
 
+def _is_browser_target_identification_tool(server: McpServer, tool_name: str) -> bool:
+    name = str(tool_name or "").strip()
+    return _is_browser_mcp_tool(server, name) and name in _BROWSER_TARGET_IDENTIFICATION_TOOL_NAMES
+
+
 def _hid_action_targets_browser(arguments: dict[str, Any]) -> bool:
     target = arguments.get("target") if isinstance(arguments.get("target"), dict) else {}
     context = arguments.get("context") if isinstance(arguments.get("context"), dict) else {}
@@ -782,6 +787,19 @@ def _hid_action_has_browser_sequence_primitive(arguments: dict[str, Any]) -> boo
         if str(primitive.get("type") or "").strip() in _HID_BROWSER_SEQUENCE_PRIMITIVE_TYPES:
             return True
     return False
+
+
+def _hid_action_can_use_target_identification(arguments: dict[str, Any]) -> bool:
+    primitives = arguments.get("primitives")
+    if not isinstance(primitives, list) or not primitives:
+        return False
+    allowed = {"key", "pasteText", "type"}
+    for primitive in primitives:
+        if not isinstance(primitive, dict):
+            return False
+        if str(primitive.get("type") or "").strip() not in allowed:
+            return False
+    return True
 
 
 def _is_browser_hid_sequence_action(server: McpServer, tool_name: str, arguments: dict[str, Any]) -> bool:
@@ -1066,6 +1084,7 @@ def _sequence_state_for_scope(scope_key: str) -> dict[str, Any]:
         scope_key,
         {
             "last_browser_observation": None,
+            "last_browser_target_identification": None,
             "last_browser_target_context": None,
             "pending_browser_observation_after_hid": None,
             "audit": [],
@@ -1095,6 +1114,7 @@ def _sequence_audit_summary(scope_key: str) -> dict[str, Any]:
     return {
         "scope": scope_key,
         "last_browser_observation": state.get("last_browser_observation"),
+        "last_browser_target_identification": state.get("last_browser_target_identification"),
         "pending_browser_observation_after_hid": state.get("pending_browser_observation_after_hid"),
         "event_count": len(audit),
         "last_events": audit[-5:],
@@ -1119,6 +1139,9 @@ def _prepare_linear_browser_hid_tool_call(server: McpServer, tool_name: str, arg
             "Call browser_snapshot, browser_wait_for_*, browser_query_elements, or another page observation tool before the next click/type/scroll HID action."
         )
     if state["last_browser_observation"] is None:
+        if _hid_action_can_use_target_identification(arguments) and isinstance(state.get("last_browser_target_context"), dict):
+            _hydrate_browser_hid_target_context(arguments, state)
+            return
         _append_sequence_audit(scope_key, event="hid_blocked", tool_name=tool_name, blocked=True, reason="missing_prior_observation")
         raise McpBridgeError(
             "Browser/HID sequence violation: substantive browser HID actions require a prior browser observation. "
@@ -1163,6 +1186,21 @@ def _browser_observation_result_is_valid(result: Any) -> bool:
 
 def _record_linear_browser_hid_tool_call(server: McpServer, tool_name: str, arguments: dict[str, Any], result: Any) -> None:
     name = str(tool_name or "").strip()
+    if _is_browser_target_identification_tool(server, name):
+        if not _browser_observation_result_is_valid(result):
+            return
+        scope_key = _browser_hid_sequence_scope_key(arguments, result)
+        if scope_key is None:
+            return
+        state = _sequence_state_for_scope(scope_key)
+        observed_context = _result_browser_target_context(result)
+        if observed_context:
+            state["last_browser_target_identification"] = name
+            state["last_browser_target_context"] = observed_context
+            _append_sequence_audit(scope_key, event="browser_target_identified", tool_name=name)
+            if isinstance(result, dict):
+                result.setdefault("sequence_audit", _sequence_audit_summary(scope_key))
+        return
     if _is_browser_observation_tool(server, name):
         if not _browser_observation_result_is_valid(result):
             return
@@ -1171,6 +1209,7 @@ def _record_linear_browser_hid_tool_call(server: McpServer, tool_name: str, argu
             return
         state = _sequence_state_for_scope(scope_key)
         state["last_browser_observation"] = name
+        state["last_browser_target_identification"] = name
         observed_context = _result_browser_target_context(result)
         if observed_context:
             state["last_browser_target_context"] = observed_context

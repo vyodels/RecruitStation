@@ -286,6 +286,53 @@ def test_jd_sync_recoverable_scene_retry_detects_frontmost_blocker_after_repeate
     )
 
 
+def test_jd_sync_recoverable_scene_retry_ignores_negated_hard_blocker_terms() -> None:
+    assert _jd_sync_recoverable_scene_retry_needed(
+        final_output=(
+            "本轮已读取 1 个职位详情，但未完成全量 JD 同步。"
+            "没有登录、验证码、权限或页面不可达问题；当前只是 E_NOT_FRONTMOST，剩余 4 个职位未完成详情读取。"
+        ),
+        tool_results=[
+            {
+                "tool_name": "delegate_scene_context",
+                "output": {
+                    "status": "blocked",
+                    "summary": "没有目标站点不可达问题；HID 点击返回列表 E_TIMEOUT，仍需继续打开剩余职位详情。",
+                    "observed_jobs": ["jd-sales-001", "jd-solution-002", "jd-csm-003", "jd-pm-004", "jd-backend-005"],
+                    "completed_job_details": [{"title": "国际销售工程师"}],
+                    "remaining_work": ["read_remaining_job_details"],
+                },
+            }
+        ],
+        result_data={},
+    )
+
+
+def test_jd_sync_continuation_ignores_negated_unreachable_boundary() -> None:
+    resolver = _final_output_continuation_resolver(agent_kind="jd_sync")
+    assert resolver is not None
+
+    continuation = resolver(
+        "未完成全量 JD 同步。没有登录、验证码、权限或页面不可达问题；只是 E_TIMEOUT，剩余职位未完成详情读取。",
+        [{"tool_name": "delegate_scene_context"}],
+        [
+            {
+                "tool_name": "delegate_scene_context",
+                "output": {
+                    "status": "blocked",
+                    "summary": "没有页面不可达问题；当前 HID 超时，仍需继续。",
+                    "remaining_work": ["read_remaining_job_details"],
+                },
+            }
+        ],
+        0,
+        {},
+    )
+
+    assert continuation is not None
+    assert "继续同一个 turn" in continuation
+
+
 def test_jd_sync_continuation_allows_terminal_login_scene_boundary() -> None:
     resolver = _final_output_continuation_resolver(agent_kind="jd_sync")
     assert resolver is not None
