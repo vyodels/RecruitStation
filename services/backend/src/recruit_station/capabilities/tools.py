@@ -741,6 +741,7 @@ def _jd_sync_scene_output_contract(*, sync_mode: str = "", max_job_descriptions:
     if sync_mode == "single_jd_probe" or max_job_descriptions == 1:
         return _single_jd_probe_scene_output_contract()
     return {
+        "contract_kind": "jd_sync",
         "format": "json",
         "result_data_required": True,
         "status_values": ["completed", "partial", "blocked"],
@@ -772,6 +773,7 @@ def _jd_sync_scene_output_contract(*, sync_mode: str = "", max_job_descriptions:
 
 def _single_jd_probe_scene_output_contract() -> dict[str, Any]:
     return {
+        "contract_kind": "jd_sync",
         "format": "json",
         "result_data_required": True,
         "status_values": ["completed", "partial", "blocked"],

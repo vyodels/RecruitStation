@@ -1523,6 +1523,128 @@ def test_scene_context_normalizes_contract_aliases_without_marking_complete(tmp_
     assert result["result_data"]["evidence"] == ["已完成 1 个 JD 的详情核验。"]
 
 
+def test_scene_context_blocks_jd_sync_candidate_chat_result_without_job_evidence(tmp_path: Path) -> None:
+    session_factory = _session_factory(tmp_path)
+    final_payload = {
+        "status": "completed",
+        "current_view": {
+            "url": "https://www.zhipin.com/web/chat/index",
+            "page": "沟通",
+            "chat_detail_panel": {
+                "candidate_name": "梁雪凌",
+                "profile": "5 年产品经验，当前正在沟通",
+            },
+        },
+        "business_summary": {
+            "candidate_name": "梁雪凌",
+            "resume_facts": ["本科", "B 端产品"],
+            "conversation": "候选人已发送简历附件。",
+        },
+        "evidence": ["当前页为沟通会话详情，展示候选人梁雪凌和简历信息。"],
+    }
+    provider = ScriptedProvider(
+        provider_name="scene-scripted",
+        responses=[LLMResponse(content=json.dumps(final_payload, ensure_ascii=False), finish_reason="stop")],
+    )
+    service = SceneContextService(
+        session_factory=session_factory,
+        provider=provider,
+        tool_registry=ToolRegistry(),
+        plugin_host=PluginHost(),
+    )
+
+    result = service.delegate(
+        {
+            "instruction": "Return JD sync scene result JSON.",
+            "context": {"plan_kind": "jd_sync"},
+            "output_contract": {
+                "contract_kind": "jd_sync",
+                "result_data_required": True,
+                "required_fields": [
+                    "status",
+                    "observed_jobs",
+                    "completed_job_details",
+                    "inactive_or_closed_jobs",
+                    "activation_entry_observed",
+                    "blockers",
+                    "limitations",
+                    "evidence",
+                ],
+            },
+        }
+    )
+
+    assert result["status"] == "blocked"
+    assert result["summary"] == "JD sync observed candidate/chat context instead of job description evidence"
+    assert "梁雪凌" not in result["summary"]
+    assert result["result_data"]["status"] == "blocked"
+    assert result["result_data"]["reported_status"] == "completed"
+    assert result["result_data"]["completed_job_details"] == []
+    assert result["result_data"]["observed_jobs"] == []
+    assert result["result_data"]["jd_sync_boundary_guard"]["reason"] == "jd_sync_wrong_page_candidate_context"
+    assert result["blockers"][0]["kind"] == "jd_sync_wrong_page_candidate_context"
+
+
+def test_scene_context_allows_jd_sync_completed_job_detail_result(tmp_path: Path) -> None:
+    session_factory = _session_factory(tmp_path)
+    final_payload = {
+        "status": "completed",
+        "observed_jobs": [{"title": "国际销售工程师", "external_id": "boss-jd-1", "status": "招聘中"}],
+        "completed_job_details": [
+            {
+                "title": "国际销售工程师",
+                "location": "上海",
+                "status": "招聘中",
+                "external_id": "boss-jd-1",
+                "external_url": "https://www.zhipin.com/job_detail/boss-jd-1.html",
+                "description": "负责海外客户拓展。",
+                "requirements": ["3 年以上销售经验"],
+            }
+        ],
+        "inactive_or_closed_jobs": [],
+        "activation_entry_observed": True,
+        "blockers": [],
+        "limitations": [],
+        "evidence": ["职位管理详情页展示岗位职责和任职要求。"],
+    }
+    provider = ScriptedProvider(
+        provider_name="scene-scripted",
+        responses=[LLMResponse(content=json.dumps(final_payload, ensure_ascii=False), finish_reason="stop")],
+    )
+    service = SceneContextService(
+        session_factory=session_factory,
+        provider=provider,
+        tool_registry=ToolRegistry(),
+        plugin_host=PluginHost(),
+    )
+
+    result = service.delegate(
+        {
+            "instruction": "Return JD sync scene result JSON.",
+            "context": {"plan_kind": "jd_sync"},
+            "output_contract": {
+                "contract_kind": "jd_sync",
+                "result_data_required": True,
+                "required_fields": [
+                    "status",
+                    "observed_jobs",
+                    "completed_job_details",
+                    "inactive_or_closed_jobs",
+                    "activation_entry_observed",
+                    "blockers",
+                    "limitations",
+                    "evidence",
+                ],
+            },
+        }
+    )
+
+    assert result["status"] == "completed"
+    assert result["blockers"] == []
+    assert result["result_data"]["completed_job_details"][0]["external_id"] == "boss-jd-1"
+    assert "jd_sync_boundary_guard" not in result["result_data"]
+
+
 def test_scene_context_uses_blocked_final_json_for_public_status_without_writeback(tmp_path: Path) -> None:
     session_factory = _session_factory(tmp_path)
     final_text = json.dumps(

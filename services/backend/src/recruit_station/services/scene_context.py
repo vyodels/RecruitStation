@@ -405,6 +405,8 @@ class SceneContextService:
         result_data = _align_result_data_status(result_data, public_status)
         stored_status = _stored_status(public_status)
         summary = _public_summary(outcome, blockers)
+        if _has_blocker_kind(blockers, "jd_sync_wrong_page_candidate_context"):
+            summary = "JD sync observed candidate/chat context instead of job description evidence"
         metrics = {
             "engine_output_count": int((episode.metrics or {}).get("engine_output_count") or 0),
             "tool_call_count": int((episode.metrics or {}).get("tool_call_count") or 0),
@@ -3460,6 +3462,8 @@ def _normalize_scene_result_contract_data(
         normalized["evidence"] = evidence
         synthesized.append("evidence")
 
+    normalized = _apply_jd_sync_candidate_context_guard(normalized, contract)
+
     status = str(normalized.get("status") or "").strip().lower()
     if synthesized and status in {"completed", "complete", "success", "succeeded"}:
         normalized["reported_status"] = normalized.get("status")
@@ -3487,6 +3491,8 @@ def _scene_result_contract_blockers(result_data: dict[str, Any], output_contract
         if field not in result_data or result_data.get(field) in (None, "", {})
     ]
     blockers: list[dict[str, Any]] = []
+    if _is_jd_sync_wrong_page_candidate_context(result_data, contract):
+        blockers.append(_jd_sync_wrong_page_candidate_context_blocker())
     if missing_fields:
         blockers.append(
             {
@@ -3507,6 +3513,122 @@ def _scene_result_contract_blockers(result_data: dict[str, Any], output_contract
                 }
             )
     return blockers
+
+
+def _apply_jd_sync_candidate_context_guard(result_data: dict[str, Any], contract: dict[str, Any]) -> dict[str, Any]:
+    if not _is_jd_sync_wrong_page_candidate_context(result_data, contract):
+        return result_data
+    blocker = _jd_sync_wrong_page_candidate_context_blocker()
+    blockers = list(result_data.get("blockers") or []) if isinstance(result_data.get("blockers"), list) else []
+    if not any(isinstance(item, dict) and item.get("kind") == blocker["kind"] for item in blockers):
+        blockers.append(blocker)
+    guarded = {
+        **result_data,
+        "status": "blocked",
+        "completed_job_details": [],
+        "observed_jobs": [],
+        "blockers": blockers,
+        "jd_sync_boundary_guard": {
+            "status": "blocked",
+            "reason": blocker["kind"],
+        },
+    }
+    reported_status = str(result_data.get("status") or "").strip().lower()
+    if reported_status in {"completed", "complete", "success", "succeeded"}:
+        guarded["reported_status"] = result_data.get("status")
+    return guarded
+
+
+def _is_jd_sync_wrong_page_candidate_context(result_data: dict[str, Any], contract: dict[str, Any]) -> bool:
+    if not _is_jd_sync_result_contract(contract):
+        return False
+    if not _contains_candidate_or_chat_context(result_data):
+        return False
+    return not _contains_jd_sync_job_detail_evidence(result_data)
+
+
+def _is_jd_sync_result_contract(contract: dict[str, Any]) -> bool:
+    if str(contract.get("contract_kind") or "").strip().lower() == "jd_sync":
+        return True
+    required = {str(item).strip() for item in contract.get("required_fields") or [] if str(item or "").strip()}
+    return {"observed_jobs", "completed_job_details", "inactive_or_closed_jobs"}.issubset(required)
+
+
+def _contains_candidate_or_chat_context(value: Any) -> bool:
+    text = _contract_guard_text(value)
+    markers = (
+        "candidate",
+        "applicant",
+        "resume",
+        "chat",
+        "conversation",
+        "communication",
+        "profile",
+        "person_name",
+        "candidate_name",
+        "候选人",
+        "求职者",
+        "牛人",
+        "简历",
+        "沟通",
+        "聊天",
+        "会话",
+        "消息",
+        "附件",
+        "已约面",
+        "交换微信",
+        "交换电话",
+        "工作经历",
+        "教育经历",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _contains_jd_sync_job_detail_evidence(result_data: dict[str, Any]) -> bool:
+    completed = result_data.get("completed_job_details")
+    if not isinstance(completed, list) or not completed:
+        return False
+    for item in completed:
+        if not isinstance(item, dict):
+            continue
+        keys = {str(key).strip().lower() for key in item}
+        has_title = any(key in keys for key in ("title", "job_title", "jobtitle", "position_title", "职位名称"))
+        has_detail = any(
+            key in keys
+            for key in (
+                "description",
+                "summary",
+                "responsibilities",
+                "requirements",
+                "external_id",
+                "external_url",
+                "detail_url",
+                "detail_evidence",
+                "职责",
+                "要求",
+            )
+        )
+        if has_title and has_detail:
+            return True
+    return False
+
+
+def _contract_guard_text(value: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False, default=str).lower()
+    except (TypeError, ValueError):
+        return str(value or "").lower()
+
+
+def _jd_sync_wrong_page_candidate_context_blocker() -> dict[str, Any]:
+    return {
+        "kind": "jd_sync_wrong_page_candidate_context",
+        "message": "JD sync observed candidate/chat context instead of job description evidence",
+    }
+
+
+def _has_blocker_kind(blockers: list[dict[str, Any]], kind: str) -> bool:
+    return any(isinstance(item, dict) and item.get("kind") == kind for item in blockers)
 
 
 def _align_result_data_status(result_data: dict[str, Any], public_status: str) -> dict[str, Any]:
