@@ -401,6 +401,52 @@ def test_jd_sync_delegate_scene_context_defaults_to_browser_and_computer_capabil
     }
 
 
+def test_jd_sync_single_probe_scene_contract_rejects_new_job_form() -> None:
+    captured: dict[str, object] = {}
+    registry = ToolRegistry()
+
+    def _handler(arguments: dict[str, object]) -> dict[str, object]:
+        captured.update(arguments)
+        return {"ok": True}
+
+    registry.register(build_delegate_scene_context_tool(_handler))
+    runtime_tool = registry.to_agent_runtime_tools()[0]
+    context = TurnContext(
+        turn_id="turn-1",
+        conversation_id="conversation-1",
+        tools=[],
+        runtime={
+            "constraints": {
+                "plan_kind": "jd_sync",
+                "sync_mode": "single_jd_probe",
+                "max_job_descriptions": 1,
+            }
+        },
+    )
+    call = ToolCall(
+        id="tool-1",
+        turn_id="turn-1",
+        llm_invocation_id="llm-1",
+        tool_use_id="use-1",
+        name="delegate_scene_context",
+        input={"instruction": "读取 1 个招聘中职位。"},
+    )
+
+    result = runtime_tool.handler.handle(call, context)
+
+    assert result.is_error is False
+    instruction = str(captured["instruction"])
+    observed_contract = str(captured["output_contract"]["field_contract"]["observed_jobs"])
+    completed_contract = str(captured["output_contract"]["field_contract"]["completed_job_details"])
+    assert "单 JD 同步试跑" in instruction
+    assert "encryptId=0" in instruction
+    assert "待发布/新建职位" in instruction
+    assert "不要求全量扫描所有职位" in instruction
+    assert "N 个招聘中岗位" not in instruction
+    assert "does not need to account for every listed/open job" in observed_contract
+    assert "encryptId=0" in completed_contract
+
+
 def test_recruit_plugin_tools_are_marked_as_business_tools(tmp_path: Path) -> None:
     settings = AppSettings(
         data_dir=str(tmp_path / "data"),
@@ -433,6 +479,7 @@ def test_recruit_plugin_tools_are_marked_as_business_tools(tmp_path: Path) -> No
         "list_pending_candidate_message_syncs": "business_read",
         "record_candidate_message_sync_ack": "business_write",
         "attach_resume_artifact": "business_write",
+        "extract_resume_artifact_text": "business_write",
         "delete_resume_artifact": "business_write",
         "transition_application": "business_write",
         "create_candidate_sync_record": "business_write",

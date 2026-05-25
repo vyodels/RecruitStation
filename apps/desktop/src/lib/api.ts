@@ -97,6 +97,7 @@ import type {
 const AUTONOMOUS_PRIMARY_CONVERSATION_ID = "autonomous-primary";
 const JD_SYNC_PRIMARY_CONVERSATION_ID = "jd-sync-primary";
 const AGENT_MEMORY_OVERVIEW_SCOPES = ["global", "candidate", "job"] as const;
+const runtimeBaseUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "http://127.0.0.1:8741";
 
 function primaryConversationId(kind: AgentKind): string {
   return kind === "jd_sync" ? JD_SYNC_PRIMARY_CONVERSATION_ID : AUTONOMOUS_PRIMARY_CONVERSATION_ID;
@@ -142,6 +143,7 @@ export interface DesktopApiClient {
   ): Promise<OperatorInteractionRecord>;
   listApplicationThreads(): Promise<ApplicationThreadRecord[]>;
   getApplicationThread(applicationId: string): Promise<ApplicationThreadRecord>;
+  extractResumeArtifactText(applicationId: string, artifactId: string): Promise<ResumeArtifactRecord>;
   getStateMachine(): Promise<RecruitmentStateMachine>;
   listStateMachineCriteriaSuggestions(): Promise<StateCriteriaOptimizationReport[]>;
   listStateMachineVersions(limit?: number): Promise<RecruitmentStateMachineVersionRecord[]>;
@@ -2256,15 +2258,21 @@ function normalizeApplicationAssignment(raw: unknown): ApplicationAssignmentReco
 
 function normalizeResumeArtifact(raw: unknown): ResumeArtifactRecord {
   const record = asRecord(raw);
+  const id = String(record.id ?? "");
+  const applicationId = String(record.applicationId ?? record.application_id ?? "");
   return {
-    id: String(record.id ?? ""),
-    applicationId: String(record.applicationId ?? record.application_id ?? ""),
+    id,
+    applicationId,
     personId:
       record.personId != null ? String(record.personId) : record.person_id != null ? String(record.person_id) : null,
     source: String(record.source ?? "site"),
     artifactType: String(record.artifactType ?? record.artifact_type ?? "resume"),
     fileName: record.fileName ? String(record.fileName) : record.file_name ? String(record.file_name) : null,
     filePath: record.filePath ? String(record.filePath) : record.file_path ? String(record.file_path) : null,
+    previewUrl:
+      id && applicationId
+        ? `${runtimeBaseUrl}/api/candidate-applications/${encodeURIComponent(applicationId)}/resume-artifacts/${encodeURIComponent(id)}/preview`
+        : undefined,
     extractedText: record.extractedText ? String(record.extractedText) : record.extracted_text ? String(record.extracted_text) : null,
     contactSnapshot: asRecord(record.contactSnapshot ?? record.contact_snapshot),
     artifactMetadata: asRecord(record.artifactMetadata ?? record.artifact_metadata ?? record.metadata),
@@ -3414,6 +3422,14 @@ function createFetchClient(baseUrl: string): DesktopApiClient {
       asArray(await requestJson<unknown>(baseUrl, "/api/candidate-applications/threads")).map(normalizeApplicationThread),
     getApplicationThread: async (applicationId) =>
       normalizeApplicationThread(await requestJson<unknown>(baseUrl, `/api/candidate-applications/${applicationId}/thread`)),
+    extractResumeArtifactText: async (applicationId, artifactId) =>
+      normalizeResumeArtifact(
+        await requestJson<unknown>(
+          baseUrl,
+          `/api/candidate-applications/${applicationId}/resume-artifacts/${artifactId}/extract-text`,
+          { method: "POST" },
+        ),
+      ),
     getStateMachine: async () =>
       normalizeRecruitmentStateMachine(await requestJson<unknown>(baseUrl, "/api/state-machine")),
     listStateMachineCriteriaSuggestions: async () =>
@@ -4167,8 +4183,6 @@ function createFetchClient(baseUrl: string): DesktopApiClient {
 export function createDesktopApiClient(baseUrl?: string): DesktopApiClient {
   return createFetchClient(baseUrl ?? "http://127.0.0.1:8741");
 }
-
-const runtimeBaseUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "http://127.0.0.1:8741";
 
 export const apiClient = Object.assign(createDesktopApiClient(runtimeBaseUrl), {
   describe(): ApiDescription {

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import pytest
+
 from recruit_station.core.settings import AppSettings
-from recruit_station.models.domain import PersonResumeArtifact, ResumeArtifact
+from recruit_station.models.domain import Candidate, CandidateApplication, PersonResumeArtifact, ResumeArtifact
 from recruit_station.plugins.recruit.toolkit import (
     archive_candidate,
     attach_resume_artifact,
@@ -10,6 +12,7 @@ from recruit_station.plugins.recruit.toolkit import (
     delete_candidate,
     get_candidate_thread,
     get_jd_progress,
+    extract_resume_artifact_text,
     list_candidates,
     list_pending_candidate_message_syncs,
     record_candidate_message,
@@ -43,6 +46,7 @@ def test_candidate_lifecycle_tools_cover_writeback_scoring_thread_and_progress(t
         "list_pending_candidate_message_syncs",
         "record_candidate_message_sync_ack",
         "attach_resume_artifact",
+        "extract_resume_artifact_text",
         "create_candidate_review_decision",
         "create_candidate_sync_record",
         "get_candidate_thread",
@@ -256,6 +260,138 @@ def test_existing_platform_resume_can_transition_from_resume_fetching(tmp_path) 
     assert transitioned["thread"]["stateSnapshot"]["current_stage_key"] == "offline_resume_acquired"
 
 
+def test_extract_resume_artifact_text_runs_on_demand_for_scoring(tmp_path) -> None:
+    container = _build_container(tmp_path)
+    job = upsert_job_description(container.session_factory, title="AI Agent 产品经理")["job_description"]
+    candidate_result = upsert_candidate(
+        container.session_factory,
+        name="离线简历候选人",
+        platform="mock-zhipin",
+        platform_candidate_id="cand-offline-resume-001",
+        job_description_id=job["job_description_id"],
+        current_status="offline_resume_fetching",
+    )
+    resume_path = tmp_path / "offline-resume.txt"
+    resume_path.write_text("离线简历：29岁，本科，5年AI产品经验。", encoding="utf-8")
+
+    attached = attach_resume_artifact(
+        container.session_factory,
+        application_id=candidate_result["application"]["application_id"],
+        file_name="offline-resume.txt",
+        file_path=str(resume_path),
+    )
+
+    assert attached["artifact"]["extractedText"] is None
+    extracted = extract_resume_artifact_text(
+        container.session_factory,
+        application_id=candidate_result["application"]["application_id"],
+        artifact_id=attached["artifact"]["id"],
+    )
+
+    assert extracted["artifact"]["extractedText"] == "离线简历：29岁，本科，5年AI产品经验。"
+    assert extracted["artifact"]["artifactMetadata"]["text_extraction"]["status"] == "completed"
+    assert extracted["thread"]["application"]["resumeSnapshot"]["offline_resume"]["raw_text"] == "离线简历：29岁，本科，5年AI产品经验。"
+    assert extracted["thread"]["application"]["resumeSnapshot"]["structured_facts"]["age"] == 29
+
+
+def test_upsert_candidate_canonicalizes_platform_aliases_for_dedupe(tmp_path) -> None:
+    container = _build_container(tmp_path)
+    job = upsert_job_description(
+        container.session_factory,
+        title="交易策略产品经理",
+        platform="zhipin",
+        external_id="job-strategy-pm-001",
+    )["job_description"]
+
+    first_result = upsert_candidate(
+        container.session_factory,
+        name="金行",
+        platform="zhipin",
+        platform_candidate_id="金行",
+        job_description_id=job["job_description_id"],
+        current_status="discovered",
+    )
+    second_result = upsert_candidate(
+        container.session_factory,
+        name="金行",
+        platform="boss直聘",
+        source_platform="BOSS 直聘",
+        platform_candidate_id="金行",
+        job_description_id=job["job_description_id"],
+        current_status="human_screening",
+    )
+
+    assert second_result["action"] == "updated"
+    assert second_result["application_action"] == "updated"
+    assert second_result["candidate"]["candidate_person_id"] == first_result["candidate"]["candidate_person_id"]
+    assert second_result["candidate"]["platform"] == "zhipin"
+    assert second_result["application"]["application_id"] == first_result["application"]["application_id"]
+    assert second_result["application"]["source_platform"] == "zhipin"
+    listed = list_candidates(container.session_factory, platform="boss_zhipin")
+    assert [item["candidate_person_id"] for item in listed] == [first_result["candidate"]["candidate_person_id"]]
+
+    with container.session_factory() as session:
+        assert session.query(Candidate).count() == 1
+        assert session.query(CandidateApplication).count() == 1
+
+
+def test_upsert_candidate_enforces_runtime_max_new_candidates(tmp_path) -> None:
+    container = _build_container(tmp_path)
+    job = upsert_job_description(container.session_factory, title="交易策略产品经理")["job_description"]
+    runtime_constraints = {"max_new_candidates": 1, "run_created_at": 1}
+
+    first_result = upsert_candidate(
+        container.session_factory,
+        name="候选人甲",
+        platform="zhipin",
+        platform_candidate_id="候选人甲",
+        job_description_id=job["job_description_id"],
+        _runtime_constraints=runtime_constraints,
+    )
+
+    assert first_result["action"] == "created"
+    with pytest.raises(ValueError, match="max_new_candidates=1 reached"):
+        upsert_candidate(
+            container.session_factory,
+            name="候选人乙",
+            platform="zhipin",
+            platform_candidate_id="候选人乙",
+            job_description_id=job["job_description_id"],
+            _runtime_constraints=runtime_constraints,
+        )
+
+    with container.session_factory() as session:
+        assert session.query(Candidate).count() == 1
+        assert session.query(CandidateApplication).count() == 1
+
+
+def test_upsert_candidate_uses_runtime_name_dedupe_hint(tmp_path) -> None:
+    container = _build_container(tmp_path)
+    job = upsert_job_description(container.session_factory, title="交易策略产品经理")["job_description"]
+
+    first_result = upsert_candidate(
+        container.session_factory,
+        name="陈**",
+        platform="zhipin",
+        job_description_id=job["job_description_id"],
+    )
+    second_result = upsert_candidate(
+        container.session_factory,
+        name="陈**",
+        platform="BOSS直聘",
+        platform_candidate_id="陈**",
+        job_description_id=job["job_description_id"],
+        _runtime_constraints={"dedupe_existing_candidate_names": ["陈**"]},
+    )
+
+    assert second_result["action"] == "updated"
+    assert second_result["candidate"]["candidate_person_id"] == first_result["candidate"]["candidate_person_id"]
+    assert second_result["application"]["application_id"] == first_result["application"]["application_id"]
+    with container.session_factory() as session:
+        assert session.query(Candidate).count() == 1
+        assert session.query(CandidateApplication).count() == 1
+
+
 def test_upsert_candidate_keeps_page_status_text_out_of_canonical_state(tmp_path) -> None:
     container = _build_container(tmp_path)
     job = upsert_job_description(
@@ -342,6 +478,39 @@ def test_upsert_candidate_extracts_contact_info_from_profile_text(tmp_path) -> N
     assert candidate["contact_info"]["channels"] == ["phone", "email"]
     assert application["contact_snapshot"]["channels"] == ["phone", "email"]
     assert application["state_snapshot"]["contact_acquired"] is True
+
+
+def test_upsert_candidate_preserves_full_online_resume_data(tmp_path) -> None:
+    container = _build_container(tmp_path)
+    job = upsert_job_description(container.session_factory, title="AI Agent 产品经理")["job_description"]
+    resume_text = (
+        "您好，我对岗位很有兴趣，能进一步沟通吗？\n"
+        "本人美团1年AI-agent产品经验，3年商品策略产品。"
+    )
+
+    candidate_result = upsert_candidate(
+        container.session_factory,
+        name="金行",
+        platform="mock-zhipin",
+        platform_candidate_id="cand-mock-jin-xing",
+        job_description_id=job["job_description_id"],
+        current_status="replied",
+        online_resume_data={
+            "rawText": resume_text,
+            "source": "communication_online_resume",
+            "sections": {
+                "introduction": "您好，我对岗位很有兴趣，能进一步沟通吗？",
+                "experience": "美团1年AI-agent产品经验，3年商品策略产品",
+            },
+        },
+    )
+
+    candidate = candidate_result["candidate"]
+    application = candidate_result["application"]
+    assert candidate["online_resume_text"] == resume_text
+    assert application["resume_snapshot"]["online_resume"]["raw_text"] == resume_text
+    assert application["resume_snapshot"]["online_resume"]["sections"]["experience"] == "美团1年AI-agent产品经验，3年商品策略产品"
+    assert application["resume_snapshot"]["online_resume"]["source"] == "communication_online_resume"
 
 
 def test_candidate_lifecycle_tools_support_archive_and_delete(tmp_path) -> None:

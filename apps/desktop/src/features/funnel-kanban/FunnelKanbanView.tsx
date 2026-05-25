@@ -37,6 +37,7 @@ interface FunnelKanbanViewProps {
     payload: { direction: string; content: string; messageType?: string; platform?: string },
   ): Promise<unknown> | void;
   onTransition(applicationId: string, payload: ApplicationTransitionPayload): Promise<unknown> | void;
+  onExtractResumeText?(applicationId: string, artifactId: string): Promise<unknown> | void;
   operatorProfile?: SettingsSnapshot["userProfile"];
 }
 
@@ -97,6 +98,7 @@ export function FunnelKanbanView({
   onRefresh,
   onCreateEntry,
   onTransition,
+  onExtractResumeText,
   operatorProfile,
 }: FunnelKanbanViewProps): JSX.Element {
   const { copy } = useI18n();
@@ -427,6 +429,7 @@ export function FunnelKanbanView({
           onRefresh={onRefresh}
           onCreateEntry={onCreateEntry}
           onTransition={onTransition}
+          onExtractResumeText={onExtractResumeText}
           operatorProfile={operatorProfile}
         />
       ) : null}
@@ -437,6 +440,7 @@ export function FunnelKanbanView({
         stateMachine={stateMachine}
         onClose={() => setDetailApplicationId(undefined)}
         onTransition={onTransition}
+        onExtractResumeText={onExtractResumeText}
         onRequestOverride={() => {
           if (detailRecord) {
             setOverrideApplicationId(detailRecord.application.id);

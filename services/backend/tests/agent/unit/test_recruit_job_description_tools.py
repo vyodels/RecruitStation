@@ -227,6 +227,51 @@ def test_mock_jd_sync_accepts_fields_that_match_sync_json(tmp_path, monkeypatch)
     assert stored["job_description"]["department"] == "售前咨询部"
 
 
+def test_jd_sync_upsert_rejects_historical_memory_evidence(tmp_path) -> None:
+    container = _build_container(tmp_path)
+
+    with pytest.raises(ValueError, match="current-run page evidence"):
+        upsert_job_description(
+            container.session_factory,
+            title="交易策略产品经理",
+            platform="boss_zhipin",
+            external_id="jd-001",
+            external_url="https://www.zhipin.com/web/geek/job?encryptId=jd-001",
+            description="岗位职责已读取。",
+            requirements="任职要求已读取。",
+            detail_metadata={
+                "observed_from_memory_run": "019e51059531710c873f5540254699b5",
+                "source_note": "基于已存在本地JD id进行事实性更新写回。",
+            },
+            sync_metadata={"detail_complete": True},
+            _runtime_constraints={"plan_kind": "jd_sync"},
+        )
+
+    assert list_job_descriptions(container.session_factory) == []
+
+
+def test_jd_sync_upsert_rejects_new_or_draft_job_url(tmp_path) -> None:
+    container = _build_container(tmp_path)
+
+    with pytest.raises(ValueError, match="not a new or draft job form"):
+        upsert_job_description(
+            container.session_factory,
+            title="交易策略产品经理",
+            platform="boss_zhipin",
+            external_id="0",
+            external_url="https://www.zhipin.com/web/chat/job/edit?encryptId=0&enterSource=2",
+            description="岗位职责已读取。",
+            requirements="任职要求已读取。",
+            sync_metadata={
+                "detail_complete": True,
+                "observed_detail_url": "https://www.zhipin.com/web/chat/job/edit?encryptId=0&enterSource=2",
+            },
+            _runtime_constraints={"plan_kind": "jd_sync"},
+        )
+
+    assert list_job_descriptions(container.session_factory) == []
+
+
 class _FakeUrlResponse:
     def __init__(self, body: str) -> None:
         self._body = body

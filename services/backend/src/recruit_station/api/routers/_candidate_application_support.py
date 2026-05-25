@@ -489,8 +489,20 @@ def create_application_resume_artifact(
             "captured_at": _timestamp(payload.captured_at or item.captured_at),
             "source": payload.source,
         }
+        offline_resume = {
+            "source": payload.source,
+            "artifact_id": item.id,
+            "artifact_type": payload.artifact_type,
+            "file_name": payload.file_name,
+            "file_path": payload.file_path,
+            "captured_at": _timestamp(payload.captured_at or item.captured_at),
+        }
+        if payload.extracted_text:
+            offline_resume["raw_text"] = payload.extracted_text
         if structured_facts:
             resume_snapshot["structured_facts"] = structured_facts
+            offline_resume["structured_facts"] = structured_facts
+        resume_snapshot["offline_resume"] = offline_resume
         application_metadata["resume_available"] = True
         application_metadata["resume_snapshot"] = resume_snapshot
         application_metadata["resume_status"] = "received"
@@ -508,7 +520,6 @@ def create_application_resume_artifact(
             linked_person,
             {
                 "resume_path": payload.file_path or linked_person.resume_path,
-                "online_resume_text": payload.extracted_text or linked_person.online_resume_text,
                 "contact_info": merge_contact_info(
                     dict(linked_person.contact_info or {}),
                     dict(payload.contact_snapshot or {}),

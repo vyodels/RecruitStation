@@ -52,6 +52,7 @@ interface ApplicationFollowUpWorkspaceProps {
     payload: { direction: string; content: string; messageType?: string; platform?: string },
   ): Promise<unknown> | void;
   onTransition(applicationId: string, payload: ApplicationTransitionPayload): Promise<unknown> | void;
+  onExtractResumeText?(applicationId: string, artifactId: string): Promise<unknown> | void;
 }
 
 interface PendingActionState {
@@ -272,6 +273,7 @@ export function ApplicationFollowUpWorkspace({
   onRefresh,
   onCreateEntry,
   onTransition,
+  onExtractResumeText,
 }: ApplicationFollowUpWorkspaceProps): JSX.Element {
   const { copy } = useI18n();
   const [sidebarSearch, setSidebarSearch] = useState("");
@@ -961,6 +963,7 @@ export function ApplicationFollowUpWorkspace({
         initialTab={detailTab}
         onClose={() => setDetailOpen(false)}
         onTransition={onTransition}
+        onExtractResumeText={onExtractResumeText}
         onRequestOverride={() => {
           setDetailOpen(false);
           setOverrideOpen(true);

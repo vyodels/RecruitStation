@@ -40,6 +40,8 @@ from recruit_station.services.candidate_identity import (
 )
 from recruit_station.services.job_description_stats import build_job_description_funnel_stats
 from recruit_station.services.recruit_station import default_candidate_state_snapshot
+from recruit_station.services.resume_structure import extract_resume_structured_facts
+from recruit_station.services.resume_text_extraction import extract_resume_text
 from recruit_station.services.state_machine import available_state_statuses
 
 _UNSET = object()
@@ -155,6 +157,7 @@ def upsert_job_description(
     external_url: Any = _UNSET,
     sync_status: Any = _UNSET,
     sync_metadata: Any = _UNSET,
+    _runtime_constraints: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     normalized_title = _normalize_required_text(title, field_name="title")
     normalized_platform = None if platform is _UNSET else _normalize_optional_text(platform)
@@ -164,6 +167,16 @@ def upsert_job_description(
     normalized_department = None if department is _UNSET else _normalize_optional_text(department)
     normalized_location = None if location is _UNSET else _normalize_optional_text(location)
     normalized_sync_metadata = None if sync_metadata is _UNSET else _normalize_mapping(sync_metadata, field_name="sync_metadata")
+    normalized_detail_metadata = None if detail_metadata is _UNSET else _normalize_mapping(detail_metadata, field_name="detail_metadata")
+    runtime_constraints = dict(_runtime_constraints or {})
+    enforce_current_run_jd_evidence = str(runtime_constraints.get("plan_kind") or "").strip().lower() == "jd_sync"
+    if enforce_current_run_jd_evidence:
+        _validate_jd_sync_current_run_evidence(
+            job_description_id=job_description_id,
+            external_url=normalized_external_url,
+            detail_metadata=normalized_detail_metadata,
+            sync_metadata=normalized_sync_metadata,
+        )
 
     _validate_mock_recruiting_site_exact_jd_fields(
         title=normalized_title,
@@ -182,6 +195,8 @@ def upsert_job_description(
         idx_repo = JobDescriptionPlatformIdxRepository(session)
 
         item = None if not job_description_id else repo.get(str(job_description_id).strip())
+        if enforce_current_run_jd_evidence and job_description_id and item is None:
+            raise ValueError("jd_sync upsert cannot use an unknown local job_description_id as current-run evidence.")
         if item is None and normalized_platform and normalized_external_id:
             idx = idx_repo.by_platform_identity(normalized_platform, normalized_external_id)
             if idx is not None:
@@ -218,7 +233,8 @@ def upsert_job_description(
         _set_if_provided(payload, "description", description, _normalize_optional_text)
         _set_if_provided(payload, "requirements", requirements, _normalize_optional_text)
         _set_if_provided(payload, "benefit_tags", benefit_tags, _normalize_string_list)
-        _set_if_provided(payload, "detail_metadata", detail_metadata, lambda value: _normalize_mapping(value, field_name="detail_metadata"))
+        if detail_metadata is not _UNSET:
+            payload["detail_metadata"] = normalized_detail_metadata or {}
 
         if status is _UNSET:
             if item is None:
@@ -283,7 +299,7 @@ def list_candidates(
     job_description_id: str | None = None,
     application_status: str | None = None,
 ) -> list[dict[str, Any]]:
-    normalized_platform = _normalize_optional_text(platform)
+    normalized_platform = _canonical_platform_key(platform)
     normalized_job_description_id = _normalize_optional_text(job_description_id)
     normalized_application_status = _normalize_optional_text(application_status)
     with session_factory() as session:
@@ -292,7 +308,7 @@ def list_candidates(
         candidates = candidate_repo.list(limit=5000, offset=0)
         filtered: list[dict[str, Any]] = []
         for candidate in candidates:
-            if normalized_platform and candidate.platform != normalized_platform:
+            if normalized_platform and _canonical_platform_key(candidate.platform) != normalized_platform:
                 continue
             applications = application_repo.by_person(candidate.id, limit=100, offset=0)
             matched_applications = [
@@ -324,6 +340,7 @@ def upsert_candidate(
     contact_info: Any = _UNSET,
     resume_path: Any = _UNSET,
     online_resume_text: Any = _UNSET,
+    online_resume_data: Any = _UNSET,
     profile_url: Any = _UNSET,
     raw_profile: Any = _UNSET,
     first_seen_at: Any = _UNSET,
@@ -337,13 +354,15 @@ def upsert_candidate(
     application_metadata: Any = _UNSET,
     source_platform: str | None = None,
     source_observation: Any = _UNSET,
+    _runtime_constraints: Any = _UNSET,
 ) -> dict[str, Any]:
     normalized_name = _normalize_required_text(name, field_name="name")
-    normalized_platform = _normalize_optional_text(platform) or "site"
+    normalized_platform = _canonical_platform_key(platform) or "site"
     normalized_candidate_person_id = _normalize_optional_text(candidate_person_id)
     normalized_platform_candidate_id = _normalize_optional_text(platform_candidate_id)
     normalized_job_description_id = _normalize_optional_text(job_description_id)
-    normalized_source_platform = _normalize_optional_text(source_platform) or normalized_platform
+    normalized_source_platform = _canonical_platform_key(source_platform) or normalized_platform
+    runtime_constraints = _normalize_runtime_constraints(_runtime_constraints)
 
     with session_factory() as session:
         normalized_current_status, normalized_current_stage, source_state_metadata = _normalize_application_state_input(
@@ -356,6 +375,14 @@ def upsert_candidate(
         candidate = None if normalized_candidate_person_id is None else candidate_repo.get(normalized_candidate_person_id)
         if candidate is None and normalized_platform_candidate_id:
             candidate = candidate_repo.by_platform_candidate_id(normalized_platform, normalized_platform_candidate_id)
+        if candidate is None and _runtime_dedupe_candidate_name(runtime_constraints, normalized_name):
+            candidate = _find_candidate_by_name_and_platform(
+                session,
+                name=normalized_name,
+                platform=normalized_platform,
+            )
+        if candidate is None:
+            _enforce_max_new_candidates(session, runtime_constraints)
 
         normalized_contact_info: dict[str, Any] | None = None
         if contact_info is not _UNSET:
@@ -365,6 +392,14 @@ def upsert_candidate(
         normalized_online_resume_text = (
             _normalize_optional_text(online_resume_text) if online_resume_text is not _UNSET else None
         )
+        normalized_online_resume_data = (
+            _normalize_online_resume_data(online_resume_data) if online_resume_data is not _UNSET else None
+        )
+        if online_resume_text is _UNSET and normalized_online_resume_data:
+            normalized_online_resume_text = _normalize_optional_text(
+                normalized_online_resume_data.get("raw_text")
+                or normalized_online_resume_data.get("text")
+            )
         inferred_contact_info = extract_contact_info_from_text(normalized_online_resume_text)
         if inferred_contact_info:
             normalized_contact_info = merge_contact_info(inferred_contact_info, normalized_contact_info)
@@ -379,7 +414,7 @@ def upsert_candidate(
             candidate_payload["contact_info"] = normalized_contact_info
         if resume_path is not _UNSET:
             candidate_payload["resume_path"] = _normalize_optional_text(resume_path)
-        if online_resume_text is not _UNSET:
+        if online_resume_text is not _UNSET or normalized_online_resume_data:
             candidate_payload["online_resume_text"] = normalized_online_resume_text
 
         candidate_action = "created"
@@ -453,7 +488,10 @@ def upsert_candidate(
                 snapshot["contact_status"] = "available" if snapshot["contact_acquired"] else snapshot.get("contact_status") or "unknown"
             payload["state_snapshot"] = snapshot
             payload["contact_snapshot"] = contact_snapshot
-            payload["resume_snapshot"] = _resume_snapshot_from_candidate(candidate)
+            payload["resume_snapshot"] = _resume_snapshot_from_candidate(
+                candidate,
+                online_resume_data=normalized_online_resume_data,
+            )
             combined_application_metadata = (
                 _normalize_mapping(application_metadata, field_name="application_metadata")
                 if application_metadata is not _UNSET
@@ -797,6 +835,82 @@ def attach_resume_artifact(
         return {
             "artifact": artifact.model_dump(by_alias=True),
             "thread": thread.model_dump(by_alias=True),
+        }
+
+
+def extract_resume_artifact_text(
+    session_factory: sessionmaker[Session],
+    *,
+    artifact_id: str,
+    application_id: str | None = None,
+    candidate_person_id: str | None = None,
+    job_description_id: str | None = None,
+) -> dict[str, Any]:
+    from recruit_station.api.routers._candidate_application_support import build_application_thread
+
+    normalized_artifact_id = _normalize_required_text(artifact_id, field_name="artifact_id")
+    with session_factory() as session:
+        artifact_repo = ResumeArtifactRepository(session)
+        artifact = artifact_repo.get(normalized_artifact_id)
+        if artifact is None:
+            raise KeyError(f"resume artifact {normalized_artifact_id} not found")
+
+        application_repo = CandidateApplicationRepository(session)
+        artifact_application = application_repo.get_by_storage_id(artifact.application_id)
+        if artifact_application is None:
+            raise KeyError(f"application for resume artifact {normalized_artifact_id} not found")
+        if application_id or candidate_person_id or job_description_id:
+            scoped_application = _resolve_application(
+                session,
+                application_id=application_id,
+                candidate_person_id=candidate_person_id,
+                job_description_id=job_description_id,
+            )
+            if scoped_application.id != artifact_application.id:
+                raise ValueError("resume artifact does not belong to the requested application scope")
+
+        extracted_text, extraction_metadata = extract_resume_text(artifact.file_path)
+        artifact_metadata = dict(artifact.artifact_metadata or {})
+        artifact_metadata["text_extraction"] = extraction_metadata
+        structured_facts = extract_resume_structured_facts(extracted_text, dict(artifact.contact_snapshot or {}))
+        if structured_facts:
+            artifact_metadata["structured_facts"] = structured_facts
+        updated = artifact_repo.update(
+            artifact,
+            {
+                "extracted_text": extracted_text or artifact.extracted_text,
+                "artifact_metadata": artifact_metadata,
+            },
+        )
+
+        resume_snapshot = dict(artifact_application.resume_snapshot or {})
+        offline_resume = dict(resume_snapshot.get("offline_resume") or {})
+        offline_resume.update(
+            {
+                "artifact_id": updated.id,
+                "artifact_type": updated.artifact_type,
+                "file_name": updated.file_name,
+                "file_path": updated.file_path,
+                "source": updated.source,
+                "text_extraction": extraction_metadata,
+            }
+        )
+        if extracted_text:
+            offline_resume["raw_text"] = extracted_text
+        if structured_facts:
+            offline_resume["structured_facts"] = structured_facts
+            resume_snapshot["structured_facts"] = structured_facts
+        resume_snapshot["offline_resume"] = offline_resume
+        application_repo.update(artifact_application, {"resume_snapshot": resume_snapshot})
+
+        person = CandidateRepository(session).get_by_storage_id(artifact_application.person_id)
+        return {
+            "artifact": _serialize_resume_artifact(
+                updated,
+                application_id=artifact_application.candidate_application_id,
+                person_id=person.candidate_person_id if person is not None else None,
+            ),
+            "thread": build_application_thread(session, artifact_application.candidate_application_id).model_dump(by_alias=True),
         }
 
 
@@ -1196,6 +1310,60 @@ def _validate_mock_recruiting_site_exact_jd_fields(
         )
 
 
+def _validate_jd_sync_current_run_evidence(
+    *,
+    job_description_id: str | None,
+    external_url: str | None,
+    detail_metadata: dict[str, Any] | None,
+    sync_metadata: dict[str, Any] | None,
+) -> None:
+    metadata = {**dict(detail_metadata or {}), **dict(sync_metadata or {})}
+    if external_url and _is_new_or_draft_jd_url(external_url):
+        raise ValueError("jd_sync upsert requires a published/current JD detail URL, not a new or draft job form.")
+    observed_detail_url = _normalize_optional_text(metadata.get("observed_detail_url"))
+    if observed_detail_url and _is_new_or_draft_jd_url(observed_detail_url):
+        raise ValueError("jd_sync upsert requires a published/current JD detail URL, not a new or draft job form.")
+    forbidden_keys = {
+        "observed_from_memory_run",
+        "memory_run",
+        "previous_run",
+        "previous_run_id",
+        "checkpoint_id",
+        "checkpoint",
+    }
+    present_forbidden = sorted(key for key in forbidden_keys if key in metadata and metadata.get(key))
+    if present_forbidden:
+        raise ValueError(
+            "jd_sync upsert requires current-run page evidence; historical memory/checkpoint fields are not allowed: "
+            + ", ".join(present_forbidden)
+        )
+    evidence_text = json.dumps(metadata, ensure_ascii=False, default=str).lower()
+    forbidden_markers = (
+        "observed_from_memory_run",
+        "memory_run",
+        "previous run",
+        "previous_run",
+        "checkpoint",
+        "历史",
+        "上一轮",
+        "记忆",
+        "已存在本地jd",
+        "已存在本地 jd",
+        "source_note",
+    )
+    if any(marker in evidence_text for marker in forbidden_markers):
+        raise ValueError("jd_sync upsert requires current-run page evidence; historical memory or local-JD notes are not allowed.")
+    if job_description_id and not _normalize_optional_text(job_description_id):
+        raise ValueError("job_description_id must not be blank")
+
+
+def _is_new_or_draft_jd_url(value: str) -> bool:
+    normalized = str(value or "").strip().lower()
+    if not normalized:
+        return False
+    return "encryptid=0" in normalized or any(marker in normalized for marker in ("job/new", "job/create", "job/publish"))
+
+
 def _metadata_truthy(value: Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -1425,6 +1593,24 @@ def _serialize_application_message(session: Session, item: ApplicationCommunicat
     }
 
 
+def _serialize_resume_artifact(item, *, application_id: str, person_id: str | None = None) -> dict[str, Any]:
+    return {
+        "id": item.id,
+        "applicationId": application_id,
+        "personId": person_id,
+        "source": item.source,
+        "artifactType": item.artifact_type,
+        "fileName": item.file_name,
+        "filePath": item.file_path,
+        "extractedText": item.extracted_text,
+        "contactSnapshot": dict(item.contact_snapshot or {}),
+        "artifactMetadata": dict(item.artifact_metadata or {}),
+        "capturedAt": _timestamp(item.captured_at),
+        "createdAt": _timestamp(item.created_at),
+        "updatedAt": _timestamp(item.updated_at),
+    }
+
+
 def _message_outbound_sync_state(metadata: dict[str, Any]) -> dict[str, Any]:
     sync_state = metadata.get("outbound_sync")
     return dict(sync_state or {}) if isinstance(sync_state, dict) else {}
@@ -1490,14 +1676,48 @@ def _resolve_application(
     raise ValueError("application_id or candidate_person_id + job_description_id is required")
 
 
-def _resume_snapshot_from_candidate(candidate) -> dict[str, Any]:
+def _resume_snapshot_from_candidate(candidate, *, online_resume_data: dict[str, Any] | None = None) -> dict[str, Any]:
     available = bool(candidate.resume_path or candidate.online_resume_text)
-    return {
+    snapshot = {
         "available": available,
         "status": "received" if available else "not_received",
         "file_path": candidate.resume_path,
         "source": candidate.platform,
     }
+    raw_text = _normalize_optional_text(candidate.online_resume_text)
+    if raw_text or online_resume_data:
+        online_resume = dict(online_resume_data or {})
+        if raw_text:
+            online_resume["raw_text"] = raw_text
+        online_resume.setdefault("source", candidate.platform)
+        online_resume.setdefault("captured_at", utcnow().isoformat())
+        structured_facts = extract_resume_structured_facts(raw_text, dict(candidate.contact_info or {}))
+        existing_facts = online_resume.get("structured_facts")
+        if isinstance(existing_facts, dict):
+            structured_facts = {**structured_facts, **existing_facts}
+        if structured_facts:
+            online_resume["structured_facts"] = structured_facts
+            snapshot["structured_facts"] = structured_facts
+        snapshot["online_resume"] = online_resume
+    return snapshot
+
+
+def _normalize_online_resume_data(value: Any) -> dict[str, Any]:
+    data = _normalize_mapping(value, field_name="online_resume_data")
+    normalized = dict(data)
+    raw_text = _normalize_optional_text(
+        normalized.pop("rawText", None)
+        or normalized.get("raw_text")
+        or normalized.get("text")
+        or normalized.get("full_text")
+        or normalized.get("fullText")
+    )
+    if raw_text:
+        normalized["raw_text"] = raw_text
+    source = _normalize_optional_text(normalized.get("source"))
+    if source:
+        normalized["source"] = source
+    return normalized
 
 
 def _normalize_application_state_input(
@@ -1555,9 +1775,92 @@ def _normalize_datetime(value: Any, *, field_name: str) -> datetime | None:
     raise ValueError(f"{field_name} must be a datetime-compatible value")
 
 
+def _timestamp(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        normalized = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+        return int(normalized.timestamp())
+    if isinstance(value, (int, float)):
+        return int(value)
+    return None
+
+
 def _normalize_optional_text(value: Any) -> str | None:
     text = str(value or "").strip()
     return text or None
+
+
+def _canonical_platform_key(value: Any) -> str | None:
+    text = _normalize_optional_text(value)
+    if text is None:
+        return None
+    compact = re.sub(r"[\s._-]+", "", text.casefold())
+    aliases = {
+        "boss": "zhipin",
+        "boss直聘": "zhipin",
+        "boss_zhipin": "zhipin",
+        "bosszhipin": "zhipin",
+        "zhipin": "zhipin",
+        "zhipincom": "zhipin",
+        "wwwzhipincom": "zhipin",
+    }
+    return aliases.get(compact, text)
+
+
+def _normalize_runtime_constraints(value: Any) -> dict[str, Any]:
+    return dict(value or {}) if isinstance(value, dict) else {}
+
+
+def _runtime_dedupe_candidate_name(constraints: dict[str, Any], name: str) -> bool:
+    raw_names = constraints.get("dedupe_existing_candidate_names") or constraints.get("dedupeExistingCandidateNames")
+    if not isinstance(raw_names, (list, tuple, set)):
+        return False
+    normalized_name = _normalize_optional_text(name)
+    return bool(normalized_name and normalized_name in {_normalize_optional_text(item) for item in raw_names})
+
+
+def _find_candidate_by_name_and_platform(session: Session, *, name: str, platform: str):
+    normalized_name = _normalize_optional_text(name)
+    normalized_platform = _canonical_platform_key(platform)
+    if not normalized_name or not normalized_platform:
+        return None
+    for candidate in CandidateRepository(session).list(limit=5000, offset=0):
+        if candidate.name == normalized_name and _canonical_platform_key(candidate.platform) == normalized_platform:
+            return candidate
+    return None
+
+
+def _enforce_max_new_candidates(session: Session, constraints: dict[str, Any]) -> None:
+    max_new = _positive_int(
+        constraints.get("max_new_candidates")
+        or constraints.get("maxNewCandidates")
+    )
+    if max_new is None:
+        return
+    run_created_at = _positive_int(
+        constraints.get("run_created_at")
+        or constraints.get("runCreatedAt")
+    )
+    if run_created_at is None:
+        return
+    created_in_run = 0
+    for candidate in CandidateRepository(session).list(limit=5000, offset=0):
+        created_at = _positive_int(getattr(candidate, "created_at", None))
+        if created_at is not None and created_at >= run_created_at:
+            created_in_run += 1
+    if created_in_run >= max_new:
+        raise ValueError(
+            f"max_new_candidates={max_new} reached for this run; refusing to create another candidate"
+        )
+
+
+def _positive_int(value: Any) -> int | None:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
 
 
 def _normalize_string_list(value: Any) -> list[str]:

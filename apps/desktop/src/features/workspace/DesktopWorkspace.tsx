@@ -352,6 +352,11 @@ export function DesktopWorkspace(): JSX.Element {
     await loadCoreWorkspace();
   };
 
+  const handleExtractResumeText = async (applicationId: string, artifactId: string) => {
+    await apiClient.extractResumeArtifactText(applicationId, artifactId);
+    await loadCoreWorkspace();
+  };
+
   const resolveApplicationId = (subjectId?: string) => {
     const normalized = String(subjectId ?? "").trim();
     if (!normalized) {
@@ -479,6 +484,7 @@ export function DesktopWorkspace(): JSX.Element {
             onRefresh={() => void refreshWorkspace()}
             onCreateEntry={handleCreateApplicationEntry}
             onTransition={handleTransitionApplicationState}
+            onExtractResumeText={handleExtractResumeText}
             onOpenDashboard={openDashboard}
             operatorProfile={summary.settings.userProfile}
             jdContent={null}
@@ -500,6 +506,7 @@ export function DesktopWorkspace(): JSX.Element {
             onRefresh={() => void refreshWorkspace()}
             onCreateEntry={handleCreateApplicationEntry}
             onTransition={handleTransitionApplicationState}
+            onExtractResumeText={handleExtractResumeText}
             onOpenDashboard={openDashboard}
             operatorProfile={summary.settings.userProfile}
             jdContent={null}

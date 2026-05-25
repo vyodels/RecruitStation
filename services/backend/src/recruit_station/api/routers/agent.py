@@ -283,7 +283,10 @@ def build_router(container: AppContainer) -> APIRouter:
         with container.session_factory() as session:
             definition = _resolve_agent_definition(session, "autonomous")
             agent_session = _ensure_agent_session(session, definition, kind="autonomous")
-            if _find_open_autonomous_run(session, session_id=agent_session.id, agent_kind="autonomous") is None:
+            conflicting_run = _find_conflicting_runtime_run(session, agent_kind="autonomous")
+            if conflicting_run is not None:
+                start_blocker = {"reason": _runtime_run_conflict_detail("autonomous", conflicting_run)}
+            elif _find_open_autonomous_run(session, session_id=agent_session.id, agent_kind="autonomous") is None:
                 try:
                     started_run = _create_saved_automation_run(
                         session,
@@ -780,6 +783,9 @@ def build_router(container: AppContainer) -> APIRouter:
                     status_code=409,
                     detail=f"{kind} already has another open run. Resolve it before resuming this one.",
                 )
+            runtime_conflict = _find_conflicting_runtime_run(session, agent_kind=kind, exclude_run_id=run.id)
+            if runtime_conflict is not None:
+                raise HTTPException(status_code=409, detail=_runtime_run_conflict_detail(kind, runtime_conflict))
             checkpoint = _resolve_run_gate_records(
                 session,
                 run=run,
@@ -1271,6 +1277,9 @@ def _create_autonomous_run(
             status_code=409,
             detail=f"{agent_kind} already has an open run. Wait for it to finish or resume it before starting another run.",
         )
+    conflicting_run = _find_conflicting_runtime_run(session, agent_kind=agent_kind)
+    if conflicting_run is not None:
+        raise HTTPException(status_code=409, detail=_runtime_run_conflict_detail(agent_kind, conflicting_run))
 
     constraints = dict(payload.constraints or {})
     scope_kind = str(constraints.get("scope_kind") or "").strip().lower()
@@ -1383,7 +1392,8 @@ def _validate_autonomous_run_contract(definition: AgentDefinition, payload: Auto
         _merge_jd_sync_payload(payload, config=jd_sync_config)
         return
     if run_kind in AUTOMATION_RECRUITING_RUN_KINDS:
-        _validated_automation_recruiting_config(definition)
+        automation_config = _validated_automation_recruiting_config(definition)
+        _merge_automation_recruiting_payload(payload, config=automation_config)
 
 
 def _validated_jd_sync_config(definition: AgentDefinition) -> dict[str, Any]:
@@ -1410,12 +1420,18 @@ def _merge_jd_sync_payload(payload: AutonomousTriggerRequest, *, config: dict[st
     target_recruiting_site = dict(config["target_recruiting_site"])
     execution_sop = dict(config["execution_sop"])
     sync_policy = dict(config["automation_config"].get("syncPolicy") or config["automation_config"].get("sync_policy") or {})
+    sync_mode = _jd_sync_mode(sync_policy=sync_policy, instruction=payload.instruction, request_message=payload.request_message)
+    max_job_descriptions = _jd_sync_max_job_descriptions(sync_policy=sync_policy, instruction=payload.instruction, request_message=payload.request_message)
     constraints = dict(payload.constraints or {})
     constraints.setdefault("scope_kind", "global")
     constraints.setdefault("plan_kind", "jd_sync")
     constraints.setdefault("target_recruiting_site", target_recruiting_site)
     constraints.setdefault("execution_sop", execution_sop)
     constraints.setdefault("sync_policy", sync_policy)
+    if sync_mode:
+        constraints.setdefault("sync_mode", sync_mode)
+    if max_job_descriptions is not None:
+        constraints.setdefault("max_job_descriptions", max_job_descriptions)
     payload.constraints = constraints
     context_hints = dict(payload.context_hints or {})
     context_hints.setdefault(
@@ -1425,6 +1441,8 @@ def _merge_jd_sync_payload(payload: AutonomousTriggerRequest, *, config: dict[st
             "target_recruiting_site": target_recruiting_site,
             "requires_selected_jd": False,
             "next_step_after_success": "select synced JD and configure JD strategy before full recruiting run",
+            **({"sync_mode": sync_mode} if sync_mode else {}),
+            **({"max_job_descriptions": max_job_descriptions} if max_job_descriptions is not None else {}),
         },
     )
     payload.context_hints = context_hints
@@ -1440,8 +1458,118 @@ def _merge_jd_sync_payload(payload: AutonomousTriggerRequest, *, config: dict[st
         target_recruiting_site=target_recruiting_site,
         execution_sop=execution_sop,
         sync_policy=sync_policy,
+        sync_mode=sync_mode,
+        max_job_descriptions=max_job_descriptions,
         user_instruction=user_instruction,
     )
+
+
+def _merge_automation_recruiting_payload(payload: AutonomousTriggerRequest, *, config: dict[str, Any]) -> None:
+    saved_job_ids = _selected_automation_job_ids(config)
+    requested_job_ids = _selected_runtime_job_ids(payload.constraints or {})
+    if requested_job_ids:
+        unknown_job_ids = [job_id for job_id in requested_job_ids if job_id not in saved_job_ids]
+        if unknown_job_ids:
+            raise HTTPException(
+                status_code=409,
+                detail="selected_job_description_ids must be configured in automation_recruiting_config.defaultRunJobIds: "
+                + ", ".join(unknown_job_ids),
+            )
+        selected_job_ids = requested_job_ids
+    else:
+        selected_job_ids = saved_job_ids
+
+    job_strategies = dict(config.get("jobStrategies") or config.get("job_strategies") or {})
+    job_plans = [
+        {
+            "job_description_id": job_id,
+            "strategy": dict(job_strategies.get(job_id) or {}),
+        }
+        for job_id in selected_job_ids
+    ]
+    execution_sop = dict(config.get("executionSop") or config.get("execution_sop") or {})
+    target_recruiting_site = _target_recruiting_site_from_sop(execution_sop)
+    compiled_sop_prompt = _compiled_automation_sop_prompt(
+        execution_sop=execution_sop,
+        target_recruiting_site=target_recruiting_site,
+        job_plans=job_plans,
+    )
+    execution_sop["compiledPrompt"] = compiled_sop_prompt
+    activation_policy = _structured_activation_policy(config)
+    resume_policy = dict(config.get("resumePolicy") or config.get("resume_policy") or {})
+    sync_policy = dict(config.get("syncPolicy") or config.get("sync_policy") or {})
+    tool_approval_policy = dict(config.get("toolApprovalPolicy") or config.get("tool_approval_policy") or {})
+
+    constraints = dict(payload.constraints or {})
+    constraints.setdefault("scope_kind", "global")
+    constraints.setdefault("plan_kind", str(payload.kind or "recruiting").strip() or "recruiting")
+    constraints["selected_job_description_ids"] = selected_job_ids
+    constraints.setdefault("enabled_job_description_ids", selected_job_ids)
+    constraints["execution_sop"] = execution_sop
+    constraints["target_recruiting_site"] = target_recruiting_site
+    constraints["activation_policy"] = activation_policy
+    constraints["resume_policy"] = resume_policy
+    constraints["sync_policy"] = sync_policy
+    constraints["business_policy_overlay"] = {"job_plans": job_plans}
+    constraints["runtime_controls"] = _automation_runtime_controls(config, activation_policy=activation_policy)
+    constraints["tool_approval_policy"] = tool_approval_policy
+
+    browser_target = derive_browser_target(
+        existing=None,
+        structured_sources=(),
+        text_sources=(target_recruiting_site.get("entry_url"), payload.instruction, payload.title),
+    )
+    if browser_target:
+        constraints["browser_target"] = browser_target
+        context_hints = dict(payload.context_hints or {})
+        context_hints["browser_target"] = browser_target
+        launch_plan = dict(context_hints.get("launch_plan") or {})
+        launch_plan.setdefault("target_recruiting_site", target_recruiting_site)
+        launch_plan.setdefault("selected_job_description_ids", selected_job_ids)
+        launch_plan.setdefault("plan_kind", constraints["plan_kind"])
+        context_hints["launch_plan"] = launch_plan
+        payload.context_hints = context_hints
+
+    payload.constraints = constraints
+
+    instruction = str(payload.instruction or "").strip()
+    if "## 自动化招聘执行 SOP" not in instruction:
+        site_instruction = (
+            f"招聘网站目标网页 URL：{target_recruiting_site.get('entry_url')}；"
+            "复用人工已登录的浏览器会话，并由 Agent 根据页面可见导航和内容进入正确业务页面。"
+        )
+        enabled_job_instruction = (
+            "本次运行的启用 JD 以 selected_job_description_ids/defaultRunJobIds 为准；"
+            "本地 JD 状态 active 表示可用于本次运行，不要求存在 status=enabled。"
+        )
+        payload.instruction = "\n".join(
+            part
+            for part in (
+                instruction,
+                site_instruction,
+                enabled_job_instruction,
+                "执行时必须遵守已保存的 JD 策略、执行 SOP、站点边界、审批规则和同步规则。",
+                "",
+                "## 自动化招聘执行 SOP",
+                compiled_sop_prompt,
+            )
+            if part != ""
+        )
+
+
+def _selected_runtime_job_ids(constraints: dict[str, Any]) -> list[str]:
+    raw = (
+        constraints.get("selected_job_description_ids")
+        or constraints.get("selectedJobDescriptionIds")
+        or constraints.get("enabled_job_description_ids")
+        or constraints.get("enabledJobDescriptionIds")
+        or []
+    )
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list | tuple | set):
+        return []
+    return [str(item).strip() for item in list(raw) if str(item).strip()]
 
 
 def _build_jd_sync_user_instruction(
@@ -1449,6 +1577,8 @@ def _build_jd_sync_user_instruction(
     target_recruiting_site: dict[str, Any],
     execution_sop: dict[str, Any],
     sync_policy: dict[str, Any],
+    sync_mode: str | None = None,
+    max_job_descriptions: int | None = None,
     user_instruction: str,
 ) -> str:
     entry_url = str(target_recruiting_site.get("entry_url") or "").strip()
@@ -1462,6 +1592,7 @@ def _build_jd_sync_user_instruction(
         sync_policy.get("jdSyncText")
         or sync_policy.get("jd_sync_text")
     )
+    single_probe = sync_mode == "single_jd_probe" and max_job_descriptions == 1
     instruction_parts = [
         "同步招聘站点 JD",
         "",
@@ -1470,16 +1601,33 @@ def _build_jd_sync_user_instruction(
         "- 根据页面可见导航和内容自行找到职位列表与职位详情。",
         "- 职位列表只用于发现待同步职位，不能把列表页摘要或职位数量当作完成。",
         "- 对每个仍在招聘的职位，必须进入或打开职位详情并完整读取岗位详情后，才能同步到本地 JD 库。",
+        *(
+            [
+                "- 本次运行模式是单 JD 试跑：最多同步 1 个招聘中 JD；只要已完整读取并写入 1 个 JD，本阶段即可收敛，不要求完成全量职位发现、全量详情读取、更新/下架识别或生效 JD 选择。",
+            ]
+            if single_probe
+            else []
+        ),
         "- 如果只读到列表但尚未读取详情，应继续执行；只有遇到登录、权限、必要执行工具缺失或页面不可达等明确问题才标记为阻塞。",
         "- 进入详情页、翻页或返回列表等页面动作应使用系统提供的浏览器观察和电脑/HID执行链路；不得因为浏览器观察工具只读就结束任务。",
         "- 如果页面动作失败但仍处于同源站点，应先恢复后继续：重新观察页面、等待页面稳定、释放异常按键状态、选择页面上的其他同源入口、滚动到稳定位置，或使用页面内导航控件继续。",
         "- 恢复执行不是重复同一失败动作；每次恢复都应根据最新页面证据切换页面内路径，例如从当前详情返回职位列表、滚动到目标职位入口、或选择已观察到的下一个同源详情入口。",
         "- 不得主动聚焦浏览器地址栏、输入 URL 或粘贴 URL 作为恢复路径；如果缺少页面内可执行证据，应说明 blocker 和需要恢复的页面条件。",
         "- 单次点击、返回、滚动或注入超时不是任务终局；只要目标站点仍可访问且还有职位详情未完整读取，就应在本轮继续恢复和推进。",
-        "- 如果已经从列表发现多个职位，但本地写回数量少于发现数量或仍有任一职位缺少详情页证据，应继续打开剩余职位详情，不能输出最终总结。",
-        "- 可以先写入已经完整读取详情的职位作为进度；但在没有完成全量职位发现、全量详情读取、更新/下架识别和生效 JD 选择前，不得用“已完成部分同步”结束本轮。",
+        "- 完成判断只能基于本轮 JD 写入工具返回或随后本地 JD 数据库二次读取结果；不得把历史 checkpoint、记忆、摘要或上一轮输出当成本轮已写入证据。",
+        *(
+            [
+                "- 如果已经完整写入 1 个 JD，应输出单 JD 试跑完成摘要；但必须先由工具返回或本地二次读取确认该 JD 存在，不得因为尚未全量扫描所有职位而继续 recovery。",
+            ]
+            if single_probe
+            else [
+                "- 如果已经从列表发现多个职位，但本地写回数量少于发现数量或仍有任一职位缺少详情页证据，应继续打开剩余职位详情，不能输出最终总结。",
+                "- 可以先写入已经完整读取详情的职位作为进度；但在没有完成全量职位发现、全量详情读取、更新/下架识别和生效 JD 选择前，不得用“已完成部分同步”结束本轮。",
+            ]
+        ),
         "- 只发现和同步 JD。",
         "- 不处理候选人筛选、评分、外联或投递推进。",
+        "- JD 同步通常只在初始化或招聘站点 JD 发生变化时手动运行；日常自动化招聘不得与 JD 同步同时运行。",
         "",
         "目标网页：",
         f"- URL：{entry_url}",
@@ -1509,6 +1657,43 @@ def _config_text_lines(value: Any) -> list[str]:
     else:
         candidates = [line.strip() for line in str(value).splitlines()]
     return [line for line in candidates if line]
+
+
+def _jd_sync_mode(*, sync_policy: dict[str, Any], instruction: Any, request_message: Any) -> str | None:
+    raw_mode = (
+        sync_policy.get("syncMode")
+        or sync_policy.get("sync_mode")
+        or sync_policy.get("mode")
+    )
+    normalized_mode = str(raw_mode or "").strip().lower().replace("-", "_")
+    if normalized_mode in {"single_jd_probe", "single_jd", "single_job", "probe", "smoke"}:
+        return "single_jd_probe"
+    text = "\n".join(
+        str(value or "")
+        for value in (
+            sync_policy.get("jdSyncText"),
+            sync_policy.get("jd_sync_text"),
+            instruction,
+            request_message,
+        )
+    ).lower()
+    if ("单 jd" in text or "单个 jd" in text or "single jd" in text or "最多 1 个" in text or "最多1个" in text):
+        return "single_jd_probe"
+    return None
+
+
+def _jd_sync_max_job_descriptions(*, sync_policy: dict[str, Any], instruction: Any, request_message: Any) -> int | None:
+    for key in ("maxJobDescriptions", "max_job_descriptions", "maxJobs", "max_jobs"):
+        value = sync_policy.get(key)
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            continue
+        if parsed > 0:
+            return parsed
+    if _jd_sync_mode(sync_policy=sync_policy, instruction=instruction, request_message=request_message) == "single_jd_probe":
+        return 1
+    return None
 
 
 def _product_jd_sync_policy_lines(value: Any) -> list[str]:
@@ -2059,6 +2244,34 @@ def _find_open_autonomous_run(
     if exclude_run_id is not None:
         stmt = stmt.where(AgentRun.id != exclude_run_id)
     return session.scalars(stmt).first()
+
+
+def _find_conflicting_runtime_run(
+    session: Session,
+    *,
+    agent_kind: AgentKind,
+    exclude_run_id: str | None = None,
+) -> AgentRun | None:
+    stmt = (
+        select(AgentRun)
+        .where(
+            AgentRun.agent_kind.in_(RUNTIME_AGENT_KINDS),
+            AgentRun.agent_kind != agent_kind,
+            AgentRun.status.in_(AUTONOMOUS_OPEN_RUN_STATUSES),
+        )
+        .order_by(AgentRun.updated_at.desc(), AgentRun.id.desc())
+    )
+    if exclude_run_id is not None:
+        stmt = stmt.where(AgentRun.id != exclude_run_id)
+    return session.scalars(stmt).first()
+
+
+def _runtime_run_conflict_detail(agent_kind: AgentKind, conflicting_run: AgentRun) -> str:
+    return (
+        "JD Sync and automation recruiting cannot run at the same time. "
+        f"Resolve open {conflicting_run.agent_kind} run {conflicting_run.run_id} "
+        f"before starting or resuming {agent_kind}."
+    )
 
 
 def _approval_belongs_to_kind(session: Session, approval: ApprovalItem, kind: AgentKind) -> bool:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from datetime import timedelta
+from datetime import datetime, timedelta
 import json
 import re
 from threading import RLock
@@ -34,6 +34,7 @@ from recruit_station.models.domain import (
     ApprovalItem,
     Candidate,
     CandidateApplication,
+    JobDescription,
     McpServer,
     OperatorInteraction,
     AgentDefinition,
@@ -68,6 +69,8 @@ AUTONOMOUS_PRIMARY_CONVERSATION_ID = "autonomous-primary"
 JD_SYNC_PRIMARY_CONVERSATION_ID = "jd-sync-primary"
 TRANSIENT_PROVIDER_RETRY_MAX_ATTEMPTS = 3
 JD_SYNC_RECOVERABLE_SCENE_RETRY_MAX_ATTEMPTS = 16
+JD_SYNC_SINGLE_PROBE_CONTINUATION_MAX_ATTEMPTS = 5
+JD_SYNC_SINGLE_PROBE_RECOVERABLE_SCENE_RETRY_MAX_ATTEMPTS = 2
 
 
 @dataclass(slots=True)
@@ -215,8 +218,48 @@ class AutonomousAdapter:
             )
             session.commit()
 
+            early_completion = _complete_single_jd_probe_if_satisfied(
+                session,
+                run=run,
+                envelope=envelope,
+                outcome=AgentTurnOutcome(status="continue", gate_signal="continue"),
+            )
+            if _is_completed_outcome(early_completion):
+                turn.status = _turn_status_from_outcome(early_completion)
+                turn.phase = "evaluate"
+                turn.outcome_kind = early_completion.status
+                turn.turn_metadata = {
+                    "final_output": early_completion.final_output,
+                    "gate_signal": early_completion.gate_signal,
+                    "engine_output_count": 0,
+                    "early_completion": True,
+                }
+                run.turns_count = int(run.turns_count or 0) + 1
+                run.status = _run_status_from_outcome(early_completion)
+                run.finished_at = utcnow()
+                run.last_error = None
+                _resolve_wait_human_records(session, run=run)
+                _append_runtime_event(
+                    session,
+                    run=run,
+                    turn_id=turn.turn_id,
+                    seq=next_seq + 1,
+                    event_type="runtime_event",
+                    message="single_jd_probe_completed",
+                    payload={
+                        "data": {
+                            "kind": "single_jd_probe_completed",
+                            "status": "completed",
+                            "synced_count": early_completion.metadata.get("single_jd_probe_synced_count"),
+                        }
+                    },
+                )
+                session.commit()
+                return early_completion
+
             run_constraints = dict(instruction_snapshot.get("constraints") or {})
             run_constraints["run_pk"] = run.id
+            run_constraints["run_created_at"] = run.created_at
             run_constraints["agent_definition_id"] = agent_definition_id
             run_constraints["run_kind"] = _snapshot_kind(instruction_snapshot, run)
             run_constraints["success_criteria"] = dict(instruction_snapshot.get("success_criteria") or {})
@@ -373,7 +416,26 @@ class AutonomousAdapter:
                         tool_result=tool_result,
                     )
 
+                def _record_engine_output_and_maybe_interrupt(output: InteractionOutput) -> None:
+                    _record_engine_output(session, run=run, turn_id=turn.turn_id, output=output)
+                    if not _single_jd_probe_target_reached_after_tool_result(
+                        session,
+                        session_factory=self.session_factory,
+                        run=run,
+                        envelope=envelope,
+                        output=output,
+                    ):
+                        return
+                    with self._active_turns_lock:
+                        engine = active_turn.engine
+                    if engine is not None:
+                        engine.interrupt("single_jd_probe_target_reached")
+
                 try:
+                    continuation_max_attempts = _jd_sync_final_output_continuation_max_attempts(
+                        run=run,
+                        envelope=envelope,
+                    )
                     runner_result = run_agent_turn(
                         provider=self.provider,
                         tool_registry=turn_tool_registry,
@@ -388,12 +450,13 @@ class AutonomousAdapter:
                         transcript=resume_transcript,
                         existing_engine=existing_engine,
                         resolve_permission=bool(approved_tool_calls),
-                        output_sink=lambda output: _record_engine_output(session, run=run, turn_id=turn.turn_id, output=output),
+                        output_sink=_record_engine_output_and_maybe_interrupt,
                         engine_sink=_bind_engine,
                         structured_status_resolver=_outcome_from_structured_result_data,
                         final_output_status_resolver=_outcome_from_final_output_text,
                         final_output_continuation_resolver=_final_output_continuation_resolver(
-                            agent_kind=str(run.agent_kind or "autonomous")
+                            agent_kind=str(run.agent_kind or "autonomous"),
+                            max_attempts=continuation_max_attempts,
                         ),
                         runtime={
                             "permission_policy": _runtime_permission_policy(run_constraints),
@@ -432,6 +495,20 @@ class AutonomousAdapter:
                         "interaction_engine": True,
                         "continuation_attempts": runner_result.continuation_attempts,
                     },
+                )
+                last_outcome = _complete_single_jd_probe_if_satisfied(
+                    session,
+                    run=run,
+                    envelope=envelope,
+                    outcome=last_outcome,
+                )
+                last_outcome = _block_single_jd_probe_if_continuation_budget_exhausted(
+                    session,
+                    run=run,
+                    envelope=envelope,
+                    outcome=last_outcome,
+                    continuation_attempts=runner_result.continuation_attempts,
+                    max_attempts=continuation_max_attempts,
                 )
                 if runner_result.status == "wait_human":
                     self.pending_permission_engines[run.id] = runner_result.engine
@@ -1028,9 +1105,19 @@ def _queue_jd_sync_recoverable_scene_retry(
         return None
     if _is_waiting_human(outcome):
         return None
+    single_probe_target = _jd_sync_single_probe_target(run=run, envelope=envelope)
+    if single_probe_target is not None and _jd_sync_synced_job_count(session, run=run) >= single_probe_target:
+        return None
+    if dict(outcome.metadata or {}).get("single_jd_probe_continuation_budget_exhausted"):
+        return None
     metadata = dict(envelope.get("metadata") or {}) if isinstance(envelope.get("metadata"), dict) else {}
     retry_count = _safe_int(metadata.get("jd_sync_recoverable_scene_retry_count")) or 0
-    if retry_count >= JD_SYNC_RECOVERABLE_SCENE_RETRY_MAX_ATTEMPTS:
+    retry_limit = (
+        JD_SYNC_SINGLE_PROBE_RECOVERABLE_SCENE_RETRY_MAX_ATTEMPTS
+        if single_probe_target is not None
+        else JD_SYNC_RECOVERABLE_SCENE_RETRY_MAX_ATTEMPTS
+    )
+    if retry_count >= retry_limit:
         return None
 
     outcome_metadata = dict(outcome.metadata or {})
@@ -1126,6 +1213,200 @@ def _queue_jd_sync_recoverable_scene_retry(
     )
 
 
+def _complete_single_jd_probe_if_satisfied(
+    session: Session,
+    *,
+    run: AgentRun,
+    envelope: dict[str, Any],
+    outcome: AgentTurnOutcome,
+) -> AgentTurnOutcome:
+    if str(run.agent_kind or "").strip().lower() != "jd_sync":
+        return outcome
+    if _is_waiting_human(outcome):
+        return outcome
+    target = _jd_sync_single_probe_target(run=run, envelope=envelope)
+    if target is None:
+        return outcome
+    synced_count = _jd_sync_synced_job_count(session, run=run)
+    if synced_count < target:
+        if _is_completed_outcome(outcome):
+            metadata = dict(outcome.metadata or {})
+            metadata["single_jd_probe_completion_rejected"] = True
+            metadata["single_jd_probe_synced_count"] = synced_count
+            metadata["single_jd_probe_target"] = target
+            final_output = str(outcome.final_output or "").strip()
+            rejection_note = (
+                f"单 JD 同步试跑不能标记完成：本地 JD 库仅确认 {synced_count} 个本轮 jd_sync 写入，"
+                f"目标 {target} 个。历史 checkpoint、记忆或摘要不能作为完成证据；必须继续读取详情并调用 upsert_job_description，"
+                "或在登录/验证码/权限/风控/工具缺失时明确阻塞。"
+            )
+            return AgentTurnOutcome(
+                status="escalate",
+                gate_signal="escalate",
+                final_output="\n\n".join(part for part in (rejection_note, final_output) if part),
+                tool_calls=outcome.tool_calls,
+                tool_results=outcome.tool_results,
+                metadata=metadata,
+            )
+        return outcome
+    metadata = dict(outcome.metadata or {})
+    metadata["single_jd_probe_completed"] = True
+    metadata["single_jd_probe_synced_count"] = synced_count
+    final_output = str(outcome.final_output or "").strip()
+    completion_note = (
+        f"单 JD 同步试跑已达到本阶段目标：已写入 {synced_count} 个 JD，目标 {target} 个。"
+        "本运行模式不要求继续完成全量职位发现、全量详情读取、更新/下架识别或生效 JD 选择。"
+    )
+    return AgentTurnOutcome(
+        status="complete",
+        gate_signal="run_done",
+        final_output="\n\n".join(part for part in (completion_note, final_output) if part),
+        tool_calls=outcome.tool_calls,
+        tool_results=outcome.tool_results,
+        metadata=metadata,
+    )
+
+
+def _jd_sync_final_output_continuation_max_attempts(*, run: AgentRun, envelope: dict[str, Any]) -> int:
+    if _jd_sync_single_probe_target(run=run, envelope=envelope) is not None:
+        return JD_SYNC_SINGLE_PROBE_CONTINUATION_MAX_ATTEMPTS
+    return 16
+
+
+def _block_single_jd_probe_if_continuation_budget_exhausted(
+    session: Session,
+    *,
+    run: AgentRun,
+    envelope: dict[str, Any],
+    outcome: AgentTurnOutcome,
+    continuation_attempts: int,
+    max_attempts: int,
+) -> AgentTurnOutcome:
+    target = _jd_sync_single_probe_target(run=run, envelope=envelope)
+    if target is None:
+        return outcome
+    if _is_waiting_human(outcome):
+        return outcome
+    if _jd_sync_synced_job_count(session, run=run) >= target:
+        return outcome
+    if int(continuation_attempts or 0) < int(max_attempts or 0):
+        return outcome
+    metadata = dict(outcome.metadata or {})
+    metadata["single_jd_probe_continuation_budget_exhausted"] = True
+    metadata["single_jd_probe_target"] = target
+    metadata["single_jd_probe_continuation_attempts"] = int(continuation_attempts or 0)
+    final_output = str(outcome.final_output or "").strip()
+    budget_note = (
+        f"单 JD 同步试跑已达到恢复尝试上限：连续 {continuation_attempts} 次恢复后，"
+        f"本地 JD 库仍未确认本轮写入 {target} 个招聘中 JD。"
+        "为避免在真实招聘站点无限循环，本轮应阻塞并交给人工恢复页面条件："
+        "请将浏览器停留在职位管理列表中清晰可点击的已发布/招聘中职位条目，"
+        "或直接停留在某个已发布职位的详情/编辑页；不能使用历史记忆、checkpoint、列表摘要或新建/待发布表单作为完成证据。"
+    )
+    return AgentTurnOutcome(
+        status="escalate",
+        gate_signal="escalate",
+        final_output="\n\n".join(part for part in (budget_note, final_output) if part),
+        tool_calls=outcome.tool_calls,
+        tool_results=outcome.tool_results,
+        metadata=metadata,
+    )
+
+
+def _single_jd_probe_target_reached_after_tool_result(
+    session: Session,
+    *,
+    session_factory: sessionmaker[Session] | None = None,
+    run: AgentRun,
+    envelope: dict[str, Any],
+    output: InteractionOutput,
+) -> bool:
+    if output.type != "tool_event":
+        return False
+    data = dict(output.data or {})
+    if data.get("kind") != "tool_result_ready":
+        return False
+    if data.get("tool_name") != "upsert_job_description":
+        return False
+    if bool(data.get("is_error")):
+        return False
+    target = _jd_sync_single_probe_target(run=run, envelope=envelope)
+    if target is None:
+        return False
+    if session_factory is not None:
+        with session_factory() as fresh_session:
+            fresh_run = fresh_session.get(AgentRun, run.id) or run
+            return _jd_sync_synced_job_count(fresh_session, run=fresh_run) >= target
+    session.expire_all()
+    return _jd_sync_synced_job_count(session, run=run) >= target
+
+
+def _jd_sync_single_probe_target(*, run: AgentRun, envelope: dict[str, Any]) -> int | None:
+    if str(run.agent_kind or "").strip().lower() != "jd_sync":
+        return None
+    context_manifest = dict(run.context_manifest or {})
+    runtime_metadata = dict(run.runtime_metadata or {})
+    metadata = dict(envelope.get("metadata") or {}) if isinstance(envelope.get("metadata"), dict) else {}
+    world_snapshot = dict(envelope.get("world_snapshot") or {}) if isinstance(envelope.get("world_snapshot"), dict) else {}
+    constraints = _merged_dict(
+        runtime_metadata.get("constraints"),
+        context_manifest.get("constraints"),
+        metadata.get("constraints"),
+        world_snapshot.get("constraints"),
+        envelope.get("constraints"),
+    )
+    sync_policy = dict(constraints.get("sync_policy") or {})
+    mode = str(
+        constraints.get("sync_mode")
+        or sync_policy.get("syncMode")
+        or sync_policy.get("sync_mode")
+        or sync_policy.get("mode")
+        or ""
+    ).strip().lower().replace("-", "_")
+    target = _safe_int(
+        constraints.get("max_job_descriptions")
+        or sync_policy.get("maxJobDescriptions")
+        or sync_policy.get("max_job_descriptions")
+        or sync_policy.get("maxJobs")
+        or sync_policy.get("max_jobs")
+    )
+    text = "\n".join(
+        str(value or "")
+        for value in (
+            constraints.get("instruction"),
+            runtime_metadata.get("instruction"),
+            context_manifest.get("instruction"),
+            metadata.get("instruction"),
+            world_snapshot.get("instruction"),
+            sync_policy.get("jdSyncText"),
+            sync_policy.get("jd_sync_text"),
+        )
+    ).lower()
+    if target is not None and target > 0 and mode in {"single_jd_probe", "single_jd", "single_job", "probe", "smoke"}:
+        return target
+    if mode in {"single_jd_probe", "single_jd", "single_job", "probe", "smoke"}:
+        return 1
+    if target == 1:
+        return 1
+    if "单 jd" in text or "单个 jd" in text or "single jd" in text or "最多 1 个" in text or "最多1个" in text:
+        return 1
+    return None
+
+
+def _jd_sync_synced_job_count(session: Session, *, run: AgentRun) -> int:
+    stmt = select(func.count()).select_from(JobDescription).where(JobDescription.source == "jd_sync")
+    started_at = getattr(run, "started_at", None)
+    if started_at is not None:
+        if isinstance(started_at, datetime):
+            stmt = stmt.where(JobDescription.created_at >= int(started_at.timestamp()) - 60)
+        else:
+            try:
+                stmt = stmt.where(JobDescription.created_at >= started_at - 60)
+            except TypeError:
+                stmt = stmt.where(JobDescription.created_at >= started_at)
+    return int(session.scalar(stmt) or 0)
+
+
 def _jd_sync_recoverable_scene_retry_needed(
     *,
     final_output: str,
@@ -1152,9 +1433,11 @@ def _safe_int(value: Any) -> int | None:
 def _final_output_continuation_resolver(
     *,
     agent_kind: str,
+    max_attempts: int | None = None,
 ) -> Callable[[str, list[dict[str, Any]], list[dict[str, Any]], int], str | None] | None:
     if str(agent_kind or "").strip().lower() != "jd_sync":
         return None
+    attempt_limit = max(1, int(max_attempts or 16))
 
     def _resolver(
         final_output: str,
@@ -1163,7 +1446,7 @@ def _final_output_continuation_resolver(
         attempt: int,
         result_data: dict[str, Any] | None = None,
     ) -> str | None:
-        if attempt >= 16:
+        if attempt >= attempt_limit:
             return None
         if (
             not _jd_sync_final_output_needs_tool_continuation(final_output)

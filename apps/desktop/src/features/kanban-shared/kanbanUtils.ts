@@ -1,6 +1,6 @@
 import { funnelMilestones, getFunnelMilestone, getTriggeredMilestones } from "@recruit-station/shared";
 import type { HumanActionDefinition, RecruitmentStateMachine, StateNode, StateTransition } from "@recruit-station/shared";
-import type { ApplicationRecord, ApplicationThreadRecord } from "../../lib/types";
+import type { ApplicationRecord, ApplicationThreadRecord, ResumeArtifactSummary } from "../../lib/types";
 
 export interface ApplicationViewModel {
   application: ApplicationRecord;
@@ -32,16 +32,6 @@ export interface ContactDetailSummary {
   value: string;
   source: string;
   recordedAt?: string;
-}
-
-export interface ResumeArtifactSummary {
-  id: string;
-  title: string;
-  path?: string;
-  source: string;
-  recordedAt?: string;
-  excerpt?: string;
-  contactSummary?: string;
 }
 
 export function applicationScopedLabel(label: string): string {
@@ -229,6 +219,9 @@ export function getResumeArtifactSummaries(thread?: ApplicationThreadRecord): Re
     .map((artifact) => ({
       id: artifact.id,
       title: artifact.fileName ?? artifact.filePath ?? summarizeSourceToken(artifact.artifactType || "resume artifact"),
+      fileName: artifact.fileName,
+      artifactType: artifact.artifactType,
+      previewUrl: artifact.previewUrl,
       path:
         artifact.filePath ??
         pickString(asObject(artifact.artifactMetadata).path) ??
@@ -236,6 +229,7 @@ export function getResumeArtifactSummaries(thread?: ApplicationThreadRecord): Re
       source: summarizeSourceToken(artifact.source),
       recordedAt: artifact.capturedAt ?? artifact.createdAt,
       excerpt: summarizeText(artifact.extractedText ?? undefined),
+      extractedText: artifact.extractedText ?? undefined,
       contactSummary: resolveContactSummaryFromSnapshot(asObject(artifact.contactSnapshot)),
     }))
     .sort((left, right) => (right.recordedAt ?? "").localeCompare(left.recordedAt ?? ""));

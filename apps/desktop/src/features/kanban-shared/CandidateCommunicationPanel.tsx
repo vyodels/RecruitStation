@@ -24,6 +24,7 @@ interface CandidateCommunicationPanelProps {
     payload: { direction: string; content: string; messageType?: string; platform?: string },
   ): Promise<unknown> | void;
   onTransition(applicationId: string, payload: ApplicationTransitionPayload): Promise<unknown> | void;
+  onExtractResumeText?(applicationId: string, artifactId: string): Promise<unknown> | void;
   operatorProfile?: {
     nickname: string;
     avatarUrl?: string | null;
@@ -49,6 +50,7 @@ export function CandidateCommunicationPanel({
   onRefresh,
   onCreateEntry,
   onTransition,
+  onExtractResumeText,
   operatorProfile,
 }: CandidateCommunicationPanelProps): JSX.Element | null {
   const { copy } = useI18n();
@@ -331,6 +333,7 @@ export function CandidateCommunicationPanel({
         stateMachine={stateMachine}
         onClose={() => setDetailOpen(false)}
         onTransition={onTransition}
+        onExtractResumeText={onExtractResumeText}
         onRequestOverride={() => {
           setDetailOpen(false);
           setOverrideOpen(true);

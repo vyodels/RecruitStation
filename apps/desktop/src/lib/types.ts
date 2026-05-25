@@ -54,6 +54,20 @@ export type ChatOverlayPanelKey =
   | "outputs"
   | "runs";
 
+export interface ResumeArtifactSummary {
+  id: string;
+  title: string;
+  path?: string;
+  previewUrl?: string;
+  source: string;
+  artifactType: string;
+  fileName?: string | null;
+  recordedAt?: string;
+  excerpt?: string;
+  extractedText?: string;
+  contactSummary?: string;
+}
+
 export interface PersonSummaryRecord {
   personId?: string | null;
   platformCandidateId?: string | null;
@@ -264,6 +278,7 @@ export interface ResumeArtifactRecord {
   artifactType: string;
   fileName?: string | null;
   filePath?: string | null;
+  previewUrl?: string;
   extractedText?: string | null;
   contactSnapshot: Record<string, unknown>;
   artifactMetadata: Record<string, unknown>;

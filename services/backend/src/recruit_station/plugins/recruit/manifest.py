@@ -17,6 +17,7 @@ from recruit_station.plugins.recruit.toolkit import (
     create_candidate_sync_record,
     delete_candidate,
     delete_resume_artifact,
+    extract_resume_artifact_text,
     get_candidate_thread,
     get_jd_progress,
     list_candidates,
@@ -265,6 +266,7 @@ class RecruitPluginManifest:
                         "contact_info": {"type": "object"},
                         "resume_path": {"type": "string"},
                         "online_resume_text": {"type": "string"},
+                        "online_resume_data": {"type": "object"},
                         "profile_url": {"type": "string"},
                         "raw_profile": {"type": "object"},
                         "first_seen_at": {"type": ["string", "number"]},
@@ -551,6 +553,28 @@ class RecruitPluginManifest:
                     "additionalProperties": False,
                 },
                 handler=lambda arguments: attach_resume_artifact(self.session_factory, **arguments),
+                resource_target_kind="candidate",
+                metadata={"capabilities": ["candidate", "resume", "recruit_write"]},
+            ),
+            _tool(
+                name="extract_resume_artifact_text",
+                description=(
+                    "Extract text from a stored local resume artifact on demand for scoring. Use only when the existing "
+                    "file preview or metadata is insufficient and text is actually required; this writes extraction metadata "
+                    "and extracted text back to the local application resume snapshot."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "artifact_id": {"type": "string"},
+                        "application_id": {"type": "string"},
+                        "candidate_person_id": {"type": "string"},
+                        "job_description_id": {"type": "string"},
+                    },
+                    "required": ["artifact_id"],
+                    "additionalProperties": False,
+                },
+                handler=lambda arguments: extract_resume_artifact_text(self.session_factory, **arguments),
                 resource_target_kind="candidate",
                 metadata={"capabilities": ["candidate", "resume", "recruit_write"]},
             ),

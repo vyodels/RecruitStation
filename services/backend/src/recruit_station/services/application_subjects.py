@@ -23,11 +23,13 @@ def application_payload_from_application(
         or application_metadata.get("resume_summary")
         or "申请档案正在等待审查。"
     ).strip()
-    resume_snapshot = dict(
-        application_metadata.get("resume_snapshot")
-        or state_snapshot.get("resume_snapshot")
-        or {}
-    )
+    resume_snapshot = dict(getattr(application, "resume_snapshot", None) or {})
+    if not resume_snapshot:
+        resume_snapshot = dict(
+            application_metadata.get("resume_snapshot")
+            or state_snapshot.get("resume_snapshot")
+            or {}
+        )
     resume_status = str(
         application_metadata.get("resume_status")
         or state_snapshot.get("resume_status")
@@ -54,7 +56,6 @@ def application_payload_from_application(
         "online_resume_text": str(getattr(person, "online_resume_text", None) or "") or None,
     }
     contact_snapshot = dict(getattr(application, "contact_snapshot", None) or {})
-    resume_snapshot = dict(getattr(application, "resume_snapshot", None) or {})
     application_payload = {
         "application_id": application_id,
         "person_id": person_id,

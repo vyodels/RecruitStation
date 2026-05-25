@@ -7,6 +7,11 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from agent_runtime.fixtures import LLMResponse, ScriptedProvider, ToolCall
+from recruit_station.agents.autonomous import (
+    _block_single_jd_probe_if_continuation_budget_exhausted,
+    _complete_single_jd_probe_if_satisfied,
+)
+from recruit_station.agents.outcome import AgentTurnOutcome
 from recruit_station.capabilities.tools import ToolDefinition
 from recruit_station.core.settings import load_settings
 from recruit_station.models.domain import (
@@ -15,6 +20,7 @@ from recruit_station.models.domain import (
     AgentRunCheckpoint,
     AgentRuntimeEvent,
     ApprovalItem,
+    JobDescription,
     OperatorInteraction,
     TaskQueueItem,
     utcnow,
@@ -168,6 +174,20 @@ def test_autonomous_run_endpoint_rejects_incomplete_recruiting_config(tmp_path, 
     assert client.get("/api/agents/queue").json() == []
 
 
+def test_default_autonomous_sop_is_agent_config_not_runtime_hardcode(tmp_path, monkeypatch) -> None:
+    client = _client(tmp_path, monkeypatch, "default-autonomous-sop-config")
+
+    response = client.get("/api/agents/autonomous")
+
+    assert response.status_code == 200, response.text
+    automation_config = response.json()["productConfig"]["autonomous"]["automation_recruiting_config"]
+    steps_text = automation_config["executionSop"]["stepsText"]
+    assert "自动化招聘 Agent 的日常目标" in steps_text
+    assert "沟通：最高优先级入口" in steps_text
+    assert "推荐牛人、搜索" in steps_text
+    assert "最终总结中的本地 record id" in steps_text
+
+
 def test_jd_sync_run_requires_only_saved_entry_url(tmp_path, monkeypatch) -> None:
     client = _client(tmp_path, monkeypatch, "jd-sync-bootstrap")
     patched = client.patch(
@@ -258,7 +278,277 @@ def test_jd_sync_run_requires_only_saved_entry_url(tmp_path, monkeypatch) -> Non
     assert "platform/external_id" not in run_input["content"]
     assert "external_id" not in run_input["content"]
     assert run_input["content"].count("URL：https://mock-recruiting.local/") == 1
-    assert "sync jobs" in run_input["content"]
+
+
+def test_jd_sync_single_probe_config_constrains_instruction_and_runtime(tmp_path, monkeypatch) -> None:
+    client = _client(tmp_path, monkeypatch, "jd-sync-single-probe")
+    patched = client.patch(
+        "/api/agents/jd_sync",
+        json={
+            "product_config": {
+                "jd_sync": {
+                    "jd_sync_config": {
+                        "executionSop": {
+                            "siteEntryUrl": "https://mock-recruiting.local/",
+                            "siteAccessRulesText": "复用人工提前登录好的浏览器会话",
+                        },
+                        "syncPolicy": {
+                            "syncMode": "single_jd_probe",
+                            "maxJobDescriptions": 1,
+                            "jdSyncText": "单 JD 试跑：最多 1 个 JD，用于验证链路。",
+                        },
+                    }
+                }
+            }
+        },
+    )
+    assert patched.status_code == 200, patched.text
+
+    response = client.post(
+        "/api/agents/jd_sync/runs",
+        json={"title": "Single JD Probe", "requestMessage": "单 JD 试跑", "instruction": "单 JD 试跑"},
+    )
+
+    assert response.status_code == 201, response.text
+    payload = response.json()
+    runtime_metadata = payload["run"].get("runtimeMetadata") or payload["run"]["runtime_metadata"]
+    constraints = runtime_metadata["constraints"]
+    assert constraints["sync_mode"] == "single_jd_probe"
+    assert constraints["max_job_descriptions"] == 1
+    assert constraints["sync_policy"]["syncMode"] == "single_jd_probe"
+    assert constraints["sync_policy"]["maxJobDescriptions"] == 1
+    assert "本次运行模式是单 JD 试跑：最多同步 1 个招聘中 JD" in runtime_metadata["instruction"]
+    assert "如果已经完整写入 1 个 JD，应输出单 JD 试跑完成摘要" in runtime_metadata["instruction"]
+    assert "不得用“已完成部分同步”结束本轮" not in runtime_metadata["instruction"]
+
+
+def test_single_jd_probe_completion_uses_written_jd_as_terminal_evidence(tmp_path, monkeypatch) -> None:
+    client = _client(tmp_path, monkeypatch, "jd-sync-single-probe-complete")
+    container = client.app.state.container
+    with container.session_factory() as session:
+        session.add(JobDescription(title="Probe JD", source="jd_sync", status="active"))
+        session.flush()
+        outcome = _complete_single_jd_probe_if_satisfied(
+            session,
+            run=AgentRun(
+                session_id="session",
+                run_type="jd_sync",
+                status="running",
+                agent_kind="jd_sync",
+                context_manifest={
+                    "constraints": {
+                        "sync_mode": "single_jd_probe",
+                        "max_job_descriptions": 1,
+                    }
+                },
+                runtime_metadata={},
+            ),
+            envelope={},
+            outcome=AgentTurnOutcome(
+                status="escalate",
+                gate_signal="escalate",
+                final_output="仍需继续全量扫描。",
+            ),
+        )
+
+    assert outcome.status == "complete"
+    assert outcome.gate_signal == "run_done"
+    assert outcome.metadata["single_jd_probe_completed"] is True
+    assert outcome.metadata["single_jd_probe_synced_count"] == 1
+    assert "已写入 1 个 JD，目标 1 个" in (outcome.final_output or "")
+    assert "不要求继续完成全量职位发现" in (outcome.final_output or "")
+
+
+def test_single_jd_probe_rejects_completion_without_written_jd(tmp_path, monkeypatch) -> None:
+    client = _client(tmp_path, monkeypatch, "jd-sync-single-probe-reject-empty-complete")
+    container = client.app.state.container
+    with container.session_factory() as session:
+        outcome = _complete_single_jd_probe_if_satisfied(
+            session,
+            run=AgentRun(
+                session_id="session",
+                run_type="jd_sync",
+                status="running",
+                agent_kind="jd_sync",
+                context_manifest={
+                    "constraints": {
+                        "sync_mode": "single_jd_probe",
+                        "max_job_descriptions": 1,
+                    }
+                },
+                runtime_metadata={},
+            ),
+            envelope={},
+            outcome=AgentTurnOutcome(
+                status="complete",
+                gate_signal="run_done",
+                final_output="已同步 1 个 JD。",
+            ),
+        )
+
+    assert outcome.status == "escalate"
+    assert outcome.gate_signal == "escalate"
+    assert outcome.metadata["single_jd_probe_completion_rejected"] is True
+    assert outcome.metadata["single_jd_probe_synced_count"] == 0
+    assert "不能标记完成" in (outcome.final_output or "")
+
+
+def test_single_jd_probe_blocks_after_continuation_budget_without_written_jd(tmp_path, monkeypatch) -> None:
+    client = _client(tmp_path, monkeypatch, "jd-sync-single-probe-budget-block")
+    container = client.app.state.container
+    with container.session_factory() as session:
+        outcome = _block_single_jd_probe_if_continuation_budget_exhausted(
+            session,
+            run=AgentRun(
+                session_id="session",
+                run_type="jd_sync",
+                status="running",
+                agent_kind="jd_sync",
+                context_manifest={
+                    "constraints": {
+                        "sync_mode": "single_jd_probe",
+                        "max_job_descriptions": 1,
+                    }
+                },
+                runtime_metadata={},
+            ),
+            envelope={},
+            outcome=AgentTurnOutcome(
+                status="complete",
+                gate_signal="run_done",
+                final_output="仍在职位管理列表恢复。",
+            ),
+            continuation_attempts=5,
+            max_attempts=5,
+        )
+
+    assert outcome.status == "escalate"
+    assert outcome.gate_signal == "escalate"
+    assert outcome.metadata["single_jd_probe_continuation_budget_exhausted"] is True
+    assert "恢复尝试上限" in (outcome.final_output or "")
+    assert "已发布/招聘中职位条目" in (outcome.final_output or "")
+
+
+def test_single_jd_probe_process_next_completes_before_provider_when_target_already_met(tmp_path, monkeypatch) -> None:
+    client = _client(tmp_path, monkeypatch, "jd-sync-single-probe-early-complete")
+    _script_autonomous_provider(client)
+    patched = client.patch(
+        "/api/agents/jd_sync",
+        json={
+            "product_config": {
+                "jd_sync": {
+                    "jd_sync_config": {
+                        "executionSop": {"siteEntryUrl": "https://mock-recruiting.local/jobs"},
+                        "syncPolicy": {
+                            "syncMode": "single_jd_probe",
+                            "maxJobDescriptions": 1,
+                            "jdSyncText": "单 JD 试跑：最多 1 个 JD。",
+                        },
+                    }
+                }
+            }
+        },
+    )
+    assert patched.status_code == 200, patched.text
+    created = client.post(
+        "/api/agents/jd_sync/runs",
+        json={"title": "Single JD Probe", "instruction": "单 JD 试跑"},
+    )
+    assert created.status_code == 201, created.text
+    with client.app.state.container.session_factory() as session:
+        session.add(JobDescription(title="Probe JD", source="jd_sync", status="active"))
+        session.commit()
+
+    processed = client.post("/api/agents/task-queue/process-next")
+
+    assert processed.status_code == 200
+    assert processed.json()["status"] == "processed"
+    run_detail = client.get(f"/api/agents/jd_sync/runs/{created.json()['runId']}")
+    assert run_detail.status_code == 200
+    run = run_detail.json()["run"]
+    assert run["status"] == "idle"
+    turn = run_detail.json()["turns"][0]
+    assert turn["status"] == "completed"
+    assert turn["turn_metadata"]["early_completion"] is True
+    assert "已写入 1 个 JD，目标 1 个" in turn["turn_metadata"]["final_output"]
+
+
+def test_single_jd_probe_stops_after_first_successful_jd_write(tmp_path, monkeypatch) -> None:
+    client = _client(tmp_path, monkeypatch, "jd-sync-single-probe-stop-after-write")
+    _script_autonomous_provider(
+        client,
+        LLMResponse(
+            tool_calls=[
+                ToolCall(
+                    id="write-jd",
+                    name="upsert_job_description",
+                    arguments={
+                        "title": "交易策略产品经理",
+                        "source": "jd_sync",
+                        "platform": "zhipin",
+                        "external_id": "job-strategy-pm",
+                        "description": "负责交易策略产品设计。",
+                        "requirements": "具备交易策略或 AI 产品经验。",
+                        "sync_metadata": {
+                            "detail_complete": True,
+                            "observed_detail_url": "https://mock-recruiting.local/jobs/1",
+                            "blockers": [],
+                            "missing_fields": [],
+                        },
+                    },
+                )
+            ],
+            finish_reason="tool_calls",
+        ),
+        LLMResponse(content="Should not be requested after the single JD target is reached."),
+    )
+    patched = client.patch(
+        "/api/agents/jd_sync",
+        json={
+            "product_config": {
+                "jd_sync": {
+                    "jd_sync_config": {
+                        "executionSop": {"siteEntryUrl": "https://mock-recruiting.local/jobs"},
+                        "syncPolicy": {
+                            "syncMode": "single_jd_probe",
+                            "maxJobDescriptions": 1,
+                            "jdSyncText": "单 JD 试跑：最多 1 个 JD。",
+                        },
+                    }
+                }
+            }
+        },
+    )
+    assert patched.status_code == 200, patched.text
+    created = client.post(
+        "/api/agents/jd_sync/runs",
+        json={"title": "Single JD Probe", "instruction": "single_jd_probe max_job_descriptions=1"},
+    )
+    assert created.status_code == 201, created.text
+
+    processed = client.post("/api/agents/task-queue/process-next")
+
+    assert processed.status_code == 200
+    assert processed.json()["status"] == "processed"
+    run_detail = client.get(f"/api/agents/jd_sync/runs/{created.json()['runId']}").json()
+    assert run_detail["run"]["status"] == "idle"
+    turn = run_detail["turns"][0]
+    assert turn["status"] == "completed"
+    assert turn["outcome_kind"] == "complete"
+    assert "已写入 1 个 JD，目标 1 个" in turn["turn_metadata"]["final_output"]
+    runtime_events = run_detail["events"]
+    assert any(
+        event["event_type"] == "turn_interrupted"
+        and ((event.get("payload") or {}).get("data") or {}).get("reason") == "single_jd_probe_target_reached"
+        for event in runtime_events
+    )
+    assert not any(
+        event["event_type"] == "llm_invocation_started"
+        and ((event.get("payload") or {}).get("data") or {}).get("index") == 1
+        for event in runtime_events
+    )
+    with client.app.state.container.session_factory() as session:
+        assert session.query(JobDescription).filter(JobDescription.source == "jd_sync").count() == 1
 
 
 def test_jd_sync_run_dedupes_legacy_frontend_prompt_template(tmp_path, monkeypatch) -> None:
@@ -672,6 +962,7 @@ def test_workspace_start_creates_run_from_saved_automation_config(tmp_path, monk
     assert "1. jd-a" in instruction
     assert "2. jd-b" in instruction
     assert "score candidates" in instruction
+    assert "沟通页中的未读沟通和候选人主动打招呼记录优先级最高" not in instruction
     legacy_activation_keys = {
         "priorityPreset",
         "priority_preset",
@@ -718,6 +1009,251 @@ def test_workspace_start_creates_run_from_saved_automation_config(tmp_path, monk
     assert queue_constraints["plan_kind"] == "multi_jd_recruiting"
     _assert_keys_absent(queue_constraints, legacy_activation_keys)
     assert queue_constraints["runtime_controls"]["activation_policy"]["scanIntervalMinutes"] == 30
+
+
+def test_direct_recruiting_run_merges_saved_automation_config(tmp_path, monkeypatch) -> None:
+    client = _client(tmp_path, monkeypatch, "direct-recruiting-saved-config")
+    patched = client.patch(
+        "/api/agents/autonomous",
+        json={
+            "product_config": {
+                "autonomous": {
+                    "automation_recruiting_config": {
+                        "defaultRunJobIds": ["jd-a", "jd-b"],
+                        "executionSop": {
+                            "siteEntryUrl": "https://www.zhipin.com/web/chat/index",
+                            "siteAccessRulesText": "复用已登录浏览器会话",
+                            "stepsText": "先处理沟通未读，再进入推荐牛人或搜索。",
+                        },
+                        "activationPolicy": {
+                            "manualStartEnabled": True,
+                            "scheduledScanEnabled": True,
+                            "scanIntervalMinutes": 30,
+                            "jdPoolGapEnabled": True,
+                            "candidatePoolTarget": 25,
+                            "externalEventWakeEnabled": True,
+                            "backlogWakeEnabled": True,
+                            "backlogThreshold": 8,
+                            "stopOnJdOffline": True,
+                            "pauseOnLoginRequired": True,
+                            "pauseOnEntryUnavailable": True,
+                            "pauseOnApprovalPending": True,
+                            "pauseOnNoProgress": True,
+                            "priorityDiscoveryWeight": 35,
+                            "priorityUnreadMessageWeight": 25,
+                            "priorityScoringBacklogWeight": 20,
+                            "priorityApprovalWeight": 10,
+                            "priorityJdGapWeight": 10,
+                            "messageSlaMinutes": 120,
+                            "siteCooldownMinutes": 15,
+                            "retryCooldownMinutes": 5,
+                            "maxActionsPerHour": 40,
+                            "maxConsecutiveErrors": 3,
+                        },
+                        "jobStrategies": {
+                            "jd-a": _complete_job_strategy(),
+                            "jd-b": _complete_job_strategy(online_pass=72),
+                        },
+                        "toolApprovalPolicy": {"defaultMode": "approval"},
+                    }
+                }
+            }
+        },
+    )
+    assert patched.status_code == 200, patched.text
+
+    created = client.post(
+        "/api/agents/autonomous/runs",
+        json={
+            "title": "单候选人只读阶段",
+            "instruction": "read_only_candidate_probe max_candidates=1",
+            "kind": "recruiting",
+            "constraints": {
+                "read_only": True,
+                "max_candidates": 1,
+                "max_new_candidates": 0,
+                "selected_job_description_ids": ["jd-a"],
+                "execution_sop": {"stepsText": "caller override must not run"},
+                "browser_target": {"url": "https://evil.example.test"},
+            },
+        },
+    )
+
+    assert created.status_code == 201, created.text
+    run_payload = created.json()["run"]
+    runtime_metadata = run_payload.get("runtimeMetadata") or run_payload["runtime_metadata"]
+    constraints = runtime_metadata["constraints"]
+    assert constraints["read_only"] is True
+    assert constraints["selected_job_description_ids"] == ["jd-a"]
+    assert constraints["enabled_job_description_ids"] == ["jd-a"]
+    assert constraints["execution_sop"]["stepsText"] == "先处理沟通未读，再进入推荐牛人或搜索。"
+    assert constraints["execution_sop"]["compiledPrompt"].count("jd-a") == 1
+    assert "caller override must not run" not in constraints["execution_sop"]["compiledPrompt"]
+    assert constraints["target_recruiting_site"]["entry_url"] == "https://www.zhipin.com/web/chat/index"
+    assert constraints["browser_target"]["url"] == "https://www.zhipin.com/web/chat/index"
+    assert constraints["business_policy_overlay"]["job_plans"] == [
+        {"job_description_id": "jd-a", "strategy": _complete_job_strategy()}
+    ]
+    assert constraints["tool_approval_policy"]["defaultMode"] == "approval"
+    instruction = runtime_metadata["instruction"]
+    assert "## 自动化招聘执行 SOP" in instruction
+    assert "本地 JD 状态 active 表示可用于本次运行" in instruction
+    assert "先处理沟通未读，再进入推荐牛人或搜索。" in instruction
+    assert "caller override must not run" not in instruction
+    assert runtime_metadata["browser_target"]["url"] == "https://www.zhipin.com/web/chat/index"
+    queue = client.get("/api/agents/queue").json()
+    assert queue[0]["payload"]["world_snapshot"]["browser_target"]["url"] == "https://www.zhipin.com/web/chat/index"
+
+
+def test_direct_recruiting_run_rejects_unconfigured_selected_jd(tmp_path, monkeypatch) -> None:
+    client = _client(tmp_path, monkeypatch, "direct-recruiting-unknown-jd")
+    patched = client.patch(
+        "/api/agents/autonomous",
+        json={
+            "product_config": {
+                "autonomous": {
+                    "automation_recruiting_config": {
+                        "defaultRunJobIds": ["jd-a"],
+                        "executionSop": {
+                            "siteEntryUrl": "https://www.zhipin.com/web/chat/index",
+                            "stepsText": "score candidates",
+                        },
+                        "activationPolicy": {
+                            "manualStartEnabled": True,
+                            "scheduledScanEnabled": True,
+                            "scanIntervalMinutes": 30,
+                            "jdPoolGapEnabled": True,
+                            "candidatePoolTarget": 25,
+                            "externalEventWakeEnabled": True,
+                            "backlogWakeEnabled": True,
+                            "backlogThreshold": 8,
+                            "stopOnJdOffline": True,
+                            "pauseOnLoginRequired": True,
+                            "pauseOnEntryUnavailable": True,
+                            "pauseOnApprovalPending": True,
+                            "pauseOnNoProgress": True,
+                            "priorityDiscoveryWeight": 35,
+                            "priorityUnreadMessageWeight": 25,
+                            "priorityScoringBacklogWeight": 20,
+                            "priorityApprovalWeight": 10,
+                            "priorityJdGapWeight": 10,
+                            "messageSlaMinutes": 120,
+                            "siteCooldownMinutes": 15,
+                            "retryCooldownMinutes": 5,
+                            "maxActionsPerHour": 40,
+                            "maxConsecutiveErrors": 3,
+                        },
+                        "jobStrategies": {"jd-a": _complete_job_strategy()},
+                    }
+                }
+            }
+        },
+    )
+    assert patched.status_code == 200, patched.text
+
+    response = client.post(
+        "/api/agents/autonomous/runs",
+        json={
+            "title": "Unknown JD",
+            "instruction": "read_only_candidate_probe",
+            "kind": "recruiting",
+            "constraints": {"selected_job_description_ids": ["jd-x"]},
+        },
+    )
+
+    assert response.status_code == 409
+    assert "selected_job_description_ids must be configured" in response.json()["detail"]
+
+
+def test_runtime_agents_cannot_have_open_runs_at_the_same_time(tmp_path, monkeypatch) -> None:
+    client = _client(tmp_path, monkeypatch, "runtime-mutual-exclusion")
+    automation_patch = client.patch(
+        "/api/agents/autonomous",
+        json={
+            "product_config": {
+                "autonomous": {
+                    "automation_recruiting_config": {
+                        "defaultRunJobIds": ["jd-a"],
+                        "executionSop": {
+                            "siteEntryUrl": "https://www.zhipin.com/web/geek/job",
+                            "stepsText": "score candidates",
+                        },
+                        "activationPolicy": {
+                            "manualStartEnabled": True,
+                            "scheduledScanEnabled": True,
+                            "scanIntervalMinutes": 30,
+                            "jdPoolGapEnabled": True,
+                            "candidatePoolTarget": 25,
+                            "externalEventWakeEnabled": True,
+                            "backlogWakeEnabled": True,
+                            "backlogThreshold": 8,
+                            "stopOnJdOffline": True,
+                            "pauseOnLoginRequired": True,
+                            "pauseOnEntryUnavailable": True,
+                            "pauseOnApprovalPending": True,
+                            "pauseOnNoProgress": True,
+                            "priorityDiscoveryWeight": 35,
+                            "priorityUnreadMessageWeight": 25,
+                            "priorityScoringBacklogWeight": 20,
+                            "priorityApprovalWeight": 10,
+                            "priorityJdGapWeight": 10,
+                            "messageSlaMinutes": 120,
+                            "siteCooldownMinutes": 15,
+                            "retryCooldownMinutes": 5,
+                            "maxActionsPerHour": 40,
+                            "maxConsecutiveErrors": 3,
+                        },
+                        "jobStrategies": {"jd-a": _complete_job_strategy()},
+                    }
+                },
+                "jd_sync": {
+                    "jd_sync_config": {
+                        "executionSop": {"siteEntryUrl": "https://www.zhipin.com/web/chat/index"},
+                        "syncPolicy": {"jdSyncText": "同步 JD"},
+                    }
+                },
+            }
+        },
+    )
+    assert automation_patch.status_code == 200, automation_patch.text
+
+    jd_sync = client.post("/api/agents/jd_sync/runs", json={"title": "Sync JD", "instruction": "sync jobs"})
+    assert jd_sync.status_code == 201, jd_sync.text
+
+    blocked_start = _start_workspace(client)
+    assert blocked_start["state"] == "stopped"
+    assert "JD Sync and automation recruiting cannot run at the same time" in blocked_start["runStartBlocked"]["reason"]
+
+    blocked_run = client.post(
+        "/api/agents/autonomous/runs",
+        json={"title": "Automation", "instruction": "start", "kind": "multi_jd_recruiting"},
+    )
+    assert blocked_run.status_code == 409
+    assert "JD Sync and automation recruiting cannot run at the same time" in blocked_run.json()["detail"]
+
+
+def test_jd_sync_run_is_blocked_when_automation_run_is_open(tmp_path, monkeypatch) -> None:
+    client = _client(tmp_path, monkeypatch, "jd-sync-blocked-by-automation")
+    patched = client.patch(
+        "/api/agents/jd_sync",
+        json={
+            "product_config": {
+                "jd_sync": {
+                    "jd_sync_config": {
+                        "executionSop": {"siteEntryUrl": "https://www.zhipin.com/web/chat/index"},
+                        "syncPolicy": {"jdSyncText": "同步 JD"},
+                    }
+                }
+            }
+        },
+    )
+    assert patched.status_code == 200, patched.text
+    _start_autonomous_run(client)
+
+    blocked = client.post("/api/agents/jd_sync/runs", json={"title": "Sync JD", "instruction": "sync jobs"})
+
+    assert blocked.status_code == 409
+    assert "JD Sync and automation recruiting cannot run at the same time" in blocked.json()["detail"]
 
 
 def test_autonomous_process_next_task_completes_run_and_projects_primary_conversation(tmp_path, monkeypatch) -> None:

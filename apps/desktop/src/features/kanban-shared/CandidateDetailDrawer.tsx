@@ -21,6 +21,7 @@ interface CandidateDetailDrawerProps {
   initialTab?: DetailTab;
   onClose(): void;
   onTransition(applicationId: string, payload: ApplicationTransitionPayload): Promise<unknown> | void;
+  onExtractResumeText?(applicationId: string, artifactId: string): Promise<unknown> | void;
   onRequestOverride(): void;
 }
 
@@ -90,6 +91,53 @@ function summarizeSource(
   return trimmed;
 }
 
+function pickNestedObject(source: Record<string, unknown>, keys: string[]): Record<string, unknown> {
+  for (const key of keys) {
+    const value = asObject(source[key]);
+    if (Object.keys(value).length) {
+      return value;
+    }
+  }
+  return {};
+}
+
+function resumeFactLabel(key: string, copy: (en: string, zh: string) => string): string {
+  const normalized = key.replace(/[A-Z]/g, (match) => `_${match.toLowerCase()}`).toLowerCase();
+  switch (normalized) {
+    case "age":
+      return copy("Age", "年龄");
+    case "experience_years":
+      return copy("Experience years", "工作年限");
+    case "experience_text":
+      return copy("Experience", "经验");
+    case "education":
+      return copy("Education", "学历");
+    case "school":
+      return copy("School", "学校");
+    case "major":
+      return copy("Major", "专业");
+    case "work_status":
+      return copy("Work status", "求职状态");
+    case "phone":
+      return copy("Phone", "电话");
+    case "email":
+      return copy("Email", "邮箱");
+    default:
+      return key.replace(/_/g, " ");
+  }
+}
+
+function resumeFactEntries(facts: Record<string, unknown>): Array<[string, string]> {
+  return Object.entries(facts)
+    .map(([key, value]) => [key, Array.isArray(value) ? value.join("、") : String(value ?? "").trim()] as [string, string])
+    .filter(([, value]) => value);
+}
+
+function canInlinePreview(artifactType: string, path?: string): boolean {
+  const text = `${artifactType} ${path ?? ""}`.toLowerCase();
+  return /\.(pdf|txt|md)\b/.test(text) || /\b(pdf|txt|text|md)\b/.test(text);
+}
+
 export function CandidateDetailDrawer({
   open,
   record,
@@ -97,12 +145,14 @@ export function CandidateDetailDrawer({
   initialTab = "profile",
   onClose,
   onTransition,
+  onExtractResumeText,
   onRequestOverride,
 }: CandidateDetailDrawerProps): JSX.Element | null {
   const { copy } = useI18n();
   const [activeTab, setActiveTab] = useState<DetailTab>("profile");
   const [pendingAction, setPendingAction] = useState<PendingActionState | null>(null);
   const [submittingKey, setSubmittingKey] = useState<string>();
+  const [extractingArtifactId, setExtractingArtifactId] = useState<string>();
 
   const currentNode = record?.currentNode;
   const actions = useMemo(
@@ -125,10 +175,25 @@ export function CandidateDetailDrawer({
   );
   const latestTransitionSource = record?.thread?.stateSnapshot.latestTransitionSource?.trim() || "";
   const latestInteraction = record?.thread?.runtimeInteractions?.[0];
+  const resumeSnapshot = asObject(record?.application.resumeSnapshot);
+  const onlineResumeData = pickNestedObject(resumeSnapshot, ["online_resume", "onlineResume"]);
   const onlineResumeText =
-    pickString(personContactInfo.onlineResumeText) ?? pickString(personContactInfo.online_resume_text);
+    pickString(onlineResumeData.raw_text) ??
+    pickString(onlineResumeData.rawText) ??
+    pickString(onlineResumeData.text) ??
+    pickString(record?.application.person.onlineResumeText) ??
+    pickString(personContactInfo.onlineResumeText) ??
+    pickString(personContactInfo.online_resume_text);
+  const onlineResumeFactEntries = resumeFactEntries(
+    pickNestedObject(onlineResumeData, ["structured_facts", "structuredFacts"]),
+  );
+  const snapshotFactEntries = resumeFactEntries(
+    pickNestedObject(resumeSnapshot, ["structured_facts", "structuredFacts"]),
+  );
   const primaryResumePath =
-    pickString(personContactInfo.resumePath) ?? pickString(personContactInfo.resume_path);
+    pickString(record?.application.person.resumePath) ??
+    pickString(personContactInfo.resumePath) ??
+    pickString(personContactInfo.resume_path);
 
   useEffect(() => {
     if (open) {
@@ -155,6 +220,18 @@ export function CandidateDetailDrawer({
       setPendingAction(null);
     } finally {
       setSubmittingKey(undefined);
+    }
+  };
+
+  const extractResumeText = async (artifactId: string) => {
+    if (!onExtractResumeText) {
+      return;
+    }
+    setExtractingArtifactId(artifactId);
+    try {
+      await onExtractResumeText(record.application.id, artifactId);
+    } finally {
+      setExtractingArtifactId(undefined);
     }
   };
 
@@ -227,11 +304,23 @@ export function CandidateDetailDrawer({
                     </span>
                   </div>
                   <div className="drawer__full-row">
-                    <strong>{copy("Online profile summary", "在线资料摘要")}</strong>
-                    <span>
-                      {onlineResumeText || record.application.summary || copy("No online profile summary.", "暂无在线资料摘要。")}
-                    </span>
+                    <strong>{copy("Online resume text", "在线简历原文")}</strong>
+                    {onlineResumeText ? (
+                      <pre className="drawer__resume-text">{onlineResumeText}</pre>
+                    ) : (
+                      <span>{record.application.summary || copy("No online resume text.", "暂无在线简历原文。")}</span>
+                    )}
                   </div>
+                  {(onlineResumeFactEntries.length || snapshotFactEntries.length) ? (
+                    <div className="drawer__full-row">
+                      <strong>{copy("Structured resume facts", "结构化简历字段")}</strong>
+                      <div className="drawer__fact-list">
+                        {(onlineResumeFactEntries.length ? onlineResumeFactEntries : snapshotFactEntries).map(([key, value]) => (
+                          <span key={key}><b>{resumeFactLabel(key, copy)}</b>{value}</span>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
                   <div className="drawer__full-row">
                     <strong>{copy("Primary stored path", "主落地路径")}</strong>
                     <span>{primaryResumePath || copy("No stored path exposed yet.", "暂未暴露主路径。")}</span>
@@ -248,6 +337,10 @@ export function CandidateDetailDrawer({
                         <span>{summarizeSource(artifact.source, copy)}</span>
                       </div>
                       <div>
+                        <strong>{copy("File type", "文件类型")}</strong>
+                        <span>{artifact.artifactType || "resume"}</span>
+                      </div>
+                      <div>
                         <strong>{copy("Recorded at", "获取时间")}</strong>
                         <span>{artifact.recordedAt ? formatCompactDate(artifact.recordedAt) : "—"}</span>
                       </div>
@@ -261,12 +354,51 @@ export function CandidateDetailDrawer({
                           <span>{artifact.contactSummary}</span>
                         </div>
                       ) : null}
-                      {artifact.excerpt ? (
+                      {artifact.previewUrl ? (
+                        <div className="drawer__full-row">
+                          <strong>{copy("File preview", "文件预览")}</strong>
+                          {canInlinePreview(artifact.artifactType, artifact.path) ? (
+                            <iframe
+                              className="drawer__resume-preview"
+                              src={artifact.previewUrl}
+                              title={artifact.title}
+                            />
+                          ) : (
+                            <a className="drawer__file-link" href={artifact.previewUrl} target="_blank" rel="noreferrer">
+                              {copy("Open file preview", "打开文件预览")}
+                            </a>
+                          )}
+                        </div>
+                      ) : null}
+                      {artifact.extractedText ? (
+                        <div className="drawer__full-row">
+                          <strong>{copy("Extracted text", "提取全文")}</strong>
+                          <pre className="drawer__resume-text">{artifact.extractedText}</pre>
+                        </div>
+                      ) : artifact.excerpt ? (
                         <div className="drawer__full-row">
                           <strong>{copy("Extracted excerpt", "提取摘要")}</strong>
                           <span>{artifact.excerpt}</span>
                         </div>
-                      ) : null}
+                      ) : (
+                        <div className="drawer__full-row">
+                          <strong>{copy("Extracted text", "提取全文")}</strong>
+                          {onExtractResumeText ? (
+                            <button
+                              type="button"
+                              className="drawer__button"
+                              disabled={extractingArtifactId === artifact.id}
+                              onClick={() => void extractResumeText(artifact.id)}
+                            >
+                              {extractingArtifactId === artifact.id
+                                ? copy("Extracting...", "提取中...")
+                                : copy("Extract text for scoring", "为评分提取文本")}
+                            </button>
+                          ) : (
+                            <span>{copy("No extracted text has been stored for this file yet.", "这个文件还没有入库提取文本。")}</span>
+                          )}
+                        </div>
+                      )}
                     </div>
                   </div>
                 ))

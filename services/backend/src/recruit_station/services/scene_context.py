@@ -2021,10 +2021,35 @@ def _normalize_scene_hid_action_arguments(
     ):
         _apply_browser_viewport_geometry(geometry, browser_semantics=browser_semantics, tab_id=tab_id)
         normalized["geometry"] = geometry
+    if _scene_hid_action_targets_browser(normalized):
+        _strip_scene_hid_sequence_scope_overrides(normalized)
     _strip_scene_hid_humanization_overrides(normalized)
     _normalize_scene_hid_post_mode(normalized)
 
     return normalized
+
+
+def _strip_scene_hid_sequence_scope_overrides(arguments: dict[str, Any]) -> None:
+    scope_keys = {
+        "run_id",
+        "runId",
+        "run_pk",
+        "episode_id",
+        "episodeId",
+        "task_spec_id",
+        "taskSpecId",
+        "account",
+        "account_id",
+        "site_account",
+    }
+    for key in scope_keys:
+        arguments.pop(key, None)
+    for container_key in ("context", "target", "options", "metadata"):
+        container = arguments.get(container_key)
+        if not isinstance(container, dict):
+            continue
+        for key in scope_keys:
+            container.pop(key, None)
 
 
 def _strip_scene_hid_humanization_overrides(arguments: dict[str, Any]) -> None:

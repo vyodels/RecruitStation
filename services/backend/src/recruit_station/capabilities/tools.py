@@ -178,7 +178,13 @@ class ToolRegistry:
                     if _runtime_requires_browser_computer_scene(runtime) and not arguments.get("max_llm_invocations"):
                         arguments["max_llm_invocations"] = 20
                     if _runtime_requires_browser_computer_scene(runtime):
+                        arguments = _merge_runtime_jd_sync_context(arguments, runtime)
                         arguments = _normalize_jd_sync_scene_arguments(arguments)
+                if self.tool.name in {"upsert_candidate", "upsert_job_description"}:
+                    runtime = dict(context.runtime or {})
+                    constraints = runtime.get("constraints")
+                    if isinstance(constraints, dict):
+                        arguments["_runtime_constraints"] = dict(constraints)
                 return arguments
 
         return [
@@ -339,6 +345,26 @@ class ToolRegistry:
             return candidates
         remaining = [tool for tool in candidates if tool.name not in preferred]
         return [*prioritized, *remaining]
+
+
+def _merge_runtime_jd_sync_context(arguments: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(arguments or {})
+    runtime_constraints = _as_dict(runtime.get("constraints"))
+    if not runtime_constraints:
+        return normalized
+    context = _as_dict(normalized.get("context"))
+    for key in (
+        "plan_kind",
+        "sync_mode",
+        "max_job_descriptions",
+        "scope_kind",
+        "scope_ref",
+        "browser_target",
+    ):
+        if key not in context and key in runtime_constraints:
+            context[key] = runtime_constraints[key]
+    normalized["context"] = context
+    return normalized
 
 
 def register_core_tools(
@@ -611,12 +637,17 @@ def build_delegate_scene_context_tool(
 
 def _normalize_jd_sync_scene_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(arguments or {})
-    normalized["instruction"] = _JD_SYNC_SCENE_INSTRUCTION
+    context = _as_dict(normalized.get("context"))
+    max_job_descriptions = _positive_int(context.get("max_job_descriptions"))
+    sync_mode = str(context.get("sync_mode") or "").strip().lower()
+    normalized["instruction"] = _jd_sync_scene_instruction(
+        sync_mode=sync_mode,
+        max_job_descriptions=max_job_descriptions,
+    )
     normalized["output_contract"] = _merge_dicts(
-        _jd_sync_scene_output_contract(),
+        _jd_sync_scene_output_contract(sync_mode=sync_mode, max_job_descriptions=max_job_descriptions),
         _as_dict(normalized.get("output_contract")),
     )
-    context = _as_dict(normalized.get("context"))
     context["prompt_policy"] = {
         **_as_dict(context.get("prompt_policy")),
         "instruction_is_rule_only": True,
@@ -625,6 +656,21 @@ def _normalize_jd_sync_scene_arguments(arguments: dict[str, Any]) -> dict[str, A
     }
     normalized["context"] = context
     return normalized
+
+
+def _positive_int(value: Any) -> int | None:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def _jd_sync_scene_instruction(*, sync_mode: str, max_job_descriptions: int | None) -> str:
+    if sync_mode == "single_jd_probe" or max_job_descriptions == 1:
+        return _JD_SYNC_SINGLE_PROBE_SCENE_INSTRUCTION
+    instruction = _JD_SYNC_SCENE_INSTRUCTION
+    return instruction
 
 
 _JD_SYNC_SCENE_INSTRUCTION = (
@@ -644,7 +690,28 @@ _JD_SYNC_SCENE_INSTRUCTION = (
 )
 
 
-def _jd_sync_scene_output_contract() -> dict[str, Any]:
+_JD_SYNC_SINGLE_PROBE_SCENE_INSTRUCTION = (
+    "执行招聘站点单 JD 同步试跑 scene。规则：从当前同源招聘网页出发，使用 browser 观察和 computer/HID 页面内操作，"
+    "基于页面可见导航找到职位管理列表或职位详情；本次只需完成 1 个已发布/招聘中职位的完整详情读取，不要求全量扫描所有职位，"
+    "也不要把列表计数、待处理数量或页面上可见的岗位总数当作本轮必须覆盖的目标数量。"
+    "列表摘要、职位数量或候选人概况不能作为职位详情完成证据；必须进入或打开 1 个已发布/招聘中职位的详情/编辑页。"
+    "在职位管理列表中必须避开新建、发布、创建、待发布、草稿、继续发布、审核失败待处理等入口；"
+    "BOSS/直聘页面里 encryptId=0 或 URL/表单语义指向待发布/新建职位时，不能视为已发布 JD 详情，也不能据此调用业务写回。"
+    "应改用已发布/招聘中职位行、职位标题、管理/编辑/详情入口，且该入口必须有可见的已发布/招聘中语义或非空稳定职位标识。"
+    "每个完成详情必须同时具备当前目标 host 的详情/编辑 URL、详情页标题/职位名、职责和要求等页面证据；"
+    "不得把旧页面、其他端口、历史摘要、checkpoint、记忆或模型推断中的职位名当作当前站点证据。"
+    "不得处理请求目标之外的业务域、业务实体或业务流程；不得主动聚焦浏览器地址栏、输入 URL 或粘贴 URL。"
+    "如果误入目标之外的业务页面，只能用页面内导航返回请求目标所需的页面。"
+    "遇到可恢复的点击、滚动、返回、前台窗口、光标/按键或短暂执行异常时，应重新观察并改用页面内可见入口继续；"
+    "只有登录、验证码、权限、必要执行工具缺失、目标站点不可达，或页面只能看到新建/待发布/审核失败且没有已发布职位入口，才可返回硬阻塞。"
+    "返回必须遵守 output_contract：把本次实际选择的职位入口、完整详情、未完成原因和证据写入结构化 result_data。"
+    "status 可在完成 1 个已发布/招聘中职位详情后为 completed；不要因为尚未覆盖列表全部职位而降级为 partial/blocked。"
+)
+
+
+def _jd_sync_scene_output_contract(*, sync_mode: str = "", max_job_descriptions: int | None = None) -> dict[str, Any]:
+    if sync_mode == "single_jd_probe" or max_job_descriptions == 1:
+        return _single_jd_probe_scene_output_contract()
     return {
         "format": "json",
         "result_data_required": True,
@@ -661,7 +728,7 @@ def _jd_sync_scene_output_contract() -> dict[str, Any]:
         ],
         "field_contract": {
             "observed_jobs": "Jobs actually observed in this scene turn; use stable current-host page-visible identifiers when available. If the list shows a total count, observed_jobs must account for every listed/open job, including entries below the viewport.",
-            "completed_job_details": "Only jobs whose current-host detail page was opened/read in this scene turn or whose full detail evidence is present. Each item must include title, department, location, status, external_id or external_url, summary/description, requirements when visible, and detail evidence from the current detail URL.",
+            "completed_job_details": "Only jobs whose current-host detail page was opened/read in this scene turn or whose full detail evidence is present. Each item must include title, department, location, status, external_id or external_url, summary/description, requirements when visible, and detail evidence from the current detail URL. New/draft/publish forms, including BOSS/Zhipin URLs with encryptId=0, are not completed job details.",
             "inactive_or_closed_jobs": "Jobs observed as inactive, closed, unavailable, or removed.",
             "activation_entry_observed": "Whether the scene observed a page entry for choosing active/effective JD.",
             "blockers": "Hard blockers only: login, captcha, permission, missing required tools, or unreachable target site.",
@@ -671,6 +738,38 @@ def _jd_sync_scene_output_contract() -> dict[str, Any]:
         "completion_rule": (
             "status may be completed only when the scene has returned all currently required complete JD details in completed_job_details "
             "and no required detail is missing. If only list summaries, partial details, offscreen links, stale-host evidence, or inferred jobs are available, status must be partial or blocked."
+        ),
+    }
+
+
+def _single_jd_probe_scene_output_contract() -> dict[str, Any]:
+    return {
+        "format": "json",
+        "result_data_required": True,
+        "status_values": ["completed", "partial", "blocked"],
+        "required_fields": [
+            "status",
+            "observed_jobs",
+            "completed_job_details",
+            "inactive_or_closed_jobs",
+            "activation_entry_observed",
+            "blockers",
+            "limitations",
+            "evidence",
+        ],
+        "field_contract": {
+            "observed_jobs": "Jobs actually observed or selected in this scene turn. For single_jd_probe, this may contain only the visible/selected candidate job entries needed to choose one published or currently recruiting JD; it does not need to account for every listed/open job or page counter.",
+            "completed_job_details": "Exactly the published/current-host job detail page opened/read in this scene turn, or one full detail evidence object when complete. At least one item is required for completed status. Each item must include title, department when visible, location, status, external_id or external_url, summary/description, requirements when visible, and detail evidence from the current detail/edit URL. New/draft/publish/review-failed forms, including BOSS/Zhipin URLs with encryptId=0, are not completed job details.",
+            "inactive_or_closed_jobs": "Jobs observed as inactive, closed, unavailable, removed, draft, pending publish, or review failed.",
+            "activation_entry_observed": "Whether the scene observed a page entry for choosing active/effective JD.",
+            "blockers": "Hard blockers only: login, captcha, permission, missing required tools, unreachable target site, or no visible same-origin path from the current page to a published/current JD detail.",
+            "limitations": "Recoverable or incomplete conditions; include failed entry attempts, pages such as review-failed/pending-publish, and why no published/current JD detail was reached.",
+            "evidence": "Short current-host evidence references or page facts that justify the selected job detail or blocker.",
+        },
+        "completion_rule": (
+            "For single_jd_probe, status may be completed when one published/current recruiting JD detail has been opened/read and returned "
+            "in completed_job_details with current-host evidence. Do not require all listed jobs, page counters, or offscreen jobs to be covered. "
+            "If only list summaries, review-failed/pending-publish pages, draft/new forms, stale-host evidence, or inferred jobs are available, status must be partial or blocked."
         ),
     }
 

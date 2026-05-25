@@ -230,6 +230,20 @@ def test_jd_sync_continuation_rejects_partial_final_output_after_tool_calls() ->
     assert "继续同一个 turn" in continuation
 
 
+def test_jd_sync_continuation_respects_explicit_attempt_limit() -> None:
+    resolver = _final_output_continuation_resolver(agent_kind="jd_sync", max_attempts=2)
+    assert resolver is not None
+
+    continuation = resolver(
+        "已完成部分 JD 同步，但未完成全量详情读取，当前 partial。",
+        [{"tool_name": "delegate_scene_context"}],
+        [{"tool_name": "delegate_scene_context", "result": {"status": "partial"}}],
+        2,
+    )
+
+    assert continuation is None
+
+
 def test_jd_sync_continuation_rejects_bland_final_output_when_result_data_is_partial() -> None:
     resolver = _final_output_continuation_resolver(agent_kind="jd_sync")
     assert resolver is not None

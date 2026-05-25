@@ -1419,6 +1419,7 @@ def test_scene_context_passes_browser_semantics_into_hid_action(tmp_path: Path) 
                             "target": {"tabId": 613},
                             "geometry": {"coordSpace": "viewport", "pageScale": 1, "viewportSize": {"width": 1440, "height": 900}},
                             "options": {"postMode": "global", "dryRun": True, "behaviorMode": "normal", "profile": {"speed": "caller-owned"}},
+                            "context": {"episode_id": "scene-episode", "task_spec_id": "scene-task", "account": "operator"},
                             "primitives": [{"type": "click", "at": {"x": 1642, "y": 56}, "button": "left", "profile": {"speed": "caller-owned"}}],
                             "x": 1642,
                             "y": 56,
@@ -1512,6 +1513,9 @@ def test_scene_context_passes_browser_semantics_into_hid_action(tmp_path: Path) 
     assert hid_arguments["target"]["browserWindowBounds"] == {"x": 1280, "y": -1180, "width": 1510, "height": 1120}
     assert hid_arguments["context"]["host"] == "recruit.example.test"
     assert hid_arguments["context"]["url"] == "https://recruit.example.test/candidate/613"
+    assert "episode_id" not in hid_arguments["context"]
+    assert "task_spec_id" not in hid_arguments["context"]
+    assert "account" not in hid_arguments["context"]
     assert hid_arguments["primitives"] == [{"type": "click", "at": {"x": 1642, "y": 56}, "button": "left"}]
     assert "behaviorMode" not in hid_arguments["options"]
     assert "profile" not in hid_arguments["options"]

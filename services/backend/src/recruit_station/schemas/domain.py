@@ -699,7 +699,7 @@ class ResumeArtifactBase(BaseModel):
     )
     artifact_metadata: dict[str, Any] = Field(
         default_factory=dict,
-        validation_alias=AliasChoices("artifact_metadata", "metadata"),
+        validation_alias=AliasChoices("artifact_metadata", "artifactMetadata", "metadata"),
         serialization_alias="artifactMetadata",
     )
     captured_at: datetime | None = Field(default=None, serialization_alias="capturedAt")

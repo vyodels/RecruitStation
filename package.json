@@ -17,6 +17,8 @@
     "desktop:package:dir": "npm --workspace apps/desktop run package:dir",
     "desktop:package:distribution": "npm --workspace apps/desktop run package:distribution",
     "shared:build": "npm --workspace @recruit-station/shared run build",
+    "backend:clear-business-data": "PYTHONPATH=services/backend/src services/backend/.venv/bin/python services/backend/scripts/clear_business_data.py --yes --vacuum",
+    "backend:clear-local-business-data": "PYTHONPATH=services/backend/src services/backend/.venv/bin/python services/backend/scripts/clear_business_data.py --known-local --yes --vacuum",
     "backend:test": "python3 -m pytest services/backend/tests"
   }
 }

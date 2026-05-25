@@ -34,6 +34,7 @@ interface CandidatesKanbanViewProps {
     payload: { direction: string; content: string; messageType?: string; platform?: string },
   ): Promise<unknown> | void;
   onTransition(applicationId: string, payload: ApplicationTransitionPayload): Promise<unknown> | void;
+  onExtractResumeText?(applicationId: string, artifactId: string): Promise<unknown> | void;
   onOpenDashboard(): void;
   operatorProfile?: SettingsSnapshot["userProfile"];
 }
@@ -53,6 +54,7 @@ export function CandidatesKanbanView({
   onRefresh,
   onCreateEntry,
   onTransition,
+  onExtractResumeText,
   onOpenDashboard,
   operatorProfile,
 }: CandidatesKanbanViewProps): JSX.Element {
@@ -82,6 +84,7 @@ export function CandidatesKanbanView({
         onRefresh={onRefresh}
         onCreateEntry={onCreateEntry}
         onTransition={onTransition}
+        onExtractResumeText={onExtractResumeText}
         operatorProfile={operatorProfile}
       />
     ) : (
@@ -98,6 +101,7 @@ export function CandidatesKanbanView({
         onRefresh={onRefresh}
         onCreateEntry={onCreateEntry}
         onTransition={onTransition}
+        onExtractResumeText={onExtractResumeText}
         onOpenDashboard={onOpenDashboard}
       />
     )

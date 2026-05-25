@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import mimetypes
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from recruit_station.api.deps import get_session
@@ -32,6 +35,7 @@ from recruit_station.repositories import (
     CandidateApplicationRepository,
     CandidateRepository,
     JobDescriptionRepository,
+    ResumeArtifactRepository,
 )
 from recruit_station.schemas import (
     CandidateAssessmentCreate,
@@ -55,6 +59,8 @@ from recruit_station.schemas import (
     TalentPoolSyncRecordCreate,
     TalentPoolSyncRecordRead,
 )
+from recruit_station.services.resume_structure import extract_resume_structured_facts
+from recruit_station.services.resume_text_extraction import extract_resume_text
 
 router = APIRouter(prefix="/api/candidate-applications", tags=["candidate-applications"])
 
@@ -266,6 +272,66 @@ def list_candidate_application_resume_artifacts(
     session: Session = Depends(get_session),
 ) -> list[ResumeArtifactRead]:
     return list_application_resume_artifacts(applicationId, session)
+
+
+@router.get("/{applicationId}/resume-artifacts/{artifactId}/preview")
+def preview_candidate_application_resume_artifact(
+    applicationId: str,
+    artifactId: str,
+    session: Session = Depends(get_session),
+) -> FileResponse:
+    application, _person = _get_application_with_person_or_404(session, applicationId)
+    artifact = ResumeArtifactRepository(session).get(artifactId)
+    if artifact is None or artifact.application_id != application.id:
+        raise HTTPException(status_code=404, detail="Resume artifact not found")
+    file_path = Path(str(artifact.file_path or "")).expanduser()
+    if not file_path.exists() or not file_path.is_file():
+        raise HTTPException(status_code=404, detail="Resume artifact file not found")
+    media_type = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
+    return FileResponse(
+        file_path,
+        media_type=media_type,
+        filename=artifact.file_name or file_path.name,
+        content_disposition_type="inline",
+    )
+
+
+@router.post("/{applicationId}/resume-artifacts/{artifactId}/extract-text", response_model=ResumeArtifactRead)
+def extract_candidate_application_resume_artifact_text(
+    applicationId: str,
+    artifactId: str,
+    session: Session = Depends(get_session),
+) -> ResumeArtifactRead:
+    application, person = _get_application_with_person_or_404(session, applicationId)
+    artifact_repo = ResumeArtifactRepository(session)
+    artifact = artifact_repo.get(artifactId)
+    if artifact is None or artifact.application_id != application.id:
+        raise HTTPException(status_code=404, detail="Resume artifact not found")
+    extracted_text, extraction_metadata = extract_resume_text(artifact.file_path)
+    artifact_metadata = dict(artifact.artifact_metadata or {})
+    artifact_metadata["text_extraction"] = extraction_metadata
+    structured_facts = extract_resume_structured_facts(extracted_text, dict(artifact.contact_snapshot or {}))
+    if structured_facts:
+        artifact_metadata["structured_facts"] = structured_facts
+    updated = artifact_repo.update(
+        artifact,
+        {
+            "extracted_text": extracted_text or artifact.extracted_text,
+            "artifact_metadata": artifact_metadata,
+        },
+    )
+    resume_snapshot = dict(application.resume_snapshot or {})
+    offline_resume = dict(resume_snapshot.get("offline_resume") or {})
+    offline_resume["artifact_id"] = updated.id
+    offline_resume["text_extraction"] = extraction_metadata
+    if extracted_text:
+        offline_resume["raw_text"] = extracted_text
+    if structured_facts:
+        offline_resume["structured_facts"] = structured_facts
+        resume_snapshot["structured_facts"] = structured_facts
+    resume_snapshot["offline_resume"] = offline_resume
+    CandidateApplicationRepository(session).update(application, {"resume_snapshot": resume_snapshot})
+    return _with_application_id(ResumeArtifactRead, updated, application.candidate_application_id, person.candidate_person_id)
 
 
 @router.post("/{applicationId}/resume-artifacts", response_model=ResumeArtifactRead, status_code=201)

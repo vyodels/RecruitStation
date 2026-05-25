@@ -34,6 +34,7 @@ interface StatusKanbanViewProps {
     payload: { direction: string; content: string; messageType?: string; platform?: string },
   ): Promise<unknown> | void;
   onTransition(applicationId: string, payload: ApplicationTransitionPayload): Promise<unknown> | void;
+  onExtractResumeText?(applicationId: string, artifactId: string): Promise<unknown> | void;
   onOpenDashboard(): void;
 }
 
@@ -65,6 +66,7 @@ export function StatusKanbanView({
   onRefresh,
   onCreateEntry,
   onTransition,
+  onExtractResumeText,
   onOpenDashboard,
 }: StatusKanbanViewProps): JSX.Element {
   const { copy } = useI18n();
@@ -480,6 +482,7 @@ export function StatusKanbanView({
         onRefresh={onRefresh}
         onCreateEntry={onCreateEntry}
         onTransition={onTransition}
+        onExtractResumeText={onExtractResumeText}
       />
     </div>
   );
