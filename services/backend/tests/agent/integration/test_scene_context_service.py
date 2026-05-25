@@ -259,6 +259,214 @@ def test_scene_context_creates_episode_records_without_learning_side_effects(tmp
         assert observed_snapshot.environment_descriptor["environment_kind"] == "job_detail"
 
 
+def test_jd_sync_scene_consumes_safe_action_candidate_with_hid_and_reobserves(tmp_path: Path) -> None:
+    session_factory = _session_factory(tmp_path)
+    provider = ScriptedProvider(
+        provider_name="scene-scripted",
+        responses=[
+            LLMResponse(
+                tool_calls=[ToolCall(id="snap-1", name="browser_snapshot", arguments={"tabId": 1136767565})],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(content="仍需进入职位详情读取职责和要求。"),
+        ],
+    )
+    hid_calls: list[dict[str, object]] = []
+    snapshot_calls: list[dict[str, object]] = []
+
+    def _browser_snapshot(arguments: dict[str, object]) -> dict[str, object]:
+        snapshot_calls.append(dict(arguments))
+        if len(snapshot_calls) == 1:
+            return {
+                "success": True,
+                "tabId": 1136767565,
+                "snapshot": {
+                    "url": "https://www.zhipin.com/web/chat/job/list?ka=menu-manager-job",
+                    "title": "职位管理",
+                    "text": "职位管理 全部职位 开放中 产品实习生 北京 经验不限 本科 2-4K 全职 开放中",
+                    "clickables": [
+                        {
+                            "ref": "e23",
+                            "text": "产品实习生 北京 经验不限 本科 2-4K 全职 开放中",
+                            "kind": "job_row",
+                            "clickPoint": {"x": 260, "y": 220},
+                            "region": {"x": 190, "y": 180, "width": 620, "height": 96},
+                        },
+                        {
+                            "ref": "edit-e23",
+                            "text": "编辑",
+                            "role": "button",
+                            "parentRef": "e23",
+                            "clickPoint": {"x": 760, "y": 220},
+                        },
+                    ],
+                },
+            }
+        return {
+            "success": True,
+            "tabId": 1136767565,
+            "snapshot": {
+                "url": "https://www.zhipin.com/web/chat/job/edit?encryptId=e23",
+                "title": "编辑职位 - 产品实习生",
+                "text": "编辑职位 产品实习生 职位描述 负责产品需求分析和跨团队协作 任职要求 本科以上，沟通能力好",
+                "clickables": [],
+            },
+        }
+
+    tools = ToolRegistry()
+    tools.register(
+        ToolDefinition(
+            name="browser_snapshot",
+            description="Snapshot.",
+            parameters={"type": "object", "additionalProperties": True},
+            handler=_browser_snapshot,
+            external_target=True,
+            metadata={"capabilities": ["browser"], "external_tool": True, "real_environment": True},
+        )
+    )
+    tools.register(
+        ToolDefinition(
+            name="hid_action",
+            description="HID.",
+            parameters={"type": "object", "additionalProperties": True},
+            handler=lambda arguments: hid_calls.append(dict(arguments)) or {"ok": True},
+            external_target=True,
+            metadata={"capabilities": ["computer"], "external_tool": True, "real_environment": True},
+        )
+    )
+    service = SceneContextService(
+        session_factory=session_factory,
+        provider=provider,
+        tool_registry=tools,
+        plugin_host=PluginHost(),
+    )
+
+    result = service.delegate(
+        {
+            "title": "BOSS JD sync",
+            "instruction": "同步 BOSS 职位详情。",
+            "preferred_capabilities": ["browser", "computer"],
+            "browser_target": {
+                "url": "https://www.zhipin.com/web/chat/index",
+                "host": "www.zhipin.com",
+                "domain": "zhipin.com",
+                "tabId": 1136767565,
+            },
+            "context": {"plan_kind": "jd_sync"},
+            "output_contract": {"contract_kind": "jd_sync", "result_data_required": True},
+        }
+    )
+
+    assert hid_calls, result
+    assert len(hid_calls) == 1
+    assert len(snapshot_calls) == 2
+    assert hid_calls[0]["target"]["host"] == "www.zhipin.com"
+    assert hid_calls[0]["target"]["tabId"] == 1136767565
+    assert hid_calls[0]["primitives"][0]["type"] == "click"
+    assert result["result_data"]["jd_sync_candidate_execution"]["reason"] == "safe_action_candidate_entered_detail_or_edit"
+    with session_factory() as session:
+        episode = session.query(ExecutionEpisode).one()
+        tool_results = [
+            item["payload"]["tool_name"]
+            for item in episode.actions
+            if item["type"] == "tool_event" and item["payload"]["kind"] == "tool_result_ready"
+        ]
+    assert tool_results.count("hid_action") == 1
+    assert tool_results.count("browser_snapshot") == 2
+
+
+def test_jd_sync_scene_does_not_execute_forbidden_action_plan_candidate(tmp_path: Path) -> None:
+    session_factory = _session_factory(tmp_path)
+    provider = ScriptedProvider(
+        provider_name="scene-scripted",
+        responses=[
+            LLMResponse(
+                tool_calls=[ToolCall(id="snap-1", name="browser_snapshot", arguments={"tabId": 1136767565})],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(content="仍需安全进入详情。"),
+        ],
+    )
+    hid_calls: list[dict[str, object]] = []
+
+    tools = ToolRegistry()
+    tools.register(
+        ToolDefinition(
+            name="browser_snapshot",
+            description="Snapshot.",
+            parameters={"type": "object", "additionalProperties": True},
+            handler=lambda arguments: {
+                "success": True,
+                "tabId": 1136767565,
+                "snapshot": {
+                    "url": "https://www.zhipin.com/web/chat/job/list?ka=menu-manager-job",
+                    "title": "职位管理",
+                    "text": "职位管理 全部职位 开放中 产品实习生 北京 经验不限 本科 2-4K 全职 开放中",
+                    "clickables": [
+                        {
+                            "ref": "e23",
+                            "text": "产品实习生 北京 经验不限 本科 2-4K 全职 开放中",
+                            "kind": "job_row",
+                        }
+                    ],
+                },
+            },
+            external_target=True,
+            metadata={"capabilities": ["browser"], "external_tool": True, "real_environment": True},
+        )
+    )
+    tools.register(
+        ToolDefinition(
+            name="hid_action",
+            description="HID.",
+            parameters={"type": "object", "additionalProperties": True},
+            handler=lambda arguments: hid_calls.append(dict(arguments)) or {"ok": True},
+            external_target=True,
+            metadata={"capabilities": ["computer"], "external_tool": True, "real_environment": True},
+        )
+    )
+    service = SceneContextService(
+        session_factory=session_factory,
+        provider=provider,
+        tool_registry=tools,
+        plugin_host=PluginHost(),
+    )
+
+    service.delegate(
+        {
+            "title": "BOSS JD sync",
+            "instruction": "同步 BOSS 职位详情。",
+            "preferred_capabilities": ["browser", "computer"],
+            "browser_target": {
+                "url": "https://www.zhipin.com/web/chat/index",
+                "host": "www.zhipin.com",
+                "domain": "zhipin.com",
+                "tabId": 1136767565,
+            },
+            "context": {
+                "plan_kind": "jd_sync",
+                "action_plan": [
+                    {
+                        "safe_action_candidates": [
+                            {
+                                "kind": "open_job_detail_or_safe_edit",
+                                "tool_name": "hid_action",
+                                "label": "关闭",
+                                "ref": "close-e23",
+                                "target": {"host": "www.zhipin.com", "tabId": 1136767565},
+                                "primitives": [{"type": "click", "at": {"x": 820, "y": 220}, "label": "关闭"}],
+                            }
+                        ]
+                    }
+                ],
+            },
+            "output_contract": {"contract_kind": "jd_sync", "result_data_required": True},
+        }
+    )
+
+    assert hid_calls == []
+
+
 def test_scene_context_with_browser_target_requires_browser_or_hid_tool_evidence(tmp_path: Path) -> None:
     session_factory = _session_factory(tmp_path)
     provider = ScriptedProvider(

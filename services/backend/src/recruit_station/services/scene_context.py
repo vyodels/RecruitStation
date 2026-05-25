@@ -346,6 +346,12 @@ class SceneContextService:
                 timeout_seconds=scene_turn_timeout_seconds,
             )
             blockers = _collect_blockers(last_outcome, engine_events)
+        jd_sync_candidate_execution = _force_jd_sync_safe_action_candidate_execution_if_needed(
+            request=request,
+            scene_tool_registry=scene_tool_registry,
+            engine_events=engine_events,
+            blockers=blockers,
+        )
         jd_sync_observation_repair = _force_jd_sync_job_management_snapshot_if_needed(
             request=request,
             scene_tool_registry=scene_tool_registry,
@@ -380,6 +386,7 @@ class SceneContextService:
             outcome=last_outcome,
             blockers=blockers,
             snapshot_ids=snapshot_ids,
+            jd_sync_candidate_execution=jd_sync_candidate_execution,
             jd_sync_observation_repair=jd_sync_observation_repair,
         )
 
@@ -394,6 +401,7 @@ class SceneContextService:
         outcome: AgentTurnOutcome,
         blockers: list[dict[str, Any]],
         snapshot_ids: list[str],
+        jd_sync_candidate_execution: dict[str, Any] | None = None,
         jd_sync_observation_repair: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         blockers = list(blockers or [])
@@ -402,6 +410,11 @@ class SceneContextService:
             blockers.append(evidence_blocker)
         result_data = _scene_result_data(outcome, output_contract=output_contract)
         result_data = _normalize_scene_result_contract_data(result_data, output_contract)
+        if jd_sync_candidate_execution is not None:
+            result_data = {
+                **result_data,
+                "jd_sync_candidate_execution": jd_sync_candidate_execution,
+            }
         if jd_sync_observation_repair is not None:
             result_data = {
                 **result_data,
@@ -1814,6 +1827,259 @@ def _jd_sync_job_management_visible_entry_click_action(target: dict[str, Any]) -
             "primitives": [primitive],
         },
     }
+
+
+def _force_jd_sync_safe_action_candidate_execution_if_needed(
+    *,
+    request: dict[str, Any],
+    scene_tool_registry: ToolRegistry,
+    engine_events: list[dict[str, Any]],
+    blockers: list[dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    if not _is_jd_sync_result_contract(_as_dict(request.get("output_contract"))):
+        return None
+    if _has_terminal_jd_sync_scene_blocker(blockers):
+        return None
+    if "hid_action" not in scene_tool_registry.tools or "browser_snapshot" not in scene_tool_registry.tools:
+        return None
+    if _has_successful_tool_result(engine_events, "hid_action"):
+        return None
+
+    delta = _jd_sync_browser_evidence_delta_from_events(engine_events)
+    pending_jobs = _list_of_dicts(delta.get("pending_jobs"))
+    if not pending_jobs:
+        return None
+    candidates = _safe_jd_sync_action_candidates_for_execution(
+        request=request,
+        pending_jobs=pending_jobs,
+        browser_candidates=_list_of_dicts(delta.get("action_candidates")),
+    )
+    if not candidates:
+        return None
+
+    attempts: list[dict[str, Any]] = []
+    for index, candidate in enumerate(candidates[:2], start=1):
+        hid_arguments = _jd_sync_hid_arguments_from_action_candidate(candidate)
+        if not hid_arguments:
+            continue
+        click_event_seq = max((_safe_int(event.get("engine_output_seq")) for event in engine_events), default=0) + 1
+        click_result = scene_tool_registry.execute("hid_action", hid_arguments)
+        engine_events.append(
+            {
+                "type": "tool_event",
+                "engine_output_seq": click_event_seq,
+                "payload": {
+                    "kind": "tool_result_ready",
+                    "tool_name": "hid_action",
+                    "tool_use_id": f"jd-sync-action-candidate-{index}",
+                    "tool_call_id": f"jd-sync-action-candidate-{index}",
+                    "is_error": bool(click_result.is_error),
+                    "content": click_result.output,
+                },
+                "recorded_at": utcnow().isoformat(),
+            }
+        )
+        attempt = {
+            "tool_name": "hid_action",
+            "status": "completed" if not click_result.is_error and _tool_result_content_succeeded(click_result.output) else "blocked",
+            "candidate": _compact_value(candidate),
+            "arguments": dict(click_result.arguments or hid_arguments),
+        }
+        attempts.append(attempt)
+        if click_result.is_error or not _tool_result_content_succeeded(click_result.output):
+            return {
+                "status": "blocked",
+                "reason": "safe_action_candidate_hid_failed",
+                "attempts": attempts,
+            }
+
+        snapshot_action = _jd_sync_snapshot_action_after_candidate(candidate, request=request)
+        snapshot_event_seq = click_event_seq + 1
+        snapshot_result = scene_tool_registry.execute("browser_snapshot", dict(snapshot_action["arguments"]))
+        engine_events.append(
+            {
+                "type": "tool_event",
+                "engine_output_seq": snapshot_event_seq,
+                "payload": {
+                    "kind": "tool_result_ready",
+                    "tool_name": "browser_snapshot",
+                    "tool_use_id": f"jd-sync-action-candidate-{index}-observe",
+                    "tool_call_id": f"jd-sync-action-candidate-{index}-observe",
+                    "is_error": bool(snapshot_result.is_error),
+                    "content": snapshot_result.output,
+                },
+                "recorded_at": utcnow().isoformat(),
+            }
+        )
+        attempt["reobserve"] = {
+            "tool_name": "browser_snapshot",
+            "status": "completed" if not snapshot_result.is_error and _tool_result_content_succeeded(snapshot_result.output) else "blocked",
+            "arguments": dict(snapshot_result.arguments or snapshot_action["arguments"]),
+        }
+        if snapshot_result.is_error or not _tool_result_content_succeeded(snapshot_result.output):
+            return {
+                "status": "blocked",
+                "reason": "safe_action_candidate_reobserve_failed",
+                "attempts": attempts,
+            }
+        if _jd_sync_snapshot_is_detail_or_edit(snapshot_result.output):
+            return {
+                "status": "completed",
+                "reason": "safe_action_candidate_entered_detail_or_edit",
+                "attempts": attempts,
+            }
+
+    return {
+        "status": "in_progress",
+        "reason": "safe_action_candidate_executed_but_detail_not_confirmed",
+        "attempts": attempts,
+    }
+
+
+def _has_terminal_jd_sync_scene_blocker(blockers: list[dict[str, Any]] | None) -> bool:
+    terminal_kinds = {
+        "login_required",
+        "captcha",
+        "permission_denied",
+        "required_tool_unavailable",
+        "target_site_unreachable",
+        "workspace_paused",
+    }
+    for blocker in _list_of_dicts(blockers):
+        kind = str(blocker.get("kind") or "").strip().lower()
+        text = _normalize_ui_text(blocker.get("message") or blocker.get("reason")).lower()
+        if kind in terminal_kinds:
+            return True
+        if any(marker in text for marker in ("login", "登录", "captcha", "验证码", "permission", "权限")):
+            return True
+    return False
+
+
+def _jd_sync_browser_evidence_delta_from_events(events: list[dict[str, Any]]) -> dict[str, Any]:
+    observed_jobs: list[dict[str, Any]] = []
+    pending_jobs: list[dict[str, Any]] = []
+    action_candidates: list[dict[str, Any]] = []
+    evidence_refs: list[dict[str, Any]] = []
+    recovery: dict[str, Any] = {}
+    for payload in _events_successful_tool_result_payloads(events):
+        tool_name = str(payload.get("tool_name") or "").strip()
+        if tool_name not in _SCENE_BROWSER_PAGE_OBSERVATION_TOOL_NAMES:
+            continue
+        delta = _as_dict(payload.get("jd_sync_browser_evidence_delta"))
+        if not delta and isinstance(payload.get("content"), dict):
+            delta = _jd_sync_browser_evidence_delta_from_snapshot(payload["content"])
+        observed_jobs = _merge_unique_dict_list(observed_jobs, delta.get("observed_jobs"))
+        pending_jobs = _merge_unique_dict_list(pending_jobs, delta.get("pending_jobs"))
+        action_candidates = _merge_unique_dict_list(action_candidates, delta.get("action_candidates"))
+        evidence_refs = _merge_unique_dict_list(evidence_refs, delta.get("evidence_refs"))
+        recovery = {**recovery, **_as_dict(delta.get("recovery"))}
+    return {
+        key: value
+        for key, value in {
+            "observed_jobs": observed_jobs,
+            "pending_jobs": pending_jobs,
+            "action_candidates": action_candidates,
+            "evidence_refs": evidence_refs,
+            "recovery": recovery,
+        }.items()
+        if value not in (None, [], {})
+    }
+
+
+def _safe_jd_sync_action_candidates_for_execution(
+    *,
+    request: dict[str, Any],
+    pending_jobs: list[dict[str, Any]],
+    browser_candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for plan in _list_of_dicts(request.get("action_plan")):
+        candidates.extend(_list_of_dicts(plan.get("safe_action_candidates")))
+        next_action = _as_dict(plan.get("recovery_next_action") or plan.get("next_action"))
+        if next_action:
+            candidates.append(next_action)
+        if str(plan.get("tool_name") or "").strip() == "hid_action":
+            candidates.append(plan)
+    candidates.extend(browser_candidates)
+    normalized = normalize_jd_sync_scene_result(
+        {
+            "status": "in_progress",
+            "pending_jobs": pending_jobs,
+            "action_candidates": _merge_unique_dict_list([], candidates),
+        },
+        {"contract_kind": "jd_sync"},
+    )
+    safe: list[dict[str, Any]] = []
+    for candidate in _list_of_dicts(normalized.get("action_candidates")):
+        if str(candidate.get("tool_name") or "").strip() != "hid_action":
+            continue
+        if str(candidate.get("kind") or "").strip() not in {"", "open_job_detail_or_safe_edit"}:
+            continue
+        if not _jd_sync_hid_arguments_from_action_candidate(candidate):
+            continue
+        safe.append(candidate)
+    return safe
+
+
+def _jd_sync_hid_arguments_from_action_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
+    primitives = [dict(item) for item in list(candidate.get("primitives") or []) if isinstance(item, dict)]
+    if not primitives:
+        return {}
+    target = _as_dict(candidate.get("target"))
+    source_url = _optional_string(candidate.get("source_url") or candidate.get("url") or candidate.get("href"))
+    if not target:
+        target = {}
+    target.setdefault("host", "www.zhipin.com")
+    if source_url:
+        target.setdefault("url", source_url)
+    context = {
+        "host": target.get("host") or "www.zhipin.com",
+        **({"url": source_url} if source_url else {}),
+        "action_candidate_kind": candidate.get("kind"),
+    }
+    arguments: dict[str, Any] = {
+        "target": target,
+        "context": context,
+        "primitives": primitives,
+        "metadata": {
+            key: candidate.get(key)
+            for key in ("ref", "bound_ref", "label", "evidence_ref", "kind")
+            if candidate.get(key) not in (None, "", [], {})
+        },
+    }
+    for key in ("ref", "label", "href", "url", "kind"):
+        if candidate.get(key) not in (None, "", [], {}):
+            arguments[key] = candidate[key]
+    return arguments
+
+
+def _jd_sync_snapshot_action_after_candidate(candidate: dict[str, Any], *, request: dict[str, Any]) -> dict[str, Any]:
+    target = _as_dict(candidate.get("target"))
+    browser_target = _as_dict(request.get("browser_target"))
+    arguments: dict[str, Any] = {
+        "expectedHost": "www.zhipin.com",
+        "expectedOrigin": "https://www.zhipin.com",
+        "targetPolicy": "same-origin",
+        "includeText": True,
+        "clickableLimit": 120,
+    }
+    tab_id = _optional_int(target.get("tabId") or target.get("tab_id") or browser_target.get("tabId") or browser_target.get("tab_id"))
+    if tab_id is not None:
+        arguments["tabId"] = tab_id
+    return {"tool_name": "browser_snapshot", "arguments": arguments}
+
+
+def _jd_sync_snapshot_is_detail_or_edit(content: Any) -> bool:
+    for url in _browser_result_urls(content):
+        parsed = urlparse(str(url or ""))
+        if (parsed.hostname or "").lower() != "www.zhipin.com":
+            continue
+        path = parsed.path.lower()
+        if "/job_detail/" in path or path.startswith("/web/chat/job/detail") or path.startswith("/web/chat/job/edit"):
+            return True
+    page = _browser_page_semantics_from_output(content) if isinstance(content, dict) else {}
+    text = _normalize_ui_text(" ".join(str(item or "") for item in (page.get("url"), page.get("title"), page.get("text"))))
+    return any(marker in text for marker in ("职位描述", "岗位职责", "任职要求", "编辑职位", "职位详情"))
 
 
 def _is_allowed_scene_tool(tool: ToolDefinition) -> bool:
@@ -5424,6 +5690,10 @@ def _normalize_action_plan(value: Any) -> list[dict[str, Any]]:
         payload = _as_dict(raw)
         normalized = {
             "action": _optional_string(payload.get("action") or payload.get("intent"), max_length=128),
+            "job_key": _optional_string(payload.get("job_key") or payload.get("jobKey"), max_length=255),
+            "job": _as_dict(payload.get("job")),
+            "safe_action_candidates": _list_of_dicts(payload.get("safe_action_candidates") or payload.get("action_candidates")),
+            "recovery_next_action": _as_dict(payload.get("recovery_next_action") or payload.get("recoveryNextAction")),
             "steps": _string_list(payload.get("steps")),
             "if_visible": _optional_string(payload.get("if_visible") or payload.get("on_visible"), max_length=128),
             "if_not_visible": _optional_string(
