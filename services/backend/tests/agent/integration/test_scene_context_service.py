@@ -19,6 +19,10 @@ from recruit_station.services.scene_context import (
     _should_retry_scene_for_missing_hid,
     _should_retry_scene_for_transient_hid_error,
 )
+from recruit_station.services.jd_sync_state import (
+    initial_jd_sync_state,
+    reduce_jd_sync_scene_result,
+)
 
 
 def _session_factory(tmp_path: Path):
@@ -2036,6 +2040,130 @@ def test_scene_context_forces_jd_sync_snapshot_after_only_job_tab_identification
     assert "output_contract_incomplete" not in json.dumps(result["blockers"], ensure_ascii=False)
 
 
+def test_scene_context_extracts_jd_sync_job_list_evidence_from_forced_snapshot(tmp_path: Path) -> None:
+    session_factory = _session_factory(tmp_path)
+    final_payload = {
+        "status": "in_progress",
+        "summary": "Need to enter the visible job detail.",
+        "observed_jobs": [],
+        "pending_jobs": [],
+        "completed_job_details": [],
+        "inactive_or_closed_jobs": [],
+        "blockers": [],
+        "limitations": [],
+        "evidence": [],
+    }
+    snapshot_calls: list[dict[str, object]] = []
+    provider = ScriptedProvider(
+        provider_name="scene-scripted",
+        responses=[
+            LLMResponse(tool_calls=[ToolCall(id="tabs", name="browser_list_tabs", arguments={})], finish_reason="tool_calls"),
+            LLMResponse(content=json.dumps(final_payload, ensure_ascii=False), finish_reason="stop"),
+        ],
+    )
+    tools = ToolRegistry()
+    tools.register(
+        ToolDefinition(
+            name="browser_list_tabs",
+            description="List browser tabs.",
+            parameters={"type": "object", "properties": {}, "additionalProperties": True},
+            handler=lambda arguments: {
+                "success": True,
+                "tabs": [
+                    {
+                        "tabId": 1136767565,
+                        "url": "https://www.zhipin.com/web/chat/job/list",
+                        "title": "职位管理",
+                        "active": True,
+                    }
+                ],
+            },
+            metadata={"capabilities": ["browser", "document"], "external_tool": True, "real_environment": True},
+        )
+    )
+    tools.register(
+        ToolDefinition(
+            name="browser_snapshot",
+            description="Observe browser page.",
+            parameters={"type": "object", "properties": {}, "additionalProperties": True},
+            handler=lambda arguments: snapshot_calls.append(dict(arguments)) or {
+                "success": True,
+                "tabId": arguments.get("tabId"),
+                "url": "https://www.zhipin.com/web/chat/job/list",
+                "title": "职位管理",
+                "text": "职位管理 全部职位 开放中 产品实习生 北京 | 经验不限 | 本科 | 2-4K | 全职 开放中 编辑 查看详情",
+                "elements": [
+                    {
+                        "ref": "job-row-product-intern",
+                        "text": "产品实习生 北京 经验不限 本科 2-4K 全职 开放中",
+                        "role": "link",
+                        "kind": "job_row",
+                        "href": "https://www.zhipin.com/web/chat/job/edit?encryptId=product-intern",
+                        "clickPoint": {"x": 360, "y": 300},
+                        "region": {"x": 250, "y": 260, "width": 620, "height": 120},
+                    },
+                    {
+                        "ref": "job-edit-product-intern",
+                        "text": "编辑",
+                        "role": "button",
+                        "kind": "job_management_action",
+                        "parentRef": "job-row-product-intern",
+                        "clickPoint": {"x": 760, "y": 306},
+                    },
+                    {
+                        "ref": "job-close-product-intern",
+                        "text": "关闭职位",
+                        "role": "button",
+                        "kind": "job_management_action",
+                        "parentRef": "job-row-product-intern",
+                        "clickPoint": {"x": 820, "y": 306},
+                    },
+                ],
+            },
+            metadata={"capabilities": ["browser", "document"], "external_tool": True, "real_environment": True},
+        )
+    )
+    service = SceneContextService(
+        session_factory=session_factory,
+        provider=provider,
+        tool_registry=tools,
+        plugin_host=PluginHost(),
+    )
+
+    result = service.delegate(
+        {
+            "instruction": "Return JD sync scene result JSON.",
+            "context": {"plan_kind": "jd_sync"},
+            "preferred_capabilities": ["browser"],
+            "browser_target": {"url": "https://www.zhipin.com/", "tabId": 1136767565},
+            "output_contract": {"contract_kind": "jd_sync", "result_data_required": True},
+        }
+    )
+
+    assert snapshot_calls == [
+        {
+            "tabId": 1136767565,
+            "expectedHost": "www.zhipin.com",
+            "expectedOrigin": "https://www.zhipin.com",
+            "targetPolicy": "same-origin",
+            "includeText": True,
+            "clickableLimit": 120,
+        }
+    ]
+    assert result["status"] == "incomplete"
+    assert result["result_data"]["observed_jobs"][0]["title"] == "产品实习生"
+    assert result["result_data"]["pending_jobs"][0]["title"] == "产品实习生"
+    assert result["result_data"]["completed_job_details"] == []
+    assert result["result_data"]["writeback_candidates"] == []
+    assert result["result_data"]["action_candidates"][0]["tool_name"] == "hid_action"
+    assert result["result_data"]["action_candidates"][0]["kind"] == "open_job_detail_or_safe_edit"
+    assert "关闭职位" not in json.dumps(result["result_data"]["action_candidates"], ensure_ascii=False)
+    state = reduce_jd_sync_scene_result(initial_jd_sync_state(), result)
+    assert list(state["jobs_by_key"]) == ["https://www.zhipin.com/web/chat/job/edit?encryptid=product-intern"]
+    assert state["pending_job_keys"] == ["https://www.zhipin.com/web/chat/job/edit?encryptid=product-intern"]
+    assert state["completed_job_keys"] == []
+
+
 def test_scene_context_recovers_jd_sync_snapshot_from_existing_zhipin_tab_when_active_tab_is_local(
     tmp_path: Path,
 ) -> None:
@@ -2104,7 +2232,10 @@ def test_scene_context_recovers_jd_sync_snapshot_from_existing_zhipin_tab_when_a
         }
     )
 
-    assert result["status"] == "completed"
+    assert result["status"] == "incomplete"
+    assert result["result_data"]["observed_jobs"][0]["title"] == "产品实习生"
+    assert result["result_data"]["pending_jobs"][0]["title"] == "产品实习生"
+    assert result["result_data"]["completed_job_details"] == []
     assert snapshot_calls == [
         {},
         {

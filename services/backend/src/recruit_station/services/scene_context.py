@@ -424,6 +424,7 @@ class SceneContextService:
                 output_contract,
                 jd_sync_snapshot_blocker,
             )
+        result_data = _apply_jd_sync_browser_evidence_delta(result_data, episode, output_contract)
         result_data = normalize_jd_sync_scene_result(result_data, output_contract)
         contract_blockers = _scene_result_contract_blockers(result_data, output_contract)
         if contract_blockers:
@@ -4000,6 +4001,243 @@ def _scene_result_contract_blockers(result_data: dict[str, Any], output_contract
                 }
             )
     return blockers
+
+
+def _apply_jd_sync_browser_evidence_delta(
+    result_data: dict[str, Any],
+    episode: Any,
+    output_contract: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if not _is_jd_sync_result_contract(_as_dict(output_contract)):
+        return result_data
+    delta = _jd_sync_browser_evidence_delta_from_episode(episode)
+    if not delta:
+        return result_data
+    merged = dict(result_data or {})
+    for field in ("observed_jobs", "pending_jobs", "action_candidates", "evidence_refs"):
+        merged[field] = _merge_unique_dict_list(merged.get(field), delta.get(field))
+    recovery = _as_dict(merged.get("recovery"))
+    delta_recovery = _as_dict(delta.get("recovery"))
+    if delta_recovery:
+        recovery = {**delta_recovery, **recovery}
+        merged["recovery"] = recovery
+    if str(merged.get("status") or "").strip().lower() in {"", "completed", "complete", "success", "succeeded"}:
+        if merged.get("pending_jobs") and not merged.get("completed_job_details"):
+            merged["reported_status"] = merged.get("status")
+            merged["status"] = "in_progress"
+            merged["scene_status"] = "in_progress"
+    merged["jd_sync_evidence_extraction"] = {
+        "status": "applied",
+        "source": "browser_snapshot",
+        "observed_job_count": len(merged.get("observed_jobs") or []),
+        "pending_job_count": len(merged.get("pending_jobs") or []),
+        "action_candidate_count": len(merged.get("action_candidates") or []),
+    }
+    return merged
+
+
+def _jd_sync_browser_evidence_delta_from_episode(episode: Any) -> dict[str, Any]:
+    observed_jobs: list[dict[str, Any]] = []
+    pending_jobs: list[dict[str, Any]] = []
+    action_candidates: list[dict[str, Any]] = []
+    evidence_refs: list[dict[str, Any]] = []
+    recovery: dict[str, Any] = {}
+    for payload in _episode_successful_tool_result_payloads(episode):
+        tool_name = str(payload.get("tool_name") or "").strip()
+        if tool_name not in _SCENE_BROWSER_PAGE_OBSERVATION_TOOL_NAMES:
+            continue
+        content = payload.get("content")
+        if not isinstance(content, dict):
+            continue
+        delta = _jd_sync_browser_evidence_delta_from_snapshot(content)
+        observed_jobs = _merge_unique_dict_list(observed_jobs, delta.get("observed_jobs"))
+        pending_jobs = _merge_unique_dict_list(pending_jobs, delta.get("pending_jobs"))
+        action_candidates = _merge_unique_dict_list(action_candidates, delta.get("action_candidates"))
+        evidence_refs = _merge_unique_dict_list(evidence_refs, delta.get("evidence_refs"))
+        recovery = {**recovery, **_as_dict(delta.get("recovery"))}
+    return {
+        key: value
+        for key, value in {
+            "observed_jobs": observed_jobs,
+            "pending_jobs": pending_jobs,
+            "action_candidates": action_candidates,
+            "evidence_refs": evidence_refs,
+            "recovery": recovery,
+        }.items()
+        if value not in (None, [], {})
+    }
+
+
+def _jd_sync_browser_evidence_delta_from_snapshot(content: dict[str, Any]) -> dict[str, Any]:
+    if not _jd_sync_observation_content_has_job_list_or_detail(content):
+        return {}
+    page = _browser_page_semantics_from_output(content)
+    page_url = _optional_string(page.get("url") or _browser_result_url(content))
+    if page_url and not _host_matches_target_domain(_host_from_url(page_url), "zhipin.com"):
+        return {}
+    items = [item for item in list(page.get("items") or []) if isinstance(item, dict)]
+    observed_jobs: list[dict[str, Any]] = []
+    action_candidates: list[dict[str, Any]] = []
+    for item in items:
+        if _is_blocked_recruiting_site_click_item(item):
+            continue
+        if _is_job_row_or_title_item(item):
+            job = _jd_sync_job_from_browser_item(item, page_url=page_url, content=content)
+            if job:
+                observed_jobs.append(job)
+        binding = _job_page_click_binding(item, items)
+        if binding is not None:
+            candidate = _jd_sync_action_candidate_from_browser_item(item, binding=binding, page_url=page_url, content=content)
+            if candidate:
+                action_candidates.append(candidate)
+    observed_jobs = _merge_unique_dict_list([], observed_jobs)
+    return {
+        key: value
+        for key, value in {
+            "observed_jobs": observed_jobs,
+            "pending_jobs": list(observed_jobs),
+            "action_candidates": _merge_unique_dict_list([], action_candidates),
+            "evidence_refs": _jd_sync_evidence_refs_for_jobs(observed_jobs, content=content, page_url=page_url),
+            "recovery": _jd_sync_recovery_from_snapshot(content, page_url=page_url),
+        }.items()
+        if value not in (None, [], {})
+    }
+
+
+def _jd_sync_job_from_browser_item(item: dict[str, Any], *, page_url: str | None, content: dict[str, Any]) -> dict[str, Any]:
+    label = _normalize_ui_text(_browser_item_label(item))
+    if not label:
+        return {}
+    title = _jd_sync_title_from_job_label(label)
+    if not title:
+        return {}
+    href = _optional_string(item.get("href") or item.get("url"))
+    ref = _optional_string(item.get("ref") or item.get("id"))
+    key = _optional_string(item.get("external_id") or item.get("externalId") or href or ref or title)
+    status = _jd_sync_status_from_text(label)
+    job = {
+        "job_key": key,
+        "title": title,
+        "raw_text": label,
+        "status": status,
+        "external_url": href,
+        "source_url": page_url,
+        "source": "browser_snapshot",
+        "evidence_ref": _jd_sync_evidence_ref(content=content, page_url=page_url, ref=ref),
+    }
+    return {field: value for field, value in job.items() if value not in (None, "", [], {})}
+
+
+def _jd_sync_action_candidate_from_browser_item(
+    item: dict[str, Any],
+    *,
+    binding: dict[str, Any],
+    page_url: str | None,
+    content: dict[str, Any],
+) -> dict[str, Any]:
+    point = _browser_item_click_point(item)
+    if point is None:
+        point = _browser_item_click_point(binding)
+    if point is None:
+        return {}
+    label = _normalize_ui_text(_browser_item_label(item))
+    ref = _optional_string(item.get("ref") or item.get("id"))
+    bound_ref = _optional_string(binding.get("ref") or binding.get("id"))
+    tab_id = _browser_result_tab_id(content)
+    candidate = {
+        "kind": "open_job_detail_or_safe_edit",
+        "tool_name": "hid_action",
+        "label": label,
+        "ref": ref,
+        "bound_ref": bound_ref,
+        "source_url": page_url,
+        "target": {
+            "host": "www.zhipin.com",
+            **({"tabId": tab_id} if tab_id is not None else {}),
+        },
+        "primitives": [
+            {
+                "type": "click",
+                "at": {"x": point[0], "y": point[1]},
+                "button": "left",
+                **({"label": label} if label else {}),
+                **({"ref": ref} if ref else {}),
+            }
+        ],
+        "evidence_ref": _jd_sync_evidence_ref(content=content, page_url=page_url, ref=ref or bound_ref),
+    }
+    return {field: value for field, value in candidate.items() if value not in (None, "", [], {})}
+
+
+def _jd_sync_title_from_job_label(label: str) -> str:
+    text = _normalize_ui_text(label)
+    if not text:
+        return ""
+    for marker in ("开放中", "招聘中", "待开放", "审核不通过", "已关闭", "看过我", "沟通过", "感兴趣", "编辑", "查看详情"):
+        text = text.replace(marker, " ")
+    text = text.replace("|", " ")
+    parts = [part.strip() for part in text.split() if part.strip()]
+    if not parts:
+        return ""
+    return parts[0][:80]
+
+
+def _jd_sync_status_from_text(text: str) -> str | None:
+    normalized = _normalize_ui_text(text)
+    for marker, status in (
+        ("开放中", "open"),
+        ("招聘中", "open"),
+        ("待开放", "pending_publish"),
+        ("审核不通过", "rejected"),
+        ("已关闭", "closed"),
+    ):
+        if marker in normalized:
+            return status
+    return None
+
+
+def _jd_sync_evidence_refs_for_jobs(jobs: list[dict[str, Any]], *, content: dict[str, Any], page_url: str | None) -> list[dict[str, Any]]:
+    refs: list[dict[str, Any]] = []
+    for job in jobs:
+        refs.append(
+            {
+                "kind": "browser_snapshot_job_list",
+                "ref": job.get("evidence_ref") or _jd_sync_evidence_ref(content=content, page_url=page_url, ref=job.get("job_key")),
+                "job_key": job.get("job_key"),
+                "title": job.get("title"),
+                "url": page_url,
+            }
+        )
+    return _merge_unique_dict_list([], refs)
+
+
+def _jd_sync_recovery_from_snapshot(content: dict[str, Any], *, page_url: str | None) -> dict[str, Any]:
+    tab_id = _browser_result_tab_id(content)
+    selected_tab = {
+        "url": page_url,
+        "title": content.get("title") or _as_dict(content.get("snapshot")).get("title"),
+        **({"tabId": tab_id} if tab_id is not None else {}),
+    }
+    return {"selected_tab": {key: value for key, value in selected_tab.items() if value not in (None, "", [], {})}}
+
+
+def _jd_sync_evidence_ref(*, content: dict[str, Any], page_url: str | None, ref: Any) -> str:
+    tab_id = _browser_result_tab_id(content)
+    return ":".join(str(part) for part in ("browser_snapshot", tab_id or "", page_url or "", ref or "") if str(part or ""))
+
+
+def _merge_unique_dict_list(existing: Any, incoming: Any) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in list(existing or []) + list(incoming or []):
+        if not isinstance(item, dict):
+            continue
+        key = json.dumps(item, ensure_ascii=False, sort_keys=True, default=str)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(dict(item))
+    return merged
 
 
 def _apply_jd_sync_requires_job_list_snapshot_guard(
