@@ -365,6 +365,97 @@ def test_upsert_candidate_enforces_runtime_max_new_candidates(tmp_path) -> None:
         assert session.query(CandidateApplication).count() == 1
 
 
+def test_upsert_candidate_rejects_out_of_scope_job_description_in_scoped_run(tmp_path) -> None:
+    container = _build_container(tmp_path)
+    in_scope_job = upsert_job_description(container.session_factory, title="AI Agent 产品经理")["job_description"]
+    out_of_scope_job = upsert_job_description(container.session_factory, title="国际销售工程师")["job_description"]
+    runtime_constraints = {"selected_job_description_ids": [in_scope_job["job_description_id"]]}
+
+    with pytest.raises(ValueError, match="outside current run JD scope"):
+        upsert_candidate(
+            container.session_factory,
+            name="越界候选人",
+            platform="mock-zhipin",
+            platform_candidate_id="cand-out-of-scope",
+            job_description_id=out_of_scope_job["job_description_id"],
+            _runtime_constraints=runtime_constraints,
+        )
+
+    with pytest.raises(ValueError, match="job_description_id is required"):
+        upsert_candidate(
+            container.session_factory,
+            name="无岗位候选人",
+            platform="mock-zhipin",
+            platform_candidate_id="cand-without-jd",
+            _runtime_constraints=runtime_constraints,
+        )
+
+    with container.session_factory() as session:
+        assert session.query(Candidate).count() == 0
+        assert session.query(CandidateApplication).count() == 0
+
+
+def test_application_id_only_candidate_tools_reject_out_of_scope_applications(tmp_path) -> None:
+    container = _build_container(tmp_path)
+    in_scope_job = upsert_job_description(container.session_factory, title="AI Agent 产品经理")["job_description"]
+    out_of_scope_job = upsert_job_description(container.session_factory, title="国际销售工程师")["job_description"]
+    runtime_constraints = {"selected_job_description_ids": [in_scope_job["job_description_id"]]}
+    candidate_result = upsert_candidate(
+        container.session_factory,
+        name="岗位外候选人",
+        platform="mock-zhipin",
+        platform_candidate_id="cand-outside-application",
+        job_description_id=out_of_scope_job["job_description_id"],
+    )
+    application_id = candidate_result["application"]["application_id"]
+
+    with pytest.raises(ValueError, match="outside current run JD scope"):
+        get_candidate_thread(
+            container.session_factory,
+            application_id=application_id,
+            _runtime_constraints=runtime_constraints,
+        )
+
+    with pytest.raises(ValueError, match="outside current run JD scope"):
+        score_candidate(
+            container.session_factory,
+            application_id=application_id,
+            score=80,
+            decision="advance",
+            _runtime_constraints=runtime_constraints,
+        )
+
+
+def test_list_candidates_defaults_to_selected_job_description_scope(tmp_path) -> None:
+    container = _build_container(tmp_path)
+    in_scope_job = upsert_job_description(container.session_factory, title="AI Agent 产品经理")["job_description"]
+    out_of_scope_job = upsert_job_description(container.session_factory, title="国际销售工程师")["job_description"]
+    runtime_constraints = {"selected_job_description_ids": [in_scope_job["job_description_id"]]}
+    in_scope_candidate = upsert_candidate(
+        container.session_factory,
+        name="岗位内候选人",
+        platform="mock-zhipin",
+        platform_candidate_id="cand-inside-scope",
+        job_description_id=in_scope_job["job_description_id"],
+    )
+    upsert_candidate(
+        container.session_factory,
+        name="岗位外候选人",
+        platform="mock-zhipin",
+        platform_candidate_id="cand-outside-scope",
+        job_description_id=out_of_scope_job["job_description_id"],
+    )
+
+    listed = list_candidates(container.session_factory, _runtime_constraints=runtime_constraints)
+
+    assert [item["candidate_person_id"] for item in listed] == [
+        in_scope_candidate["candidate"]["candidate_person_id"]
+    ]
+    assert [item["applications"][0]["job_description_id"] for item in listed] == [
+        in_scope_job["job_description_id"]
+    ]
+
+
 def test_upsert_candidate_uses_runtime_name_dedupe_hint(tmp_path) -> None:
     container = _build_container(tmp_path)
     job = upsert_job_description(container.session_factory, title="交易策略产品经理")["job_description"]

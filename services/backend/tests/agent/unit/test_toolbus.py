@@ -95,6 +95,48 @@ def test_toolbus_sync_execute_works_inside_running_event_loop() -> None:
     assert result.output == {"echo": {"value": 1}}
 
 
+def test_toolbus_injects_runtime_constraints_without_exposing_internal_schema() -> None:
+    captured: dict[str, object] = {}
+    registry = ToolRegistry()
+    registry.register(
+        ToolDefinition(
+            name="list_candidates",
+            description="List candidates.",
+            parameters={
+                "type": "object",
+                "properties": {"job_description_id": {"type": "string"}},
+                "additionalProperties": False,
+            },
+            handler=lambda arguments: captured.update(arguments) or {"ok": True},
+            category="business",
+            resource_target_kind="candidate",
+        )
+    )
+
+    runtime_tool = registry.to_agent_runtime_tools()[0]
+    assert "_runtime_constraints" not in runtime_tool.schema.input_schema["properties"]
+
+    result = runtime_tool.handler.handle(
+        ToolCall(
+            id="tool-1",
+            turn_id="turn-1",
+            llm_invocation_id="llm-1",
+            tool_use_id="use-1",
+            name="list_candidates",
+            input={},
+        ),
+        TurnContext(
+            turn_id="turn-1",
+            conversation_id="conversation-1",
+            tools=[],
+            runtime={"constraints": {"selected_job_description_ids": ["jd-1"]}},
+        ),
+    )
+
+    assert result.is_error is False
+    assert captured["_runtime_constraints"] == {"selected_job_description_ids": ["jd-1"]}
+
+
 def test_register_core_tools_do_not_expose_skill_execution_tool() -> None:
     registry = ToolRegistry()
     register_core_tools(registry)

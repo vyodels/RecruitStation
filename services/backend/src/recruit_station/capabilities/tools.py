@@ -12,6 +12,34 @@ from typing import Any, Awaitable, Callable, Protocol, TypeVar
 
 _T = TypeVar("_T")
 
+_RUNTIME_CONSTRAINT_AWARE_TOOL_NAMES: frozenset[str] = frozenset(
+    {
+        "take_over_candidate",
+        "release_candidate",
+        "upsert_job_description",
+        "list_candidates",
+        "upsert_candidate",
+        "delete_candidate",
+        "archive_candidate",
+        "list_candidate_threads",
+        "get_candidate_thread",
+        "score_candidate",
+        "create_candidate_scorecard",
+        "create_candidate_review_decision",
+        "record_outbound_message",
+        "record_candidate_message",
+        "list_pending_candidate_message_syncs",
+        "record_candidate_message_sync_ack",
+        "attach_resume_artifact",
+        "extract_resume_artifact_text",
+        "delete_resume_artifact",
+        "transition_application",
+        "create_candidate_sync_record",
+        "get_jd_progress",
+        "request_human_approval",
+    }
+)
+
 
 class ToolExecutionError(RuntimeError):
     pass
@@ -180,7 +208,7 @@ class ToolRegistry:
                     if _runtime_requires_browser_computer_scene(runtime):
                         arguments = _merge_runtime_jd_sync_context(arguments, runtime)
                         arguments = _normalize_jd_sync_scene_arguments(arguments)
-                if self.tool.name in {"upsert_candidate", "upsert_job_description"}:
+                if self.tool.name in _RUNTIME_CONSTRAINT_AWARE_TOOL_NAMES:
                     runtime = dict(context.runtime or {})
                     constraints = runtime.get("constraints")
                     if isinstance(constraints, dict):

@@ -54,9 +54,10 @@ def take_over_candidate(
     locked_by: str,
     reason: str | None = None,
     expires_at: datetime | None = None,
+    _runtime_constraints: Any = _UNSET,
 ) -> dict[str, Any]:
     with session_factory() as session:
-        application = _resolve_application(session, application_id=application_id)
+        application = _resolve_application(session, application_id=application_id, _runtime_constraints=_runtime_constraints)
         candidate = CandidateRepository(session).get_by_storage_id(application.person_id)
         if candidate is None:
             raise KeyError(f"candidate person for application {application.candidate_application_id} not found")
@@ -90,11 +91,17 @@ def release_candidate(
     released_by: str,
     handover_note: str | None = None,
     handover_next_hint: str | None = None,
+    _runtime_constraints: Any = _UNSET,
 ) -> dict[str, Any]:
     with session_factory() as session:
-        lock = _active_lock(session, application_id)
+        application = _resolve_application(
+            session,
+            application_id=application_id,
+            _runtime_constraints=_runtime_constraints,
+        )
+        lock = _active_lock(session, application.candidate_application_id)
         if lock is None:
-            raise KeyError(f"candidate application {application_id} is not locked")
+            raise KeyError(f"candidate application {application.candidate_application_id} is not locked")
         lock.released_at = utcnow()
         lock.released_by = released_by
         if handover_note is not None:
@@ -298,9 +305,14 @@ def list_candidates(
     platform: str | None = None,
     job_description_id: str | None = None,
     application_status: str | None = None,
+    _runtime_constraints: Any = _UNSET,
 ) -> list[dict[str, Any]]:
     normalized_platform = _canonical_platform_key(platform)
+    runtime_constraints = _normalize_runtime_constraints(_runtime_constraints)
     normalized_job_description_id = _normalize_optional_text(job_description_id)
+    if normalized_job_description_id is not None:
+        _enforce_job_description_in_runtime_scope(normalized_job_description_id, runtime_constraints)
+    scoped_job_description_ids = _runtime_selected_job_description_ids(runtime_constraints)
     normalized_application_status = _normalize_optional_text(application_status)
     with session_factory() as session:
         candidate_repo = CandidateRepository(session)
@@ -316,10 +328,11 @@ def list_candidates(
                 for application in applications
                 if (
                     (not normalized_job_description_id or _application_job_description_id(session, application) == normalized_job_description_id)
+                    and (not scoped_job_description_ids or _application_job_description_id(session, application) in scoped_job_description_ids)
                     and (not normalized_application_status or str(application.current_status or "").strip() == normalized_application_status)
                 )
             ]
-            if normalized_job_description_id or normalized_application_status:
+            if normalized_job_description_id or normalized_application_status or scoped_job_description_ids:
                 if not matched_applications:
                     continue
                 filtered.append(_serialize_candidate(session, candidate, applications=matched_applications))
@@ -363,6 +376,10 @@ def upsert_candidate(
     normalized_job_description_id = _normalize_optional_text(job_description_id)
     normalized_source_platform = _canonical_platform_key(source_platform) or normalized_platform
     runtime_constraints = _normalize_runtime_constraints(_runtime_constraints)
+    if normalized_job_description_id is not None:
+        _enforce_job_description_in_runtime_scope(normalized_job_description_id, runtime_constraints)
+    elif _runtime_selected_job_description_ids(runtime_constraints):
+        raise ValueError("job_description_id is required for candidate writes in a JD-scoped recruiting run")
 
     with session_factory() as session:
         normalized_current_status, normalized_current_stage, source_state_metadata = _normalize_application_state_input(
@@ -546,6 +563,7 @@ def score_candidate(
     rubric_version: str | None = None,
     dimension_scores: Any = _UNSET,
     metadata: Any = _UNSET,
+    _runtime_constraints: Any = _UNSET,
 ) -> dict[str, Any]:
     from recruit_station.api.routers._candidate_application_support import create_application_assessment
 
@@ -555,6 +573,7 @@ def score_candidate(
             application_id=application_id,
             candidate_person_id=candidate_person_id,
             job_description_id=job_description_id,
+            _runtime_constraints=_runtime_constraints,
         )
         assessment_metadata = _normalize_mapping(metadata, field_name="metadata") if metadata is not _UNSET else {}
         if rubric_version is not None:
@@ -608,6 +627,7 @@ def record_outbound_message(
     status: str = "draft",
     message_type: str = "text",
     metadata: Any = _UNSET,
+    _runtime_constraints: Any = _UNSET,
 ) -> dict[str, Any]:
     entry_metadata = _normalize_mapping(metadata, field_name="metadata") if metadata is not _UNSET else {}
     entry_metadata.setdefault(
@@ -630,6 +650,7 @@ def record_outbound_message(
         status=status,
         message_type=message_type,
         metadata=entry_metadata,
+        _runtime_constraints=_runtime_constraints,
     )
 
 
@@ -646,6 +667,7 @@ def record_candidate_message(
     message_type: str = "text",
     observed_at: Any = _UNSET,
     metadata: Any = _UNSET,
+    _runtime_constraints: Any = _UNSET,
 ) -> dict[str, Any]:
     from recruit_station.api.routers._candidate_application_support import create_application_entry
 
@@ -660,6 +682,7 @@ def record_candidate_message(
             application_id=application_id,
             candidate_person_id=candidate_person_id,
             job_description_id=job_description_id,
+            _runtime_constraints=_runtime_constraints,
         )
         entry_metadata = _normalize_mapping(metadata, field_name="metadata") if metadata is not _UNSET else {}
         if channel_hint is not None:
@@ -716,9 +739,11 @@ def list_pending_candidate_message_syncs(
     application_id: str | None = None,
     destination: str | None = None,
     limit: int = 100,
+    _runtime_constraints: Any = _UNSET,
 ) -> list[dict[str, Any]]:
     normalized_destination = _normalize_optional_text(destination)
     normalized_limit = max(1, min(int(limit or 100), 500))
+    runtime_constraints = _normalize_runtime_constraints(_runtime_constraints)
     with session_factory() as session:
         stmt = (
             select(ApplicationCommunicationLog)
@@ -727,10 +752,14 @@ def list_pending_candidate_message_syncs(
             .limit(normalized_limit)
         )
         if application_id:
-            application = _resolve_application(session, application_id=application_id)
+            application = _resolve_application(session, application_id=application_id, _runtime_constraints=runtime_constraints)
             stmt = stmt.where(ApplicationCommunicationLog.application_id == application.id)
         pending: list[dict[str, Any]] = []
         for message in session.scalars(stmt).all():
+            if _runtime_selected_job_description_ids(runtime_constraints):
+                application = CandidateApplicationRepository(session).get_by_storage_id(message.application_id)
+                if application is None or not _application_in_runtime_scope(session, application, runtime_constraints):
+                    continue
             metadata = dict(message.message_metadata or {})
             sync_state = _message_outbound_sync_state(metadata)
             if not sync_state:
@@ -751,12 +780,18 @@ def record_candidate_message_sync_ack(
     external_event_id: str | None = None,
     observed_at: Any = _UNSET,
     metadata: Any = _UNSET,
+    _runtime_constraints: Any = _UNSET,
 ) -> dict[str, Any]:
     normalized_message_id = _normalize_required_text(message_id, field_name="message_id")
     normalized_destination = _normalize_required_text(destination, field_name="destination")
     normalized_status = _normalize_optional_text(status) or "synced"
+    runtime_constraints = _normalize_runtime_constraints(_runtime_constraints)
     with session_factory() as session:
         message = _resolve_application_message(session, normalized_message_id)
+        application = CandidateApplicationRepository(session).get_by_storage_id(message.application_id)
+        if application is None:
+            raise KeyError(f"application for candidate application message {normalized_message_id} not found")
+        _enforce_application_in_runtime_scope(session, application, runtime_constraints)
         message_metadata = dict(message.message_metadata or {})
         sync_state = _message_outbound_sync_state(message_metadata)
         if not sync_state:
@@ -804,6 +839,7 @@ def attach_resume_artifact(
     extracted_text: str | None = None,
     contact_snapshot: Any = _UNSET,
     metadata: Any = _UNSET,
+    _runtime_constraints: Any = _UNSET,
 ) -> dict[str, Any]:
     from recruit_station.api.routers._candidate_application_support import build_application_thread, create_application_resume_artifact
 
@@ -813,6 +849,7 @@ def attach_resume_artifact(
             application_id=application_id,
             candidate_person_id=candidate_person_id,
             job_description_id=job_description_id,
+            _runtime_constraints=_runtime_constraints,
         )
         artifact = create_application_resume_artifact(
             application.candidate_application_id,
@@ -845,6 +882,7 @@ def extract_resume_artifact_text(
     application_id: str | None = None,
     candidate_person_id: str | None = None,
     job_description_id: str | None = None,
+    _runtime_constraints: Any = _UNSET,
 ) -> dict[str, Any]:
     from recruit_station.api.routers._candidate_application_support import build_application_thread
 
@@ -859,12 +897,14 @@ def extract_resume_artifact_text(
         artifact_application = application_repo.get_by_storage_id(artifact.application_id)
         if artifact_application is None:
             raise KeyError(f"application for resume artifact {normalized_artifact_id} not found")
+        _enforce_application_in_runtime_scope(session, artifact_application, _normalize_runtime_constraints(_runtime_constraints))
         if application_id or candidate_person_id or job_description_id:
             scoped_application = _resolve_application(
                 session,
                 application_id=application_id,
                 candidate_person_id=candidate_person_id,
                 job_description_id=job_description_id,
+                _runtime_constraints=_runtime_constraints,
             )
             if scoped_application.id != artifact_application.id:
                 raise ValueError("resume artifact does not belong to the requested application scope")
@@ -918,13 +958,19 @@ def delete_resume_artifact(
     session_factory: sessionmaker[Session],
     *,
     artifact_id: str,
+    _runtime_constraints: Any = _UNSET,
 ) -> dict[str, Any]:
     normalized_artifact_id = _normalize_required_text(artifact_id, field_name="artifact_id")
+    runtime_constraints = _normalize_runtime_constraints(_runtime_constraints)
     with session_factory() as session:
         repo = ResumeArtifactRepository(session)
         item = repo.get(normalized_artifact_id)
         if item is None:
             raise KeyError(f"resume artifact {normalized_artifact_id} not found")
+        application = CandidateApplicationRepository(session).get_by_storage_id(item.application_id)
+        if application is None:
+            raise KeyError(f"application for resume artifact {normalized_artifact_id} not found")
+        _enforce_application_in_runtime_scope(session, application, runtime_constraints)
         repo.delete(item)
         return {"deleted": True, "artifact_id": normalized_artifact_id}
 
@@ -948,6 +994,7 @@ def transition_application(
     metadata: Any = _UNSET,
     interview_round: int | None = None,
     contact_channels: list[str] | None = None,
+    _runtime_constraints: Any = _UNSET,
 ) -> dict[str, Any]:
     from recruit_station.api.routers._candidate_application_support import create_application_status_transition
 
@@ -957,6 +1004,7 @@ def transition_application(
             application_id=application_id,
             candidate_person_id=candidate_person_id,
             job_description_id=job_description_id,
+            _runtime_constraints=_runtime_constraints,
         )
         normalized_to_status = _normalize_required_text(to_status, field_name="to_status")
         normalized_metadata = _normalize_mapping(metadata, field_name="metadata") if metadata is not _UNSET else {}
@@ -994,6 +1042,7 @@ def archive_candidate(
     candidate_person_id: str | None = None,
     job_description_id: str | None = None,
     note: str | None = None,
+    _runtime_constraints: Any = _UNSET,
 ) -> dict[str, Any]:
     return transition_application(
         session_factory,
@@ -1007,6 +1056,7 @@ def archive_candidate(
         actor="agent",
         actor_id="autonomous",
         trigger="archive_candidate",
+        _runtime_constraints=_runtime_constraints,
     )
 
 
@@ -1014,13 +1064,22 @@ def delete_candidate(
     session_factory: sessionmaker[Session],
     *,
     candidate_person_id: str,
+    _runtime_constraints: Any = _UNSET,
 ) -> dict[str, Any]:
     normalized_candidate_person_id = _normalize_required_text(candidate_person_id, field_name="candidate_person_id")
+    runtime_constraints = _normalize_runtime_constraints(_runtime_constraints)
     with session_factory() as session:
         repo = CandidateRepository(session)
         item = repo.get(normalized_candidate_person_id)
         if item is None:
             raise KeyError(f"candidate {normalized_candidate_person_id} not found")
+        scoped_job_description_ids = _runtime_selected_job_description_ids(runtime_constraints)
+        if scoped_job_description_ids:
+            applications = CandidateApplicationRepository(session).by_person(item.id, limit=1000, offset=0)
+            if not applications:
+                raise ValueError("candidate delete is outside current run JD scope")
+            for application in applications:
+                _enforce_application_in_runtime_scope(session, application, runtime_constraints)
         repo.delete(item)
         return {"deleted": True, "candidate_person_id": normalized_candidate_person_id}
 
@@ -1033,21 +1092,33 @@ def list_candidate_threads(
     application_id: str | None = None,
     candidate_person_id: str | None = None,
     job_description_id: str | None = None,
+    _runtime_constraints: Any = _UNSET,
 ) -> list[dict[str, Any]]:
     from recruit_station.api.routers._candidate_application_support import build_application_thread, list_application_threads
 
     with session_factory() as session:
         normalized_application_id = _normalize_optional_text(application_id)
         if normalized_application_id:
-            return [build_application_thread(session, normalized_application_id).model_dump(by_alias=True)]
+            application = _resolve_application(
+                session,
+                application_id=normalized_application_id,
+                _runtime_constraints=_runtime_constraints,
+            )
+            return [build_application_thread(session, application.candidate_application_id).model_dump(by_alias=True)]
         threads = [thread.model_dump(by_alias=True) for thread in list_application_threads(limit=max(1, min(int(limit or 50), 200)), offset=max(0, int(offset or 0)), session=session)]
         normalized_candidate_person_id = _normalize_optional_text(candidate_person_id)
         normalized_job_description_id = _normalize_optional_text(job_description_id)
+        runtime_constraints = _normalize_runtime_constraints(_runtime_constraints)
+        if normalized_job_description_id is not None:
+            _enforce_job_description_in_runtime_scope(normalized_job_description_id, runtime_constraints)
+        scoped_job_description_ids = _runtime_selected_job_description_ids(runtime_constraints)
         filtered: list[dict[str, Any]] = []
         for thread in threads:
             if normalized_candidate_person_id and str(thread.get("personId") or thread.get("person_id") or "") != normalized_candidate_person_id:
                 continue
             if normalized_job_description_id and str(thread.get("jobDescriptionId") or thread.get("job_description_id") or "") != normalized_job_description_id:
+                continue
+            if scoped_job_description_ids and str(thread.get("jobDescriptionId") or thread.get("job_description_id") or "") not in scoped_job_description_ids:
                 continue
             filtered.append(thread)
         return filtered
@@ -1059,6 +1130,7 @@ def get_candidate_thread(
     application_id: str | None = None,
     candidate_person_id: str | None = None,
     job_description_id: str | None = None,
+    _runtime_constraints: Any = _UNSET,
 ) -> dict[str, Any]:
     from recruit_station.api.routers._candidate_application_support import build_application_thread
 
@@ -1068,6 +1140,7 @@ def get_candidate_thread(
             application_id=application_id,
             candidate_person_id=candidate_person_id,
             job_description_id=job_description_id,
+            _runtime_constraints=_runtime_constraints,
         )
         return build_application_thread(session, application.candidate_application_id).model_dump(by_alias=True)
 
@@ -1087,6 +1160,7 @@ def create_candidate_scorecard(
     dimension_scores: Any = _UNSET,
     evidence_refs: list[Any] | None = None,
     metadata: Any = _UNSET,
+    _runtime_constraints: Any = _UNSET,
 ) -> dict[str, Any]:
     from recruit_station.api.routers._candidate_application_support import create_application_scorecard
 
@@ -1096,6 +1170,7 @@ def create_candidate_scorecard(
             application_id=application_id,
             candidate_person_id=candidate_person_id,
             job_description_id=job_description_id,
+            _runtime_constraints=_runtime_constraints,
         )
         scorecard = create_application_scorecard(
             application.candidate_application_id,
@@ -1128,6 +1203,7 @@ def create_candidate_review_decision(
     decided_by: str | None = "autonomous",
     scorecard_id: str | None = None,
     metadata: Any = _UNSET,
+    _runtime_constraints: Any = _UNSET,
 ) -> dict[str, Any]:
     from recruit_station.api.routers._candidate_application_support import create_application_review_decision
 
@@ -1137,6 +1213,7 @@ def create_candidate_review_decision(
             application_id=application_id,
             candidate_person_id=candidate_person_id,
             job_description_id=job_description_id,
+            _runtime_constraints=_runtime_constraints,
         )
         review = create_application_review_decision(
             application.candidate_application_id,
@@ -1166,6 +1243,7 @@ def create_candidate_sync_record(
     payload_snapshot: Any = _UNSET,
     error_message: str | None = None,
     metadata: Any = _UNSET,
+    _runtime_constraints: Any = _UNSET,
 ) -> dict[str, Any]:
     from recruit_station.api.routers._candidate_application_support import create_application_sync_record
 
@@ -1175,6 +1253,7 @@ def create_candidate_sync_record(
             application_id=application_id,
             candidate_person_id=candidate_person_id,
             job_description_id=job_description_id,
+            _runtime_constraints=_runtime_constraints,
         )
         sync_record = create_application_sync_record(
             application.candidate_application_id,
@@ -1195,8 +1274,13 @@ def get_jd_progress(
     session_factory: sessionmaker[Session],
     *,
     job_description_id: str,
+    _runtime_constraints: Any = _UNSET,
 ) -> dict[str, Any]:
     normalized_job_description_id = _normalize_required_text(job_description_id, field_name="job_description_id")
+    _enforce_job_description_in_runtime_scope(
+        normalized_job_description_id,
+        _normalize_runtime_constraints(_runtime_constraints),
+    )
     with session_factory() as session:
         stats = build_job_description_funnel_stats(session, normalized_job_description_id)
         if stats is None:
@@ -1229,8 +1313,18 @@ def request_human_approval(
     application_id: str | None = None,
     job_description_id: str | None = None,
     payload: Any = _UNSET,
+    _runtime_constraints: Any = _UNSET,
 ) -> dict[str, Any]:
-    _ = session_factory
+    runtime_constraints = _normalize_runtime_constraints(_runtime_constraints)
+    if job_description_id is not None:
+        _enforce_job_description_in_runtime_scope(job_description_id, runtime_constraints)
+    if application_id is not None:
+        with session_factory() as session:
+            _resolve_application(
+                session,
+                application_id=application_id,
+                _runtime_constraints=runtime_constraints,
+            )
     return {
         "status": "approved",
         "title": _normalize_required_text(title, field_name="title"),
@@ -1651,26 +1745,78 @@ def _application_job_description_id(session: Session, application) -> str | None
     return job.job_description_id if job is not None else None
 
 
+def _runtime_selected_job_description_ids(constraints: dict[str, Any]) -> frozenset[str]:
+    for key in ("selected_job_description_ids", "selectedJobDescriptionIds"):
+        values = _normalize_text_set(constraints.get(key))
+        if values:
+            return values
+    for key in ("enabled_job_description_ids", "enabledJobDescriptionIds"):
+        values = _normalize_text_set(constraints.get(key))
+        if values:
+            return values
+    return frozenset()
+
+
+def _normalize_text_set(value: Any) -> frozenset[str]:
+    if value in (None, _UNSET):
+        return frozenset()
+    values = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+    return frozenset(text for item in values if (text := _normalize_optional_text(item)) is not None)
+
+
+def _enforce_job_description_in_runtime_scope(job_description_id: str, constraints: dict[str, Any]) -> None:
+    scoped_job_description_ids = _runtime_selected_job_description_ids(constraints)
+    if not scoped_job_description_ids:
+        return
+    normalized_job_description_id = _normalize_required_text(job_description_id, field_name="job_description_id")
+    if normalized_job_description_id not in scoped_job_description_ids:
+        raise ValueError(f"job_description_id {normalized_job_description_id} is outside current run JD scope")
+
+
+def _application_in_runtime_scope(session: Session, application, constraints: dict[str, Any]) -> bool:
+    scoped_job_description_ids = _runtime_selected_job_description_ids(constraints)
+    if not scoped_job_description_ids:
+        return True
+    job_description_id = _application_job_description_id(session, application)
+    return job_description_id in scoped_job_description_ids
+
+
+def _enforce_application_in_runtime_scope(session: Session, application, constraints: dict[str, Any]) -> None:
+    if _application_in_runtime_scope(session, application, constraints):
+        return
+    job_description_id = _application_job_description_id(session, application)
+    public_application_id = getattr(application, "candidate_application_id", None) or getattr(application, "id", "")
+    raise ValueError(
+        f"candidate application {public_application_id} belongs to job_description_id "
+        f"{job_description_id or '<none>'} outside current run JD scope"
+    )
+
+
 def _resolve_application(
     session: Session,
     *,
     application_id: str | None = None,
     candidate_person_id: str | None = None,
     job_description_id: str | None = None,
+    _runtime_constraints: Any = _UNSET,
 ):
+    runtime_constraints = _normalize_runtime_constraints(_runtime_constraints)
     application_repo = CandidateApplicationRepository(session)
     normalized_application_id = _normalize_optional_text(application_id)
     if normalized_application_id:
         application = application_repo.get(normalized_application_id)
         if application is not None:
+            _enforce_application_in_runtime_scope(session, application, runtime_constraints)
             return application
         raise KeyError(f"candidate application {normalized_application_id} not found")
     normalized_candidate_person_id = _normalize_optional_text(candidate_person_id)
     normalized_job_description_id = _normalize_optional_text(job_description_id)
     if normalized_candidate_person_id and normalized_job_description_id:
+        _enforce_job_description_in_runtime_scope(normalized_job_description_id, runtime_constraints)
         canonical_window = make_application_window(normalized_candidate_person_id, normalized_job_description_id)
         application = application_repo.by_application_window(canonical_window)
         if application is not None:
+            _enforce_application_in_runtime_scope(session, application, runtime_constraints)
             return application
         raise KeyError(f"candidate application window {canonical_window} not found")
     raise ValueError("application_id or candidate_person_id + job_description_id is required")
