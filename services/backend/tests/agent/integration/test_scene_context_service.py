@@ -795,6 +795,9 @@ def test_scene_context_prompt_requires_zhipin_same_site_recovery_before_jd_sync_
     assert "不得新开另一个 zhipin 页签，也不得因为公共求职首页、城市首页或职位搜索首页处于 active 状态就持续观察这些公共页" in rendered_prompt
     assert "browser_list_tabs、browser_snapshot/query" in rendered_prompt
     assert "通过 VirtualHID 执行这些同站点入口、返回、滚动或点击" in rendered_prompt
+    assert "browser_list_tabs 或 browser_get_active_tab 只能证明找到了候选 BOSS 页签" in rendered_prompt
+    assert "即使活动页已经是 /web/chat/job/list 或其他招聘管理 URL，也不得据此最终回答或返回 completed" in rendered_prompt
+    assert "reason=jd_sync_requires_job_list_snapshot_or_detail" in rendered_prompt
     assert "如果只存在公共首页，可使用该页可见的同站点入口在同一页签内恢复到招聘管理工作台，不得打开新标签/新窗口" in rendered_prompt
     assert "公共首页上的求职职位列表、城市职位列表或搜索结果不得作为 employer JD sync 完成证据" in rendered_prompt
     assert "不得硬编码站点选择器" in rendered_prompt
@@ -1590,6 +1593,105 @@ def test_scene_context_blocks_jd_sync_candidate_chat_result_without_job_evidence
     assert result["result_data"]["observed_jobs"] == []
     assert result["result_data"]["jd_sync_boundary_guard"]["reason"] == "jd_sync_wrong_page_candidate_context"
     assert result["blockers"][0]["kind"] == "jd_sync_wrong_page_candidate_context"
+
+
+def test_scene_context_blocks_jd_sync_final_after_only_job_tab_identification(tmp_path: Path) -> None:
+    session_factory = _session_factory(tmp_path)
+    final_payload = {
+        "status": "completed",
+        "summary": "Active tab is already the BOSS job list page.",
+    }
+    provider = ScriptedProvider(
+        provider_name="scene-scripted",
+        responses=[
+            LLMResponse(
+                tool_calls=[
+                    ToolCall(id="tabs", name="browser_list_tabs", arguments={}),
+                    ToolCall(id="active", name="browser_get_active_tab", arguments={}),
+                ],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(content=json.dumps(final_payload, ensure_ascii=False), finish_reason="stop"),
+        ],
+    )
+    tools = ToolRegistry()
+    tools.register(
+        ToolDefinition(
+            name="browser_list_tabs",
+            description="List browser tabs.",
+            parameters={"type": "object", "properties": {}, "additionalProperties": True},
+            handler=lambda arguments: {
+                "success": True,
+                "tabs": [
+                    {
+                        "tabId": 9,
+                        "url": "https://www.zhipin.com/web/chat/job/list",
+                        "title": "职位管理",
+                        "active": True,
+                    }
+                ],
+            },
+            metadata={"capabilities": ["browser", "document"], "external_tool": True, "real_environment": True},
+        )
+    )
+    tools.register(
+        ToolDefinition(
+            name="browser_get_active_tab",
+            description="Get active browser tab.",
+            parameters={"type": "object", "properties": {}, "additionalProperties": True},
+            handler=lambda arguments: {
+                "success": True,
+                "tab": {
+                    "tabId": 9,
+                    "url": "https://www.zhipin.com/web/chat/job/list",
+                    "title": "职位管理",
+                },
+            },
+            metadata={"capabilities": ["browser", "document"], "external_tool": True, "real_environment": True},
+        )
+    )
+    service = SceneContextService(
+        session_factory=session_factory,
+        provider=provider,
+        tool_registry=tools,
+        plugin_host=PluginHost(),
+    )
+
+    result = service.delegate(
+        {
+            "instruction": "Return JD sync scene result JSON.",
+            "context": {"plan_kind": "jd_sync"},
+            "preferred_capabilities": ["browser"],
+            "browser_target": {"url": "https://www.zhipin.com/", "tabId": 9},
+            "output_contract": {
+                "contract_kind": "jd_sync",
+                "result_data_required": True,
+                "required_fields": [
+                    "status",
+                    "observed_jobs",
+                    "completed_job_details",
+                    "inactive_or_closed_jobs",
+                    "activation_entry_observed",
+                    "blockers",
+                    "limitations",
+                    "evidence",
+                ],
+            },
+        }
+    )
+
+    assert result["status"] == "blocked"
+    assert result["result_data"]["status"] == "blocked"
+    assert result["result_data"]["reported_status"] == "completed"
+    assert result["result_data"]["observed_jobs"] == []
+    assert result["result_data"]["completed_job_details"] == []
+    assert result["result_data"]["inactive_or_closed_jobs"] == []
+    assert result["result_data"]["activation_entry_observed"] is False
+    assert result["result_data"]["limitations"] == []
+    assert result["result_data"]["evidence"] == []
+    assert result["result_data"]["jd_sync_observation_guard"]["reason"] == "jd_sync_requires_job_list_snapshot_or_detail"
+    assert [blocker["kind"] for blocker in result["blockers"]] == ["jd_sync_requires_job_list_snapshot_or_detail"]
+    assert "output_contract_incomplete" not in json.dumps(result["blockers"], ensure_ascii=False)
 
 
 def test_scene_context_allows_jd_sync_completed_job_detail_result(tmp_path: Path) -> None:

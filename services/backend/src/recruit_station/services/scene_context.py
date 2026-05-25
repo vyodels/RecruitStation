@@ -391,6 +391,14 @@ class SceneContextService:
             blockers.append(evidence_blocker)
         result_data = _scene_result_data(outcome, output_contract=output_contract)
         result_data = _normalize_scene_result_contract_data(result_data, output_contract)
+        jd_sync_snapshot_blocker = _jd_sync_requires_job_list_snapshot_blocker(episode, output_contract)
+        if jd_sync_snapshot_blocker is not None:
+            blockers.append(jd_sync_snapshot_blocker)
+            result_data = _apply_jd_sync_requires_job_list_snapshot_guard(
+                result_data,
+                output_contract,
+                jd_sync_snapshot_blocker,
+            )
         contract_blockers = _scene_result_contract_blockers(result_data, output_contract)
         if contract_blockers:
             blockers.extend(contract_blockers)
@@ -684,6 +692,11 @@ def _build_scene_instruction(request: dict[str, Any]) -> str:
             "只有目标站点内没有可见同站点导航/链接、HID 连续恢复失败，或需要人工登录/授权时，JD sync 才能返回结构化 blocker。"
             "如果只存在公共首页，可使用该页可见的同站点入口在同一页签内恢复到招聘管理工作台，不得打开新标签/新窗口；"
             "但公共首页上的求职职位列表、城市职位列表或搜索结果不得作为 employer JD sync 完成证据。"
+            "JD sync 中 browser_list_tabs 或 browser_get_active_tab 只能证明找到了候选 BOSS 页签；"
+            "即使活动页已经是 /web/chat/job/list 或其他招聘管理 URL，也不得据此最终回答或返回 completed。"
+            "必须先调用 browser_snapshot 或同等页面观察工具读取岗位列表、岗位详情或明确不可观察原因；"
+            "没有岗位列表/详情页面观察证据时，最终结果只能是结构化 not_completed/blocked，reason=jd_sync_requires_job_list_snapshot_or_detail，"
+            "observed_jobs/completed_job_details 必须为空且不得写入 JD。"
             "招聘站点页面恢复/导航点击必须使用 browser 观察到的 BOSS 主导航可见入口：职位管理、推荐牛人、搜索、沟通；"
             "JD sync 从非 JD 页面恢复时只能点击职位管理，不得点击推荐牛人、搜索或沟通作为恢复入口。"
             "招聘规范、我的客服、招聘数据、新建分组、+ 分组控件、候选人/聊天控件等不得作为页面恢复/导航入口。"
@@ -3520,6 +3533,154 @@ def _scene_result_contract_blockers(result_data: dict[str, Any], output_contract
                 }
             )
     return blockers
+
+
+def _apply_jd_sync_requires_job_list_snapshot_guard(
+    result_data: dict[str, Any],
+    contract: dict[str, Any],
+    blocker: dict[str, Any],
+) -> dict[str, Any]:
+    guarded = dict(result_data or {})
+    required_fields = {
+        str(item).strip()
+        for item in _as_dict(contract).get("required_fields") or []
+        if str(item or "").strip()
+    }
+    reported_status = str(guarded.get("status") or "").strip().lower()
+    if reported_status in {"completed", "complete", "success", "succeeded"}:
+        guarded["reported_status"] = guarded.get("status")
+    guarded["status"] = "blocked"
+    if "observed_jobs" in required_fields or "observed_jobs" not in guarded:
+        guarded["observed_jobs"] = []
+    if "completed_job_details" in required_fields or "completed_job_details" not in guarded:
+        guarded["completed_job_details"] = []
+    if "inactive_or_closed_jobs" in required_fields and "inactive_or_closed_jobs" not in guarded:
+        guarded["inactive_or_closed_jobs"] = []
+    if "activation_entry_observed" in required_fields and "activation_entry_observed" not in guarded:
+        guarded["activation_entry_observed"] = False
+    blockers = list(guarded.get("blockers") or []) if isinstance(guarded.get("blockers"), list) else []
+    if not any(isinstance(item, dict) and item.get("kind") == blocker["kind"] for item in blockers):
+        blockers.append(blocker)
+    guarded["blockers"] = blockers
+    if "limitations" in required_fields and "limitations" not in guarded:
+        guarded["limitations"] = []
+    if "evidence" in required_fields and "evidence" not in guarded:
+        guarded["evidence"] = []
+    guarded["jd_sync_observation_guard"] = {
+        "status": "blocked",
+        "reason": blocker["kind"],
+    }
+    return guarded
+
+
+def _jd_sync_requires_job_list_snapshot_blocker(episode: Any, contract: dict[str, Any]) -> dict[str, Any] | None:
+    if not _is_jd_sync_result_contract(_as_dict(contract)):
+        return None
+    if _episode_has_successful_jd_sync_page_observation(episode):
+        return None
+    if not _episode_identified_boss_job_management_tab(episode):
+        return None
+    return {
+        "kind": "jd_sync_requires_job_list_snapshot_or_detail",
+        "message": (
+            "JD sync identified a BOSS job-management tab but did not observe the job list or job detail page. "
+            "Call browser_snapshot or an equivalent page observation tool before returning a final JD sync result."
+        ),
+    }
+
+
+def _episode_has_successful_jd_sync_page_observation(episode: Any) -> bool:
+    for payload in _episode_successful_tool_result_payloads(episode):
+        tool_name = str(payload.get("tool_name") or "").strip()
+        if tool_name not in _SCENE_BROWSER_PAGE_OBSERVATION_TOOL_NAMES:
+            continue
+        content = payload.get("content")
+        if _jd_sync_observation_content_has_job_list_or_detail(content):
+            return True
+    return False
+
+
+def _episode_identified_boss_job_management_tab(episode: Any) -> bool:
+    for payload in _episode_successful_tool_result_payloads(episode):
+        tool_name = str(payload.get("tool_name") or "").strip()
+        if tool_name not in _SCENE_BROWSER_TARGET_IDENTIFICATION_TOOL_NAMES:
+            continue
+        for url in _browser_result_urls(payload.get("content")):
+            if _is_boss_job_management_url(url):
+                return True
+    return False
+
+
+def _episode_successful_tool_result_payloads(episode: Any) -> list[dict[str, Any]]:
+    payloads: list[dict[str, Any]] = []
+    for entry in list(getattr(episode, "actions", None) or []) + list(getattr(episode, "observations", None) or []):
+        if not isinstance(entry, dict) or str(entry.get("type") or "") != "tool_event":
+            continue
+        payload = _as_dict(entry.get("payload"))
+        if payload.get("kind") != "tool_result_ready":
+            continue
+        if _tool_event_result_succeeded(entry):
+            payloads.append(payload)
+    return payloads
+
+
+def _jd_sync_observation_content_has_job_list_or_detail(content: Any) -> bool:
+    for url in _browser_result_urls(content):
+        if _is_boss_job_management_url(url) or _is_boss_job_detail_url(url):
+            return True
+    text = _contract_guard_text(content)
+    return any(
+        marker in text
+        for marker in (
+            "职位管理",
+            "全部职位",
+            "开放中",
+            "待开放",
+            "审核不通过",
+            "已关闭",
+            "岗位职责",
+            "职位描述",
+            "任职要求",
+            "job_description",
+            "job detail",
+        )
+    )
+
+
+def _browser_result_urls(value: Any) -> list[str]:
+    urls: list[str] = []
+
+    def collect(candidate: Any) -> None:
+        if isinstance(candidate, dict):
+            for key in ("url", "href", "external_url", "detail_url"):
+                url = _optional_string(candidate.get(key))
+                if url:
+                    urls.append(url)
+            for key in ("snapshot", "tab", "target", "tabs", "items", "results", "observed_entities"):
+                nested = candidate.get(key)
+                if isinstance(nested, (dict, list)):
+                    collect(nested)
+            return
+        if isinstance(candidate, list):
+            for item in candidate:
+                collect(item)
+
+    collect(value)
+    return _dedupe_strings(urls)
+
+
+def _is_boss_job_management_url(url: str) -> bool:
+    parsed = urlparse(str(url or ""))
+    host = (parsed.hostname or "").lower()
+    path = parsed.path.rstrip("/")
+    return host == "www.zhipin.com" and (path == "/web/chat/job/list" or path.startswith("/web/chat/job/"))
+
+
+def _is_boss_job_detail_url(url: str) -> bool:
+    parsed = urlparse(str(url or ""))
+    host = (parsed.hostname or "").lower()
+    path = parsed.path.lower()
+    return host == "www.zhipin.com" and ("/job_detail/" in path or path.startswith("/web/chat/job/detail"))
 
 
 def _apply_jd_sync_candidate_context_guard(result_data: dict[str, Any], contract: dict[str, Any]) -> dict[str, Any]:
