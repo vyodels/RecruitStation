@@ -788,8 +788,15 @@ def test_scene_context_prompt_requires_zhipin_same_site_recovery_before_jd_sync_
     assert "拼接伪装域名不匹配" in rendered_prompt
     assert "需要 origin 级比较时仍要求 scheme 和显式端口匹配" in rendered_prompt
     assert "当前可见页已经在目标站点内但不是招聘管理、岗位列表或岗位详情页，这不是 JD sync 的终局 blocker" in rendered_prompt
+    assert "BOSS/zhipin 恢复不得打开新标签/新窗口，不得使用地址栏输入 URL" in rendered_prompt
+    assert "如果 browser-mcp/native host 不可用导致无法观察已有页签，不得新开 BOSS/zhipin 页签" in rendered_prompt
+    assert "当 browser_list_tabs 同时返回多个 zhipin.com 页签时，必须优先选择已经打开的 BOSS 招聘管理工作台页签" in rendered_prompt
+    assert "/web/chat/index、/web/chat/job/、/web/geek/recommend、/web/geek/search" in rendered_prompt
+    assert "不得新开另一个 zhipin 页签，也不得因为公共求职首页、城市首页或职位搜索首页处于 active 状态就持续观察这些公共页" in rendered_prompt
     assert "browser_list_tabs、browser_snapshot/query" in rendered_prompt
     assert "通过 VirtualHID 执行这些同站点入口、返回、滚动或点击" in rendered_prompt
+    assert "如果只存在公共首页，可使用该页可见的同站点入口在同一页签内恢复到招聘管理工作台，不得打开新标签/新窗口" in rendered_prompt
+    assert "公共首页上的求职职位列表、城市职位列表或搜索结果不得作为 employer JD sync 完成证据" in rendered_prompt
     assert "不得硬编码站点选择器" in rendered_prompt
     assert "不得通过浏览器地址栏、直接输入 URL 或 browser 导航工具跳转" in rendered_prompt
     assert "招聘站点页面恢复/导航点击必须使用 browser 观察到的 BOSS 主导航可见入口：职位管理、推荐牛人、搜索、沟通" in rendered_prompt

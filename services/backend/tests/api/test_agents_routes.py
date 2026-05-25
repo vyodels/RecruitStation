@@ -237,9 +237,16 @@ def test_jd_sync_run_requires_only_saved_entry_url(tmp_path, monkeypatch) -> Non
     assert "- 如果页面动作失败但仍处于同源站点，应先恢复后继续：" in runtime_metadata["instruction"]
     assert "单次点击、返回、滚动或注入超时不是任务终局" in runtime_metadata["instruction"]
     assert "不得主动聚焦浏览器地址栏、输入 URL 或粘贴 URL" in runtime_metadata["instruction"]
+    assert "BOSS/zhipin 恢复不得打开新标签/新窗口" in runtime_metadata["instruction"]
+    assert "如果 browser-mcp/native host 无法观察已有 BOSS 页签或招聘管理页签，不得新建 BOSS/zhipin 页签" in runtime_metadata["instruction"]
     assert "Cmd+L 聚焦地址栏" not in runtime_metadata["instruction"]
     assert "BOSS/zhipin 主导航锚点与禁区：" in runtime_metadata["instruction"]
     assert "顶层页面入口只允许使用 BOSS 主导航可见入口：职位管理、推荐牛人、搜索、沟通" in runtime_metadata["instruction"]
+    assert "BOSS/zhipin 恢复不得打开新标签/新窗口，不得使用地址栏输入 URL" in runtime_metadata["instruction"]
+    assert "多个 zhipin.com 页签同时存在时，优先恢复到已打开的 BOSS 招聘管理工作台页签" in runtime_metadata["instruction"]
+    assert "不要新开另一个 zhipin 页签" in runtime_metadata["instruction"]
+    assert "如果只有公共首页存在，可以通过该页可见的同站点入口在同一页签内恢复到招聘管理工作台；不得打开新标签/新窗口" in runtime_metadata["instruction"]
+    assert "公共首页上的求职职位列表、城市职位列表或搜索结果不得作为 employer JD sync 完成证据" in runtime_metadata["instruction"]
     assert "JD sync 只读取职位信息，不点击 发布职位、关闭、升级、曝光刷新" in runtime_metadata["instruction"]
     assert "打招呼 是外联动作，read-only 流程不得点击" in runtime_metadata["instruction"]
     assert "页签附近 + 和 新建分组 永远不要点击" in runtime_metadata["instruction"]
@@ -960,6 +967,12 @@ def test_workspace_start_creates_run_from_saved_automation_config(tmp_path, monk
     assert "招聘网站目标网页 URL：https://www.zhipin.com/web/geek/job" in compiled_sop
     assert "## BOSS/zhipin 主导航锚点与禁区" in compiled_sop
     assert "顶层页面入口只允许使用 BOSS 主导航可见入口：职位管理、推荐牛人、搜索、沟通" in compiled_sop
+    assert "BOSS/zhipin 恢复不得打开新标签/新窗口，不得使用地址栏输入 URL" in compiled_sop
+    assert "多个 zhipin.com 页签同时存在时，优先恢复到已打开的 BOSS 招聘管理工作台页签" in compiled_sop
+    assert "不要新开另一个 zhipin 页签" in compiled_sop
+    assert "如果只有公共首页存在，可以通过该页可见的同站点入口在同一页签内恢复到招聘管理工作台；不得打开新标签/新窗口" in compiled_sop
+    assert "如果 browser-mcp/native host 不可用导致无法观察已有 BOSS 页签或招聘管理页签，不得新建 BOSS/zhipin 页签" in compiled_sop
+    assert "公共首页上的求职职位列表、城市职位列表或搜索结果不得作为 employer JD sync 完成证据" in compiled_sop
     assert "招聘规范、我的客服、面试、招聘数据、账号权益、升级VIP" in compiled_sop
     assert "右上 JD 选择器示例如 产品实习生_北京 2-4K" in compiled_sop
     assert "实际职位标题、城市、薪资和关键词以本次启用/选中 JD 为准" in compiled_sop
