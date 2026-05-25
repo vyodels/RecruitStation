@@ -305,6 +305,36 @@ def test_jd_sync_upsert_rejects_placeholder_detail_assertions_without_candidate_
         assert session.scalar(select(func.count()).select_from(CandidateApplication)) == 0
 
 
+def test_jd_sync_upsert_rejects_list_only_placeholder_before_db_write(tmp_path) -> None:
+    container = _build_container(tmp_path)
+
+    with pytest.raises(ValueError, match="list-only placeholder"):
+        upsert_job_description(
+            container.session_factory,
+            title="BOSS直聘开放中职位",
+            company_name="未知",
+            location="未知",
+            summary="来自 zhipin.com 职位管理 / 开放中 列表，详情待继续读取。",
+            status="active",
+            source="jd_sync",
+            platform="boss_zhipin",
+            external_id="https://www.zhipin.com/web/chat/job/list?ka=menu-manager-job",
+            external_url="https://www.zhipin.com/web/chat/job/list?ka=menu-manager-job",
+            sync_status="partial",
+            description="负责从职位管理开放中列表继续识别职位详情并补充职责信息。",
+            requirements="要求继续进入详情页读取岗位要求后再完成同步。",
+            sync_metadata={
+                "detail_complete": False,
+                "observed_detail_url": "https://www.zhipin.com/web/chat/job/list?ka=menu-manager-job",
+                "blockers": [],
+                "missing_fields": ["job_detail_text"],
+            },
+            _runtime_constraints={"plan_kind": "jd_sync"},
+        )
+
+    assert list_job_descriptions(container.session_factory) == []
+
+
 def test_jd_sync_upsert_accepts_concrete_page_detail_text(tmp_path) -> None:
     container = _build_container(tmp_path)
 

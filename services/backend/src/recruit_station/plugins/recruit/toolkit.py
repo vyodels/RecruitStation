@@ -180,6 +180,11 @@ def upsert_job_description(
     if enforce_current_run_jd_evidence:
         _validate_jd_sync_current_run_evidence(
             job_description_id=job_description_id,
+            title=normalized_title,
+            company_name=None if company_name is _UNSET else _normalize_optional_text(company_name),
+            location=normalized_location,
+            summary=None if summary is _UNSET else _normalize_optional_text(summary),
+            sync_status=normalized_sync_status,
             external_url=normalized_external_url,
             description=None if description is _UNSET else _normalize_optional_text(description),
             requirements=None if requirements is _UNSET else _normalize_optional_text(requirements),
@@ -1409,6 +1414,11 @@ def _validate_mock_recruiting_site_exact_jd_fields(
 def _validate_jd_sync_current_run_evidence(
     *,
     job_description_id: str | None,
+    title: str,
+    company_name: str | None,
+    location: str | None,
+    summary: str | None,
+    sync_status: str | None,
     external_url: str | None,
     description: str | None,
     requirements: str | None,
@@ -1416,6 +1426,15 @@ def _validate_jd_sync_current_run_evidence(
     sync_metadata: dict[str, Any] | None,
 ) -> None:
     metadata = {**dict(detail_metadata or {}), **dict(sync_metadata or {})}
+    _validate_jd_sync_not_list_placeholder(
+        title=title,
+        company_name=company_name,
+        location=location,
+        summary=summary,
+        sync_status=sync_status,
+        external_url=external_url,
+        observed_detail_url=_normalize_optional_text(metadata.get("observed_detail_url")),
+    )
     if not _metadata_truthy(metadata.get("detail_complete")):
         raise ValueError("jd_sync upsert requires detail_complete=true after reading concrete current-page JD details.")
     if _metadata_has_items(metadata.get("blockers")):
@@ -1465,6 +1484,43 @@ def _validate_jd_sync_current_run_evidence(
         raise ValueError("jd_sync upsert requires concrete page-derived responsibilities in description, not a generic assertion.")
     if not _is_concrete_jd_detail_text(requirements, field_name="requirements"):
         raise ValueError("jd_sync upsert requires concrete page-derived requirements text, not a generic assertion.")
+
+
+def _validate_jd_sync_not_list_placeholder(
+    *,
+    title: str,
+    company_name: str | None,
+    location: str | None,
+    summary: str | None,
+    sync_status: str | None,
+    external_url: str | None,
+    observed_detail_url: str | None,
+) -> None:
+    if str(sync_status or "").strip().lower() in {"partial", "blocked", "incomplete", "in_progress", "pending"}:
+        raise ValueError("jd_sync upsert rejects partial/list-only placeholder writeback attempts before saving.")
+    placeholder_values = {"未知", "unknown", "n/a", "na", "待确认", "详情待继续读取", "待继续读取"}
+    provided_facts = {
+        "title": title,
+        "company_name": company_name,
+        "location": location,
+    }
+    for field_name, value in provided_facts.items():
+        normalized = re.sub(r"\s+", "", str(value or "").strip().lower())
+        if normalized in placeholder_values:
+            raise ValueError(f"jd_sync upsert rejects placeholder {field_name}={value!r} before saving.")
+    combined_text = " ".join(str(item or "") for item in (title, company_name, location, summary)).lower()
+    if any(marker in combined_text for marker in ("列表", "list-only", "list only", "详情待继续读取", "待继续读取", "职位管理 / 开放中")):
+        raise ValueError("jd_sync upsert rejects list-only placeholder writeback attempts before saving.")
+    if any(_is_jd_sync_list_only_url(url) for url in (external_url, observed_detail_url) if url):
+        raise ValueError("jd_sync upsert requires a job detail or safe edit URL, not a job-list/menu URL.")
+
+
+def _is_jd_sync_list_only_url(value: str) -> bool:
+    parsed = urlparse(str(value or ""))
+    host = (parsed.hostname or "").lower()
+    if host and not host.endswith("zhipin.com"):
+        return False
+    return parsed.path.rstrip("/") == "/web/chat/job/list"
 
 
 def _is_new_or_draft_jd_url(value: str) -> bool:

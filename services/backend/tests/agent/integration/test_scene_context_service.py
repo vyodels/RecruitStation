@@ -15,6 +15,7 @@ from recruit_station.capabilities.tools import ToolDefinition, ToolRegistry
 from recruit_station.agents.outcome import AgentTurnOutcome
 from recruit_station.services.scene_context import (
     SceneContextService,
+    _jd_sync_browser_evidence_delta_from_snapshot,
     _scene_tool_registry,
     _should_retry_scene_for_missing_hid,
     _should_retry_scene_for_transient_hid_error,
@@ -2162,6 +2163,88 @@ def test_scene_context_extracts_jd_sync_job_list_evidence_from_forced_snapshot(t
     assert list(state["jobs_by_key"]) == ["https://www.zhipin.com/web/chat/job/edit?encryptid=product-intern"]
     assert state["pending_job_keys"] == ["https://www.zhipin.com/web/chat/job/edit?encryptid=product-intern"]
     assert state["completed_job_keys"] == []
+
+
+def test_jd_sync_snapshot_ignores_boss_main_navigation_job_management_entry() -> None:
+    delta = _jd_sync_browser_evidence_delta_from_snapshot(
+        {
+            "success": True,
+            "tabId": 9,
+            "url": "https://www.zhipin.com/web/chat/job/list?ka=menu-manager-job",
+            "title": "职位管理",
+            "text": "职位管理 推荐牛人 搜索 沟通 招聘规范 我的客服",
+            "elements": [
+                {
+                    "ref": "e14",
+                    "text": "职位管理",
+                    "role": "link",
+                    "href": "https://www.zhipin.com/web/chat/job/list?ka=menu-manager-job",
+                    "clickPoint": {"x": 88, "y": 220},
+                    "region": {"x": 24, "y": 192, "width": 128, "height": 42},
+                },
+                {
+                    "ref": "top-rule",
+                    "text": "招聘规范",
+                    "role": "link",
+                    "clickPoint": {"x": 1040, "y": 38},
+                },
+                {
+                    "ref": "top-service",
+                    "text": "我的客服",
+                    "role": "link",
+                    "clickPoint": {"x": 1130, "y": 38},
+                },
+            ],
+        }
+    )
+
+    assert delta.get("observed_jobs") in (None, [])
+    assert delta.get("pending_jobs") in (None, [])
+    assert delta.get("action_candidates") in (None, [])
+
+
+def test_jd_sync_snapshot_keeps_real_boss_job_card_and_safe_detail_action() -> None:
+    delta = _jd_sync_browser_evidence_delta_from_snapshot(
+        {
+            "success": True,
+            "tabId": 9,
+            "url": "https://www.zhipin.com/web/chat/job/list",
+            "title": "职位管理",
+            "text": "职位管理 全部职位 开放中 产品实习生 北京 经验不限 本科 2-4K 全职 开放中 编辑 查看详情",
+            "elements": [
+                {
+                    "ref": "main-job-management",
+                    "text": "职位管理",
+                    "role": "link",
+                    "href": "https://www.zhipin.com/web/chat/job/list?ka=menu-manager-job",
+                    "clickPoint": {"x": 88, "y": 220},
+                    "region": {"x": 24, "y": 192, "width": 128, "height": 42},
+                },
+                {
+                    "ref": "job-row-product-intern",
+                    "text": "产品实习生 北京 经验不限 本科 2-4K 全职 开放中",
+                    "role": "link",
+                    "kind": "job_row",
+                    "href": "https://www.zhipin.com/web/chat/job/edit?encryptId=product-intern",
+                    "clickPoint": {"x": 360, "y": 300},
+                    "region": {"x": 250, "y": 260, "width": 620, "height": 120},
+                },
+                {
+                    "ref": "job-detail-product-intern",
+                    "text": "查看详情",
+                    "role": "button",
+                    "kind": "job_management_action",
+                    "parentRef": "job-row-product-intern",
+                    "clickPoint": {"x": 820, "y": 306},
+                },
+            ],
+        }
+    )
+
+    assert [item["title"] for item in delta["observed_jobs"]] == ["产品实习生"]
+    assert [item["title"] for item in delta["pending_jobs"]] == ["产品实习生"]
+    assert any(item["label"] == "查看详情" for item in delta["action_candidates"])
+    assert "main-job-management" not in json.dumps(delta["action_candidates"], ensure_ascii=False)
 
 
 def test_scene_context_recovers_jd_sync_snapshot_from_existing_zhipin_tab_when_active_tab_is_local(

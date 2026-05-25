@@ -2593,6 +2593,8 @@ def _is_job_page_click_item(item: dict[str, Any]) -> bool:
 def _job_page_click_binding(item: dict[str, Any], all_items: list[dict[str, Any]]) -> dict[str, Any] | None:
     if _is_blocked_recruiting_site_click_item(item):
         return None
+    if _is_jd_sync_non_job_navigation_item(item):
+        return None
     if _is_job_row_or_title_item(item):
         return item
     if not _is_job_detail_or_edit_entry(item):
@@ -2602,6 +2604,8 @@ def _job_page_click_binding(item: dict[str, Any], all_items: list[dict[str, Any]
 
 def _is_job_row_or_title_item(item: dict[str, Any]) -> bool:
     if _is_blocked_recruiting_site_click_item(item):
+        return False
+    if _is_jd_sync_non_job_navigation_item(item):
         return False
     if _is_job_detail_or_edit_entry(item):
         return False
@@ -2615,6 +2619,19 @@ def _is_job_row_or_title_item(item: dict[str, Any]) -> bool:
     if label and any(marker in kind_role for marker in ("link", "button")) and any(marker in href for marker in ("/job", "job/", "jobs", "position", "jd")):
         return True
     return False
+
+
+def _is_jd_sync_non_job_navigation_item(item: dict[str, Any]) -> bool:
+    if _boss_main_navigation_entry_label(item) is not None:
+        return True
+    label = _normalize_ui_text(_browser_item_label(item))
+    if label in {"职位管理", "推荐牛人", "搜索", "沟通", "招聘规范", "我的客服"}:
+        return True
+    href = _optional_string(item.get("href") or item.get("url")) or ""
+    parsed = urlparse(href)
+    path = parsed.path.rstrip("/")
+    query = parsed.query.lower()
+    return path == "/web/chat/job/list" and any(marker in query for marker in ("ka=menu-manager-job", "menu-manager-job"))
 
 
 def _is_job_detail_or_edit_entry(item: dict[str, Any]) -> bool:

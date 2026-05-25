@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urlparse
 
 
 JD_SYNC_STATE_MACHINE: tuple[str, ...] = (
@@ -170,6 +171,7 @@ def normalize_jd_sync_scene_result(result_data: dict[str, Any], contract: dict[s
     for field in list_fields:
         normalized[field] = _list_value(normalized.get(field))
     normalized["recovery"] = _as_dict(normalized.get("recovery"))
+    _filter_non_jd_sync_items(normalized)
 
     if not normalized["pending_jobs"]:
         normalized["pending_jobs"] = _derive_pending_jobs(normalized)
@@ -229,6 +231,57 @@ def _derive_pending_jobs(result_data: dict[str, Any]) -> list[Any]:
             continue
         pending.append(item)
     return pending
+
+
+def _filter_non_jd_sync_items(result_data: dict[str, Any]) -> None:
+    removed: dict[str, int] = {}
+    for field in ("observed_jobs", "pending_jobs", "action_candidates", "writeback_candidates"):
+        items = _list_value(result_data.get(field))
+        kept = [item for item in items if not _is_non_jd_sync_item(item, field=field)]
+        if len(kept) != len(items):
+            removed[field] = len(items) - len(kept)
+        result_data[field] = kept
+    if removed:
+        result_data["contract_normalization"] = {
+            **_as_dict(result_data.get("contract_normalization")),
+            "filtered_non_jd_items": removed,
+        }
+
+
+def _is_non_jd_sync_item(value: Any, *, field: str) -> bool:
+    item = _as_dict(value)
+    if not item:
+        return False
+    labels = {
+        _normalized_text(item.get(key))
+        for key in ("title", "job_title", "name", "label", "raw_text", "text")
+        if _normalized_text(item.get(key))
+    }
+    nav_labels = {"职位管理", "推荐牛人", "搜索", "沟通", "招聘规范", "我的客服"}
+    if labels and labels <= nav_labels:
+        return True
+    if field == "action_candidates" and labels & nav_labels:
+        return True
+    for key in ("job_key", "key", "external_id", "external_url", "detail_url", "url", "href"):
+        text = str(item.get(key) or "").strip()
+        if _is_boss_job_list_menu_url(text):
+            return True
+    return False
+
+
+def _is_boss_job_list_menu_url(value: str) -> bool:
+    if not value:
+        return False
+    parsed = urlparse(value)
+    path = parsed.path.rstrip("/")
+    if path != "/web/chat/job/list":
+        return False
+    query = parsed.query.lower()
+    return not query or "menu-manager-job" in query
+
+
+def _normalized_text(value: Any) -> str:
+    return " ".join(str(value or "").replace("\u00a0", " ").split())
 
 
 def _job_key(value: Any) -> str:

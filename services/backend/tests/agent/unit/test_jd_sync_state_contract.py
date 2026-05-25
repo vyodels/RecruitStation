@@ -111,3 +111,48 @@ def test_jd_sync_normalizer_downgrades_recoverable_blocked_status() -> None:
     assert result["status"] == "in_progress"
     assert result["scene_status"] == "in_progress"
     assert result["reported_status"] == "blocked"
+
+
+def test_jd_sync_normalizer_and_reducer_drop_boss_navigation_entries() -> None:
+    result = normalize_jd_sync_scene_result(
+        {
+            "status": "blocked",
+            "observed_jobs": [
+                {
+                    "title": "职位管理",
+                    "job_key": "https://www.zhipin.com/web/chat/job/list?ka=menu-manager-job",
+                    "source_url": "https://www.zhipin.com/web/chat/job/list?ka=menu-manager-job",
+                }
+            ],
+            "pending_jobs": [
+                {
+                    "title": "职位管理",
+                    "job_key": "https://www.zhipin.com/web/chat/job/list?ka=menu-manager-job",
+                }
+            ],
+            "action_candidates": [
+                {
+                    "kind": "open_job_detail_or_safe_edit",
+                    "tool_name": "hid_action",
+                    "label": "职位管理",
+                    "ref": "e14",
+                    "source_url": "https://www.zhipin.com/web/chat/job/list?ka=menu-manager-job",
+                }
+            ],
+            "terminal_blockers": [{"kind": "ambiguous_click_target"}],
+        },
+        {"contract_kind": "jd_sync"},
+    )
+
+    assert result["observed_jobs"] == []
+    assert result["pending_jobs"] == []
+    assert result["action_candidates"] == []
+    assert result["contract_normalization"]["filtered_non_jd_items"] == {
+        "observed_jobs": 1,
+        "pending_jobs": 1,
+        "action_candidates": 1,
+    }
+
+    state = reduce_jd_sync_scene_result(initial_jd_sync_state(), {"result_data": result})
+    assert state["jobs_by_key"] == {}
+    assert state["pending_job_keys"] == []
