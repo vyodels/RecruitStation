@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+import time
 from io import BytesIO
 from urllib.error import HTTPError, URLError
 
@@ -97,15 +99,46 @@ def test_post_json_enforces_overall_sse_stream_timeout(monkeypatch) -> None:
         def readline(self):
             return b": keepalive\n"
 
-    monotonic_values = iter([100.0, 100.2, 100.4, 101.1])
-
     monkeypatch.setattr("recruit_station.agent_runtime.providers._open_url", lambda *args, **kwargs: HangingSSEResponse())
-    monkeypatch.setattr("recruit_station.agent_runtime.providers.time.monotonic", lambda: next(monotonic_values))
 
     with pytest.raises(ProviderError) as raised:
-        _post_json("https://api.test/v1/responses", {}, headers={}, timeout_seconds=1)
+        _post_json("https://api.test/v1/responses", {}, headers={}, timeout_seconds=0.05)
 
     assert "exceeded timeout" in str(raised.value)
+    assert raised.value.error_kind == "provider_transport_error"
+    assert raised.value.retryable is True
+
+
+def test_post_json_interrupts_blocking_sse_readline_on_timeout(monkeypatch) -> None:
+    class BlockingSSEResponse:
+        headers = {"Content-Type": "text/event-stream"}
+
+        def __init__(self) -> None:
+            self.closed = threading.Event()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.close()
+            return False
+
+        def close(self):
+            self.closed.set()
+
+        def readline(self):
+            self.closed.wait(timeout=10)
+            return b""
+
+    response = BlockingSSEResponse()
+    monkeypatch.setattr("recruit_station.agent_runtime.providers._open_url", lambda *args, **kwargs: response)
+
+    started_at = time.monotonic()
+    with pytest.raises(ProviderError) as raised:
+        _post_json("https://api.test/v1/responses", {}, headers={}, timeout_seconds=0.05)
+
+    assert time.monotonic() - started_at < 0.5
+    assert response.closed.is_set()
     assert raised.value.error_kind == "provider_transport_error"
     assert raised.value.retryable is True
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import queue
+import threading
 import time
 from http.client import HTTPException
 from dataclasses import dataclass, field
@@ -295,8 +297,11 @@ def _post_json(
     try:
         with _open_url(request, url=url, timeout_seconds=timeout_seconds) as response:  # type: ignore[arg-type]
             if "text/event-stream" in _response_content_type(response):
-                return list(
-                    _iter_sse_events(response, abort_signal=abort_signal, timeout_seconds=timeout_seconds, url=url)
+                return _read_sse_events_with_deadline(
+                    response,
+                    abort_signal=abort_signal,
+                    timeout_seconds=timeout_seconds,
+                    url=url,
                 )
             return _read_json_response(response)
     except HTTPError as exc:
@@ -445,7 +450,7 @@ def _iter_sse_events(
     data_lines: list[str] = []
     deadline = None
     if timeout_seconds is not None:
-        deadline = time.monotonic() + max(float(timeout_seconds), 1.0)
+        deadline = time.monotonic() + max(float(timeout_seconds), 0.001)
     while True:
         if _signal_aborted(abort_signal):
             break
@@ -475,6 +480,52 @@ def _iter_sse_events(
         yield _decode_sse_event(event_name, "\n".join(data_lines))
 
 
+_STREAM_DONE = object()
+
+
+def _read_sse_events_with_deadline(
+    response: Any,
+    *,
+    abort_signal: AbortSignal | None = None,
+    timeout_seconds: int | float,
+    url: str,
+) -> list[dict[str, Any]]:
+    deadline = time.monotonic() + max(float(timeout_seconds), 0.001)
+    results: list[dict[str, Any]] = []
+    events: queue.Queue[dict[str, Any] | BaseException | object] = queue.Queue()
+
+    def read_stream() -> None:
+        try:
+            for event in _iter_sse_events(response, abort_signal=abort_signal, timeout_seconds=timeout_seconds, url=url):
+                events.put(event)
+        except BaseException as exc:
+            events.put(exc)
+        finally:
+            events.put(_STREAM_DONE)
+
+    thread = threading.Thread(target=read_stream, name="provider-sse-reader", daemon=True)
+    thread.start()
+    while True:
+        if _signal_aborted(abort_signal):
+            _close_response(response)
+            return results
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            _close_response(response)
+            _enforce_stream_deadline(deadline, url)
+        try:
+            item = events.get(timeout=remaining)
+        except queue.Empty:
+            _close_response(response)
+            _enforce_stream_deadline(deadline, url)
+            raise AssertionError("unreachable")
+        if item is _STREAM_DONE:
+            return results
+        if isinstance(item, BaseException):
+            raise item
+        results.append(item)
+
+
 def _enforce_stream_deadline(deadline: float | None, url: str) -> None:
     if deadline is not None and time.monotonic() >= deadline:
         raise ProviderError(
@@ -482,6 +533,15 @@ def _enforce_stream_deadline(deadline: float | None, url: str) -> None:
             error_kind="provider_transport_error",
             retryable=True,
         )
+
+
+def _close_response(response: Any) -> None:
+    close = getattr(response, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:
+            pass
 
 
 def _set_response_read_timeout(response: Any, timeout_seconds: float) -> None:
