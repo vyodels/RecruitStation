@@ -42,6 +42,8 @@ def derive_browser_target(
 
     if target.get("url") and not target.get("host"):
         target["host"] = _host_from_url(target.get("url"))
+    if target.get("host") and not target.get("domain"):
+        target["domain"] = _derive_safe_target_domain(target.get("host"))
     return _compact_target(target)
 
 
@@ -109,12 +111,18 @@ def _normalize_browser_target_shape(value: Any) -> dict[str, Any]:
         return {}
     url = _optional_string(payload.get("url"))
     host = _optional_string(payload.get("host")) or _host_from_url(url)
+    domain = _normalize_target_domain(
+        payload.get("domain")
+        or payload.get("target_domain")
+        or payload.get("targetDomain")
+    ) or _derive_safe_target_domain(host)
     target = {
         "application": _optional_string(payload.get("application") or payload.get("app")),
         "window_title": _optional_string(payload.get("window_title") or payload.get("windowTitle") or payload.get("window")),
         "tab_id": _optional_int(payload.get("tab_id") or payload.get("tabId")),
         "host": host,
         "url": url,
+        "domain": domain,
         "url_pattern": _optional_string(payload.get("url_pattern") or payload.get("urlPattern")),
         "site_label": _optional_string(payload.get("site_label") or payload.get("siteLabel") or payload.get("site")),
     }
@@ -130,6 +138,8 @@ def _merge_missing_target_fields(current: dict[str, Any], candidate: dict[str, A
             merged[key] = value
     if merged.get("url") and not merged.get("host"):
         merged["host"] = _host_from_url(merged.get("url"))
+    if merged.get("host") and not merged.get("domain"):
+        merged["domain"] = _derive_safe_target_domain(merged.get("host"))
     return _compact_target(merged)
 
 
@@ -139,6 +149,34 @@ def _host_from_url(value: Any) -> str | None:
         return None
     parsed = urlparse(url)
     return parsed.netloc.lower() or None
+
+
+def _derive_safe_target_domain(host: Any) -> str | None:
+    hostname = _hostname_part(host)
+    if not hostname or not hostname.startswith("www."):
+        return None
+    domain = hostname[4:]
+    if "." not in domain:
+        return None
+    return domain
+
+
+def _normalize_target_domain(value: Any) -> str | None:
+    domain = _hostname_part(value)
+    if not domain or domain.startswith(".") or domain.endswith("."):
+        return None
+    return domain
+
+
+def _hostname_part(value: Any) -> str | None:
+    text = _optional_string(value)
+    if not text:
+        return None
+    try:
+        parsed = urlparse(text if "://" in text else f"//{text}")
+        return parsed.hostname.lower() if parsed.hostname else None
+    except ValueError:
+        return None
 
 
 def _as_dict(value: Any) -> dict[str, Any]:

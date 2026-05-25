@@ -671,7 +671,28 @@ def _build_scene_instruction(request: dict[str, Any]) -> str:
             "如果 browser_get_active_tab 返回的活动页不是目标 origin，这只是当前活动页不匹配，不是终局阻塞；"
             "必须继续用 browser_list_tabs 查找同 origin 页签，找到后基于该 tabId 观察目标页，或通过 VirtualHID 切换到同 origin 页签。"
             "只有 browser_list_tabs 也找不到同 origin 页签，或同 origin 页签不可观察/不可切换时，才返回结构化 blocker 或请求 human 处理。"
+            "如果当前可见页已经在目标站点内但不是招聘管理、岗位列表或岗位详情页，这不是 JD sync 的终局 blocker；"
+            "必须先用 browser_list_tabs、browser_snapshot/query 识别同站点页签和页面内可见导航/链接，再通过 VirtualHID 执行这些同站点入口、返回、滚动或点击，"
+            "逐步恢复到岗位管理/列表/详情工作流。不得硬编码站点选择器或岗位管理精确 URL，也不得通过浏览器地址栏、直接输入 URL 或 browser 导航工具跳转。"
+            "只有目标站点内没有可见同站点导航/链接、HID 连续恢复失败，或需要人工登录/授权时，JD sync 才能返回结构化 blocker。"
+            "招聘站点页面恢复/导航点击必须使用 browser 观察到的侧边栏主入口语义：职位管理、推荐牛人、搜索、沟通；"
+            "JD sync 从非 JD 页面恢复时只能点击职位管理，不得点击推荐牛人、搜索或沟通作为恢复入口。"
+            "招聘规范、我的客服、招聘数据、新建分组、+ 分组控件、候选人/聊天控件等不得作为页面恢复/导航入口。"
+            "BOSS/zhipin 页面识别锚点：职位管理页包含标题 职位管理、页签 全部职位/开放中/待开放/审核不通过/已关闭、截图示例职位卡如 产品实习生 与 北京/经验不限/本科/2-4K/全职/开放中；"
+            "JD sync 只读职位信息，不点击 发布职位、关闭、升级、曝光刷新。"
+            "推荐牛人页包含标题 推荐牛人、推荐/最新、JD 选择器示例如 产品实习生_北京 2-4K；打招呼 是外联动作，read-only 流程不得点击。"
+            "搜索页标题 人才库；实际职位标题、城市、薪资和关键词以本次启用/选中 JD 为准，不得为了匹配截图示例而跨 JD。"
+            "沟通页包含 全部/新招呼/沟通中/已约面/已获取简历/已交换电话/已交换微信/收藏/更多，可读会话事实和简历附件，但不得发消息或改状态。"
         )
+        target_domains = _scene_target_domains(request)
+        if target_domains:
+            parts.append(
+                "当前 browser_target 声明目标域边界："
+                f"{', '.join(f'DOMAIN,{domain}' for domain in target_domains)}。"
+                "匹配只看 URL host/domain，忽略 path 与 query；"
+                "目标 host 精确等于 browser_target.domain 或属于其子域才允许视为同一目标站点；"
+                "拼接伪装域名不匹配；需要 origin 级比较时仍要求 scheme 和显式端口匹配。"
+            )
     if request["anti_detection_policy"] or request["behavior_budget"]:
         parts.append(
             "通用反检测与行为预算：必须遵守 anti_detection_policy 与 behavior_budget 中的通用节奏、停留、重试和 HID 动作上限；"
@@ -1501,6 +1522,13 @@ def _scene_tool_registry(
                 )
                 if precheck is not None:
                     return precheck
+                precheck = _validate_recruiting_site_hid_click_target(
+                    normalized,
+                    request=request,
+                    browser_semantics=browser_semantics,
+                )
+                if precheck is not None:
+                    return precheck
                 precheck = _validate_scene_browser_hid_sequence(
                     normalized,
                     request=request,
@@ -1736,11 +1764,12 @@ def _validate_scene_hid_action_target(
     allowed_host = _scene_target_host(request)
     if allowed_host is None:
         return None
+    target_domains = _scene_target_domains(request)
     target = _as_dict(arguments.get("target"))
     context = _as_dict(arguments.get("context"))
     for candidate in (target.get("host"), context.get("host"), _host_from_url(context.get("url")), _host_from_url(target.get("url"))):
         host = _optional_string(candidate, max_length=255)
-        if host and _normalize_host_boundary(host) != allowed_host:
+        if host and not _scene_host_matches_allowed(host, allowed_host=allowed_host, target_domains=target_domains):
             return {
                 "success": False,
                 "error": "scene_browser_host_not_allowed",
@@ -1749,6 +1778,458 @@ def _validate_scene_hid_action_target(
                 "requestedHost": host,
             }
     return None
+
+
+def _validate_recruiting_site_hid_click_target(
+    arguments: dict[str, Any],
+    *,
+    request: dict[str, Any],
+    browser_semantics: dict[str, Any],
+) -> dict[str, Any] | None:
+    scene_kind = _recruiting_site_scene_kind(request)
+    if scene_kind is None or not _is_recruiting_site_target(request):
+        return None
+    click_primitives = _scene_click_primitives(arguments)
+    if not click_primitives:
+        return None
+    page = _latest_browser_page_semantics(browser_semantics, arguments=arguments)
+    items = list(page.get("items") or [])
+    page_context = _recruiting_site_page_context(page)
+    for primitive in click_primitives:
+        evidence = _resolve_recruiting_site_click_evidence(arguments, primitive=primitive, page=page)
+        if evidence is None:
+            return _recruiting_site_click_blocker(
+                reason="ambiguous_click_target",
+                message=(
+                    "Recruiting-site hid_action click is blocked because the click target is not tied to browser snapshot evidence. "
+                    "Re-observe and pass a browser-derived target label/ref/clickPoint for the intended recruiting-site control."
+                ),
+                page_context=page_context,
+                evidence=None,
+            )
+        decision = _recruiting_site_click_evidence_decision(
+            evidence,
+            page_context=page_context,
+            scene_kind=scene_kind,
+            all_items=items,
+        )
+        if decision is not None:
+            return decision
+    return None
+
+
+def _scene_click_primitives(arguments: dict[str, Any]) -> list[dict[str, Any]]:
+    primitives = list(arguments.get("primitives") or []) if isinstance(arguments.get("primitives"), list) else []
+    return [
+        primitive
+        for primitive in primitives
+        if isinstance(primitive, dict) and str(primitive.get("type") or "").strip().lower() in {"click", "doubleclick", "double_click", "tap"}
+    ]
+
+
+def _recruiting_site_scene_kind(request: dict[str, Any]) -> str | None:
+    context = _as_dict(request.get("context"))
+    environment = _as_dict(request.get("environment_requirements"))
+    input_payload = _as_dict(request.get("input"))
+    candidates = [
+        request.get("title"),
+        request.get("instruction"),
+        request.get("scene_kind"),
+        request.get("agent_kind"),
+        request.get("run_type"),
+        context.get("plan_kind"),
+        context.get("agent_kind"),
+        context.get("run_type"),
+        context.get("scene_kind"),
+        environment.get("plan_kind"),
+        environment.get("agent_kind"),
+        environment.get("run_type"),
+        environment.get("scene_kind"),
+        input_payload.get("plan_kind"),
+        input_payload.get("agent_kind"),
+        input_payload.get("run_type"),
+    ]
+    output_contract = _as_dict(request.get("output_contract"))
+    candidates.extend([output_contract.get("contract_kind"), output_contract.get("mode"), output_contract.get("name")])
+    text = " ".join(str(item or "") for item in candidates).lower()
+    compact = text.replace(" ", "").replace("-", "_")
+    if any(marker in compact for marker in ("jd_sync", "jobsync", "job_description_sync", "jdsync")):
+        return "jd_sync"
+    if any(marker in text for marker in ("jd 同步", "同步 jd", "职位同步", "岗位同步")):
+        return "jd_sync"
+    if any(
+        marker in compact
+        for marker in (
+            "recruiting",
+            "recruit",
+            "autonomous_recruiting",
+            "multi_jd_recruiting",
+            "candidate_discovery",
+            "resume_collection",
+        )
+    ):
+        return "recruiting"
+    if any(marker in text for marker in ("招聘", "候选人", "牛人", "职位管理", "推荐牛人")):
+        return "recruiting"
+    return None
+
+
+def _is_recruiting_site_target(request: dict[str, Any]) -> bool:
+    browser_target = _as_dict(request.get("browser_target"))
+    host = _hostname_part(_host_from_url(browser_target.get("url")) or browser_target.get("host"))
+    domains = _scene_target_domains(request)
+    labels = _normalize_ui_text(
+        " ".join(str(item or "") for item in (browser_target.get("site_label"), browser_target.get("site"), request.get("title"), request.get("instruction")))
+    ).lower()
+    if any(_host_matches_target_domain(host, domain) and domain in {"zhipin.com", "bosszhipin.com"} for domain in domains):
+        return True
+    if host and _host_matches_target_domain(host, "zhipin.com"):
+        return True
+    return any(marker in labels for marker in ("zhipin", "boss", "boss直聘", "直聘"))
+
+
+def _latest_browser_page_semantics(browser_semantics: dict[str, Any], *, arguments: dict[str, Any]) -> dict[str, Any]:
+    target = _as_dict(arguments.get("target"))
+    tab_id = _optional_int(target.get("tabId") or target.get("tab_id"))
+    tab_info = dict((browser_semantics.get("tabs") or {}).get(tab_id) or {}) if tab_id is not None else {}
+    page = _as_dict(tab_info.get("last_page_semantics")) or _as_dict(browser_semantics.get("last_page_semantics"))
+    if not page:
+        page = {
+            "url": tab_info.get("url") or browser_semantics.get("last_url"),
+            "title": tab_info.get("title") or browser_semantics.get("last_title"),
+            "items": [],
+        }
+    return page
+
+
+def _recruiting_site_page_context(page: dict[str, Any]) -> dict[str, Any]:
+    text = _normalize_ui_text(
+        " ".join(
+            str(item)
+            for item in (
+                page.get("title"),
+                page.get("text"),
+                page.get("content"),
+                page.get("bodyText"),
+                page.get("body_text"),
+                page.get("markdown"),
+                page.get("url"),
+            )
+            if item not in (None, "", [], {})
+        )
+    )
+    url = str(page.get("url") or "").lower()
+    title = _normalize_ui_text(page.get("title"))
+    combined = " ".join(item for item in (text, url, title) if item)
+    in_job_page = any(
+        marker in combined
+        for marker in (
+            "职位管理",
+            "岗位管理",
+            "职位列表",
+            "岗位列表",
+            "在招职位",
+            "职位详情",
+            "岗位详情",
+            "职位描述",
+            "岗位职责",
+            "任职要求",
+            "编辑职位",
+            "job",
+            "jobs",
+            "position",
+            "positions",
+            "jd",
+        )
+    )
+    in_recruiting_work_page = in_job_page or any(
+        marker in combined
+        for marker in (
+            "推荐牛人",
+            "牛人列表",
+            "候选人",
+            "沟通",
+            "聊天",
+            "搜索",
+            "简历",
+            "candidate",
+            "chat",
+            "resume",
+            "geek",
+            "search",
+        )
+    )
+    return {
+        "in_job_page": in_job_page,
+        "in_recruiting_work_page": in_recruiting_work_page,
+        "url": page.get("url"),
+        "title": page.get("title"),
+    }
+
+
+def _resolve_recruiting_site_click_evidence(arguments: dict[str, Any], *, primitive: dict[str, Any], page: dict[str, Any]) -> dict[str, Any] | None:
+    items = [item for item in list(page.get("items") or []) if isinstance(item, dict)]
+    hinted = _recruiting_site_click_hint(arguments, primitive=primitive)
+    if hinted:
+        for item in items:
+            if _browser_item_matches_hint(item, hinted):
+                return item
+        if _recruiting_site_hint_has_target_identity(hinted):
+            return hinted
+    point = _point_from_primitive(primitive)
+    if point is not None:
+        matched = _nearest_browser_item_for_point(items, point=point)
+        if matched is not None:
+            return matched
+    return None
+
+
+def _recruiting_site_click_hint(arguments: dict[str, Any], *, primitive: dict[str, Any]) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for source in (arguments, _as_dict(arguments.get("target")), _as_dict(arguments.get("context")), _as_dict(arguments.get("metadata")), primitive):
+        for key in (
+            "ref",
+            "element_ref",
+            "elementRef",
+            "label",
+            "text",
+            "name",
+            "title",
+            "target_label",
+            "targetLabel",
+            "target_text",
+            "targetText",
+            "element_text",
+            "elementText",
+            "href",
+            "url",
+            "role",
+            "kind",
+        ):
+            value = source.get(key) if isinstance(source, dict) else None
+            if value not in (None, "", [], {}) and key not in merged:
+                merged[key] = value
+    return merged
+
+
+def _recruiting_site_hint_has_target_identity(hint: dict[str, Any]) -> bool:
+    return any(_optional_string(hint.get(key)) for key in ("ref", "element_ref", "elementRef", "label", "text", "target_label", "targetLabel", "target_text", "targetText", "element_text", "elementText"))
+
+
+def _browser_item_matches_hint(item: dict[str, Any], hint: dict[str, Any]) -> bool:
+    item_ref = _optional_string(item.get("ref") or item.get("id"))
+    hint_ref = _optional_string(hint.get("ref") or hint.get("element_ref") or hint.get("elementRef"))
+    if item_ref and hint_ref and item_ref == hint_ref:
+        return True
+    item_href = _optional_string(item.get("href") or item.get("url"))
+    hint_href = _optional_string(hint.get("href") or hint.get("url"))
+    if item_href and hint_href and item_href == hint_href:
+        return True
+    item_label = _browser_item_label(item)
+    hint_label = _browser_item_label(hint)
+    return bool(item_label and hint_label and item_label == hint_label)
+
+
+def _nearest_browser_item_for_point(items: list[dict[str, Any]], *, point: tuple[float, float]) -> dict[str, Any] | None:
+    best: tuple[float, dict[str, Any]] | None = None
+    for item in items:
+        if _point_inside_browser_item(item, point):
+            return item
+        item_point = _browser_item_click_point(item)
+        if item_point is None:
+            continue
+        distance = ((item_point[0] - point[0]) ** 2 + (item_point[1] - point[1]) ** 2) ** 0.5
+        if best is None or distance < best[0]:
+            best = (distance, item)
+    if best is not None and best[0] <= 24:
+        return best[1]
+    return None
+
+
+def _point_from_primitive(primitive: dict[str, Any]) -> tuple[float, float] | None:
+    at = _as_dict(primitive.get("at") or primitive.get("point") or primitive.get("clickPoint") or primitive.get("click_point"))
+    at = _coordinate_payload(at)
+    x = _optional_number(at.get("x"))
+    y = _optional_number(at.get("y"))
+    if x is None or y is None:
+        return None
+    return (x, y)
+
+
+def _browser_item_click_point(item: dict[str, Any]) -> tuple[float, float] | None:
+    for candidate in (item.get("clickPoint"), item.get("click_point"), item.get("point")):
+        point = _point_from_value(candidate)
+        if point is not None:
+            return point
+    region = _as_dict(item.get("region") or item.get("bounds") or item.get("rect"))
+    x = _optional_number(region.get("x") if region.get("x") is not None else region.get("left"))
+    y = _optional_number(region.get("y") if region.get("y") is not None else region.get("top"))
+    width = _optional_number(region.get("width"))
+    height = _optional_number(region.get("height"))
+    if x is not None and y is not None and width is not None and height is not None:
+        return (x + width / 2, y + height / 2)
+    return None
+
+
+def _point_from_value(value: Any) -> tuple[float, float] | None:
+    payload = _coordinate_payload(_as_dict(value))
+    x = _optional_number(payload.get("x"))
+    y = _optional_number(payload.get("y"))
+    if x is None or y is None:
+        return None
+    return (x, y)
+
+
+def _point_inside_browser_item(item: dict[str, Any], point: tuple[float, float]) -> bool:
+    region = _coordinate_payload(_as_dict(item.get("region") or item.get("bounds") or item.get("rect") or item.get("boundingBox") or item.get("box")))
+    x = _optional_number(region.get("x") if region.get("x") is not None else region.get("left"))
+    y = _optional_number(region.get("y") if region.get("y") is not None else region.get("top"))
+    width = _optional_number(region.get("width"))
+    height = _optional_number(region.get("height"))
+    if x is None or y is None or width is None or height is None:
+        return False
+    return x <= point[0] <= x + width and y <= point[1] <= y + height
+
+
+def _coordinate_payload(value: dict[str, Any]) -> dict[str, Any]:
+    for key in ("viewport", "document", "client", "page"):
+        nested = _as_dict(value.get(key))
+        if nested:
+            return nested
+    return value
+
+
+def _recruiting_site_click_evidence_decision(
+    evidence: dict[str, Any],
+    *,
+    page_context: dict[str, Any],
+    scene_kind: str,
+    all_items: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    label = _browser_item_label(evidence)
+    sidebar_entry = _sidebar_main_entry_label(evidence)
+    if sidebar_entry:
+        if scene_kind == "jd_sync" and sidebar_entry != "职位管理":
+            return _recruiting_site_click_blocker(
+                reason="jd_sync_requires_job_management_entry",
+                message="JD sync recovery may only click the sidebar 职位管理 entry.",
+                page_context=page_context,
+                evidence=evidence,
+            )
+        return None
+    if _normalize_ui_text(label) in {"职位管理", "推荐牛人", "搜索", "沟通"}:
+        return _recruiting_site_click_blocker(
+            reason="requires_allowed_sidebar_entry",
+            message="Recruiting-site recovery may only click observed sidebar entries, not top-nav or page-level controls with similar labels.",
+            page_context=page_context,
+            evidence=evidence,
+        )
+    if scene_kind == "jd_sync" and bool(page_context.get("in_job_page")) and _is_job_page_click_item(evidence):
+        return None
+    if _is_blocked_recruiting_site_click_item(evidence):
+        return _recruiting_site_click_blocker(
+            reason="non_recruiting_navigation_target",
+            message=f"Recruiting-site hid_action click is blocked because the observed target is not an allowed page recovery/navigation control: {label or '(unlabeled target)'}.",
+            page_context=page_context,
+            evidence=evidence,
+        )
+    if not bool(page_context.get("in_recruiting_work_page")):
+        return _recruiting_site_click_blocker(
+            reason="requires_allowed_sidebar_entry",
+            message="Recruiting-site recovery may only click one of the observed sidebar entries: 职位管理, 推荐牛人, 搜索, 沟通.",
+            page_context=page_context,
+            evidence=evidence,
+        )
+    if scene_kind == "recruiting" and _has_browser_target_identity(evidence):
+        return None
+    if scene_kind == "jd_sync":
+        return _recruiting_site_click_blocker(
+            reason="non_job_page_action",
+            message="JD sync clicks beyond top-level recovery must target browser-observed job rows, titles, detail/edit entries, or job management actions.",
+            page_context=page_context,
+            evidence=evidence,
+        )
+    return None
+
+
+def _is_blocked_recruiting_site_click_item(item: dict[str, Any]) -> bool:
+    label = _normalize_ui_text(_browser_item_label(item))
+    href = str(item.get("href") or item.get("url") or "").lower()
+    kind = _normalize_ui_text(item.get("kind"))
+    role = _normalize_ui_text(item.get("role"))
+    blocked_exact = {"招聘规范", "我的客服", "招聘数据", "新建分组", "+"}
+    if label in blocked_exact:
+        return True
+    if any(marker in label for marker in ("招聘规范", "我的客服", "招聘数据", "新建分组", "候选人", "聊天", "客服")):
+        return True
+    if label in {"添加分组", "创建分组"}:
+        return True
+    if label == "+" and any(marker in f"{kind} {role} {href}" for marker in ("group", "chat", "conversation")):
+        return True
+    return any(marker in f"{kind} {role} {href}" for marker in ("candidate", "chat", "conversation", "customer_service", "group"))
+
+
+def _sidebar_main_entry_label(item: dict[str, Any]) -> str | None:
+    label = _normalize_ui_text(_browser_item_label(item))
+    if label not in {"职位管理", "推荐牛人", "搜索", "沟通"}:
+        return None
+    role_kind = _normalize_ui_text(" ".join(str(item.get(key) or "") for key in ("role", "kind", "location", "section", "container", "nav")))
+    if any(marker in role_kind.lower() for marker in ("sidebar", "side-nav", "side_nav", "sider", "left-nav", "left_nav", "left menu", "left-menu", "left_menu")):
+        return label
+    return None
+
+
+def _is_job_page_click_item(item: dict[str, Any]) -> bool:
+    if _sidebar_main_entry_label(item) == "职位管理":
+        return True
+    label = _normalize_ui_text(_browser_item_label(item))
+    href = str(item.get("href") or item.get("url") or "").lower()
+    kind_role = _normalize_ui_text(" ".join(str(item.get(key) or "") for key in ("kind", "role", "type", "dataKind", "entity_kind", "entityKind")))
+    if any(marker in kind_role for marker in ("job", "jd", "position", "职位", "岗位")):
+        return True
+    if any(marker in href for marker in ("/job", "job/", "jobs", "position", "jd")):
+        return True
+    if any(marker in label for marker in ("职位详情", "岗位详情", "编辑职位", "查看详情", "编辑", "详情", "职位名称", "岗位名称")):
+        return True
+    return False
+
+
+def _has_browser_target_identity(item: dict[str, Any]) -> bool:
+    return bool(_browser_item_label(item) or item.get("ref") or item.get("href") or item.get("url") or item.get("clickPoint") or item.get("region"))
+
+
+def _browser_item_label(item: dict[str, Any]) -> str:
+    for key in ("text", "label", "name", "title", "ariaLabel", "aria_label", "innerText", "inner_text", "target_text", "targetText", "element_text", "elementText"):
+        value = _optional_string(item.get(key))
+        if value:
+            return value
+    return ""
+
+
+def _normalize_ui_text(value: Any) -> str:
+    return " ".join(str(value or "").replace("\u00a0", " ").split())
+
+
+def _recruiting_site_click_blocker(
+    *,
+    reason: str,
+    message: str,
+    page_context: dict[str, Any],
+    evidence: dict[str, Any] | None,
+) -> dict[str, Any]:
+    return {
+        "success": False,
+        "error": "scene_recruiting_navigation_target_blocked",
+        "reason": reason,
+        "message": message,
+        "pageContext": {
+            "inJobPage": bool(page_context.get("in_job_page")),
+            "inRecruitingWorkPage": bool(page_context.get("in_recruiting_work_page")),
+            "url": page_context.get("url"),
+            "title": page_context.get("title"),
+        },
+        "evidence": _compact_value(evidence or {}),
+    }
 
 
 def _mask_scene_hid_overlay_blocker(result: Any) -> Any:
@@ -1803,9 +2284,9 @@ def _validate_scene_browser_tool_target(
     tab_info = dict((browser_semantics.get("tabs") or {}).get(tab_id) or {})
     tab_url = _optional_string(tab_info.get("url"))
     tab_host = _optional_string(tab_info.get("host"), max_length=255)
-    if tab_url and _scene_url_matches_target_origin(tab_url, target_origin=target_origin):
+    if tab_url and _scene_url_matches_target_origin(tab_url, target_origin=target_origin, request=request):
         return None
-    if not tab_url and tab_host and _scene_url_matches_target_origin(tab_host, target_origin=target_origin):
+    if not tab_url and tab_host and _scene_url_matches_target_origin(tab_host, target_origin=target_origin, request=request):
         return None
     if not tab_info or (not tab_url and not tab_host):
         return _scene_browser_tab_blocker(
@@ -1835,9 +2316,10 @@ def _validate_scene_browser_tool_host(arguments: dict[str, Any], *, request: dic
     allowed_host = _scene_target_host(request)
     if allowed_host is None:
         return None
+    target_domains = _scene_target_domains(request)
     for candidate in (arguments.get("url"), arguments.get("href"), arguments.get("sourceUrl"), arguments.get("source_url"), arguments.get("pattern")):
         host = _host_from_url(candidate)
-        if host and _normalize_host_boundary(host) != allowed_host:
+        if host and not _scene_host_matches_allowed(host, allowed_host=allowed_host, target_domains=target_domains):
             return {
                 "success": False,
                 "error": "scene_browser_host_not_allowed",
@@ -1886,7 +2368,7 @@ def _mask_scene_browser_target_mismatch(
     if target_origin is None:
         return result
     observed_url = _browser_result_url(result)
-    if observed_url is None or _scene_url_matches_target_origin(observed_url, target_origin=target_origin):
+    if observed_url is None or _scene_url_matches_target_origin(observed_url, target_origin=target_origin, request=request):
         return result
     if tool_name == "browser_get_active_tab":
         return {
@@ -1938,13 +2420,113 @@ def _scene_target_host(request: dict[str, Any]) -> str | None:
     return _normalize_host_boundary(host) if host else None
 
 
-def _scene_url_matches_target_origin(value: Any, *, target_origin: str) -> bool:
+def _scene_target_domains(request: dict[str, Any]) -> list[str]:
+    browser_target = _as_dict(request.get("browser_target"))
+    raw_values: list[Any] = []
+    for key in ("domain", "target_domain", "targetDomain"):
+        raw_values.append(browser_target.get(key))
+    for key in ("allowed_domains", "allowedDomains"):
+        value = browser_target.get(key)
+        if isinstance(value, list):
+            raw_values.extend(value)
+        else:
+            raw_values.append(value)
+    domains: list[str] = []
+    for value in raw_values:
+        domain = _normalize_target_domain(value)
+        if domain and domain not in domains:
+            domains.append(domain)
+    if domains:
+        return domains
+    return _derive_safe_target_domains(_scene_target_host(request))
+
+
+def _scene_url_matches_target_origin(value: Any, *, target_origin: str, request: dict[str, Any] | None = None) -> bool:
     normalized_target = str(target_origin or "").strip().lower()
+    target_domains = _scene_target_domains(request or {})
     observed_origin = _origin_from_url(value)
     if "://" in normalized_target:
-        return observed_origin == normalized_target
+        if observed_origin == normalized_target:
+            return True
+        return _scene_origins_are_allowed_aliases(observed_origin, normalized_target, target_domains=target_domains)
     observed_host = _host_from_url(value) or _optional_string(value, max_length=255)
-    return _normalize_host_boundary(observed_host) == _normalize_host_boundary(normalized_target)
+    return _scene_host_matches_allowed(observed_host, allowed_host=normalized_target, target_domains=target_domains)
+
+
+def _scene_origins_are_allowed_aliases(
+    observed_origin: str | None,
+    target_origin: str,
+    *,
+    target_domains: list[str],
+) -> bool:
+    if not observed_origin:
+        return False
+    try:
+        observed = urlparse(observed_origin)
+        target = urlparse(target_origin)
+    except ValueError:
+        return False
+    if observed.scheme != target.scheme:
+        return False
+    if observed.port != target.port:
+        return False
+    observed_host = observed.hostname.lower() if observed.hostname else None
+    target_host = target.hostname.lower() if target.hostname else None
+    return _scene_host_matches_allowed(observed_host, allowed_host=target_host, target_domains=target_domains)
+
+
+def _scene_host_matches_allowed(value: Any, *, allowed_host: Any, target_domains: list[str] | None = None) -> bool:
+    observed = _normalize_host_boundary(_host_from_url(value) or value)
+    allowed = _normalize_host_boundary(_host_from_url(allowed_host) or allowed_host)
+    if not observed or not allowed:
+        return False
+    if observed == allowed:
+        return True
+    observed_host = _hostname_part(observed)
+    domains = list(target_domains or [])
+    return (
+        any(_host_matches_target_domain(observed_host, domain) for domain in domains)
+        and _host_has_same_explicit_port(observed, allowed)
+    )
+
+
+def _host_matches_target_domain(host: str | None, domain: str) -> bool:
+    normalized_host = _normalize_target_domain(host)
+    normalized_domain = _normalize_target_domain(domain)
+    if not normalized_host or not normalized_domain:
+        return False
+    return normalized_host == normalized_domain or normalized_host.endswith(f".{normalized_domain}")
+
+
+def _derive_safe_target_domains(host: Any) -> list[str]:
+    hostname = _hostname_part(host)
+    if not hostname or not hostname.startswith("www."):
+        return []
+    domain = hostname[4:]
+    if "." not in domain:
+        return []
+    return [domain]
+
+
+def _normalize_target_domain(value: Any) -> str | None:
+    hostname = _hostname_part(value)
+    if not hostname or hostname.startswith(".") or hostname.endswith("."):
+        return None
+    return hostname
+
+
+def _host_has_same_explicit_port(left: Any, right: Any) -> bool:
+    return _explicit_port(left) == _explicit_port(right)
+
+
+def _explicit_port(value: Any) -> int | None:
+    host = _normalize_host_boundary(_host_from_url(value) or value)
+    if not host:
+        return None
+    try:
+        return urlparse(f"//{host}").port
+    except ValueError:
+        return None
 
 
 def _normalize_host_boundary(value: Any) -> str | None:
@@ -2100,6 +2682,15 @@ def _remember_browser_semantics(browser_semantics: dict[str, Any], *, tool_name:
         return
     for item in _browser_tabs_from_output(output):
         _remember_browser_tab(browser_semantics, item)
+    page_semantics = _browser_page_semantics_from_output(output)
+    if page_semantics:
+        browser_semantics["last_page_semantics"] = page_semantics
+        tab_id = _optional_int(output.get("tabId") or output.get("tab_id") or _as_dict(output.get("target")).get("tabId") or _as_dict(output.get("tab")).get("tabId"))
+        if tab_id is not None:
+            tabs = browser_semantics.setdefault("tabs", {})
+            current = dict(tabs.get(tab_id) or {})
+            current["last_page_semantics"] = page_semantics
+            tabs[tab_id] = current
     snapshot = output.get("snapshot")
     if isinstance(snapshot, dict):
         tab_id = _optional_int(output.get("tabId") or output.get("tab_id") or _as_dict(output.get("target")).get("tabId"))
@@ -2116,6 +2707,58 @@ def _remember_browser_semantics(browser_semantics: dict[str, Any], *, tool_name:
     target = _as_dict(output.get("target"))
     if target:
         _remember_browser_tab(browser_semantics, target)
+
+
+def _browser_page_semantics_from_output(output: dict[str, Any]) -> dict[str, Any]:
+    snapshot = _as_dict(output.get("snapshot"))
+    source = snapshot or output
+    items = _browser_action_items_from_value(source)
+    page = {
+        "url": _browser_result_url(output) or _optional_string(source.get("url")),
+        "title": _optional_string(source.get("title") or output.get("title")),
+        "text": _optional_string(source.get("text") or source.get("content") or source.get("bodyText") or source.get("body_text") or source.get("markdown")),
+        "items": items,
+    }
+    return {key: value for key, value in page.items() if value not in (None, "", [], {})}
+
+
+def _browser_action_items_from_value(value: Any) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    if isinstance(value, dict):
+        for key in ("clickables", "matches", "elements", "action_hints", "affordances", "links", "buttons"):
+            raw_items = value.get(key)
+            if isinstance(raw_items, list):
+                for raw in raw_items:
+                    item = _normalize_browser_action_item(raw)
+                    if item:
+                        items.append(item)
+        snapshot = value.get("snapshot")
+        if isinstance(snapshot, dict):
+            items.extend(_browser_action_items_from_value(snapshot))
+    elif isinstance(value, list):
+        for raw in value:
+            item = _normalize_browser_action_item(raw)
+            if item:
+                items.append(item)
+    return items[-200:]
+
+
+def _normalize_browser_action_item(value: Any) -> dict[str, Any]:
+    payload = _as_dict(value)
+    if not payload:
+        return {}
+    normalized = {
+        "ref": _optional_string(payload.get("ref") or payload.get("id"), max_length=128),
+        "text": _optional_string(payload.get("text") or payload.get("label") or payload.get("name") or payload.get("title") or payload.get("innerText") or payload.get("inner_text"), max_length=512),
+        "label": _optional_string(payload.get("label") or payload.get("ariaLabel") or payload.get("aria_label"), max_length=512),
+        "role": _optional_string(payload.get("role"), max_length=128),
+        "kind": _optional_string(payload.get("kind") or payload.get("type") or payload.get("dataKind") or payload.get("entity_kind") or payload.get("entityKind"), max_length=128),
+        "href": _optional_string(payload.get("href") or payload.get("url")),
+        "clickPoint": payload.get("clickPoint") or payload.get("click_point") or payload.get("point"),
+        "region": payload.get("region") or payload.get("bounds") or payload.get("rect"),
+        "container": _optional_string(payload.get("container") or payload.get("section") or payload.get("location") or payload.get("nav"), max_length=128),
+    }
+    return {key: item for key, item in normalized.items() if item not in (None, "", [], {})}
 
 
 def _browser_tabs_from_output(output: dict[str, Any]) -> list[dict[str, Any]]:
@@ -3155,12 +3798,21 @@ def _normalize_browser_target(value: Any) -> dict[str, Any]:
     host = _optional_string(payload.get("host"), max_length=255)
     if url_host and (not host or (":" in url_host and ":" not in host and url_host.startswith(f"{host}:"))):
         host = url_host
+    domain = _normalize_target_domain(
+        payload.get("domain")
+        or payload.get("target_domain")
+        or payload.get("targetDomain")
+    )
+    if not domain:
+        derived_domains = _derive_safe_target_domains(host)
+        domain = derived_domains[0] if derived_domains else None
     target = {
         "application": _optional_string(payload.get("application") or payload.get("app"), max_length=128),
         "window_title": _optional_string(payload.get("window_title") or payload.get("window"), max_length=255),
         "tab_id": _optional_int(payload.get("tab_id") or payload.get("tabId")),
         "host": host,
         "url": url,
+        "domain": domain,
         "url_pattern": _optional_string(payload.get("url_pattern") or payload.get("urlPattern")),
         "site_label": _optional_string(payload.get("site_label") or payload.get("site")),
     }

@@ -652,6 +652,428 @@ def test_scene_context_rejects_browser_tab_from_different_target_origin(tmp_path
         assert mismatch_results
 
 
+@pytest.mark.parametrize(
+    ("browser_target", "tab_url", "expected_called"),
+    [
+        ({"url": "https://www.zhipin.com/"}, "https://zhipin.com/web/chat/index", True),
+        ({"url": "https://www.zhipin.com/"}, "https://login.zhipin.com/web/user", True),
+        ({"url": "https://www.zhipin.com/"}, "https://m.zhipin.com/web/geek/job", True),
+        ({"url": "https://zhipin.com/web/geek/job", "domain": "zhipin.com"}, "https://www.zhipin.com/web/chat/index", True),
+        ({"url": "https://login.zhipin.com/web/user", "domain": "zhipin.com"}, "https://www.zhipin.com/web/chat/index", True),
+        ({"url": "https://www.zhipin.com/web/geek/job"}, "https://login.zhipin.com/web/chat/index?status=open", True),
+        ({"url": "https://www.zhipin.com/"}, "http://login.zhipin.com/web/user", False),
+        ({"url": "https://www.zhipin.com:8443/"}, "https://login.zhipin.com/web/user", False),
+        ({"url": "https://www.zhipin.com/"}, "https://evilzhipin.com/web/chat/index", False),
+        ({"url": "https://www.zhipin.com/"}, "https://zhipin.com.evil.test/web/chat/index", False),
+        ({"url": "https://www.zhipin.com/"}, "https://example.com/web/chat/index", False),
+        ({"url": "https://recruit.example.test/jobs"}, "https://app.recruit.example.test/jobs", False),
+        ({"url": "https://recruit.example.test/jobs", "domain": "recruit.example.test"}, "https://app.recruit.example.test/jobs", True),
+    ],
+)
+def test_scene_context_enforces_browser_target_domain_boundary(
+    tmp_path: Path,
+    browser_target: dict[str, str],
+    tab_url: str,
+    expected_called: bool,
+) -> None:
+    session_factory = _session_factory(tmp_path)
+    provider = ScriptedProvider(
+        provider_name="scene-scripted",
+        responses=[
+            LLMResponse(tool_calls=[ToolCall(id="tabs", name="browser_list_tabs", arguments={})], finish_reason="tool_calls"),
+            LLMResponse(tool_calls=[ToolCall(id="snapshot", name="browser_snapshot", arguments={"tabId": 9})], finish_reason="tool_calls"),
+            LLMResponse(
+                content="zhipin boundary checked",
+                result_data={
+                    "status": "completed" if expected_called else "blocked",
+                    "summary": "zhipin boundary checked",
+                },
+            ),
+        ],
+    )
+    snapshot_calls: list[dict[str, object]] = []
+    tools = ToolRegistry()
+    tools.register(
+        ToolDefinition(
+            name="browser_list_tabs",
+            description="List browser tabs.",
+            parameters={"type": "object", "properties": {}, "additionalProperties": True},
+            handler=lambda arguments: {
+                "success": True,
+                "tabs": [{"tabId": 9, "url": tab_url, "title": "BOSS 直聘", "active": True}],
+            },
+            metadata={"capabilities": ["browser"], "external_tool": True, "real_environment": True},
+        )
+    )
+    tools.register(
+        ToolDefinition(
+            name="browser_snapshot",
+            description="Capture browser tab.",
+            parameters={"type": "object", "properties": {"tabId": {"type": "integer"}}, "additionalProperties": True},
+            handler=lambda arguments: snapshot_calls.append(dict(arguments))
+            or {
+                "success": True,
+                "url": tab_url,
+                "title": "BOSS 直聘",
+                "elements": [{"role": "link", "text": "岗位管理", "href": "https://www.zhipin.com/web/chat/index"}],
+            },
+            metadata={"capabilities": ["browser"], "external_tool": True, "real_environment": True},
+        )
+    )
+    service = SceneContextService(
+        session_factory=session_factory,
+        provider=provider,
+        tool_registry=tools,
+        plugin_host=PluginHost(),
+    )
+
+    result = service.delegate(
+        {
+            "title": "zhipin target boundary",
+            "instruction": "Recover toward JD sync on the target recruiting site.",
+            "preferred_capabilities": ["browser"],
+            "browser_target": browser_target,
+        }
+    )
+
+    assert bool(snapshot_calls) is expected_called
+    if expected_called:
+        assert result["status"] == "completed"
+    else:
+        assert result["status"] == "blocked"
+        with session_factory() as session:
+            episode = session.query(ExecutionEpisode).one()
+            blocked_results = [
+                item
+                for item in episode.observations
+                if item["type"] == "tool_event"
+                and item["payload"]["kind"] == "tool_result_ready"
+                and item["payload"]["tool_name"] == "browser_snapshot"
+                and item["payload"]["content"].get("error") == "scene_browser_target_mismatch"
+            ]
+            assert blocked_results
+
+
+def test_scene_context_prompt_requires_zhipin_same_site_recovery_before_jd_sync_blocker(tmp_path: Path) -> None:
+    session_factory = _session_factory(tmp_path)
+    provider = ScriptedProvider(
+        provider_name="scene-scripted",
+        responses=[
+            LLMResponse(
+                content="needs recovery",
+                result_data={"status": "blocked", "summary": "needs recovery"},
+            )
+        ],
+    )
+    service = SceneContextService(
+        session_factory=session_factory,
+        provider=provider,
+        tool_registry=ToolRegistry(),
+        plugin_host=PluginHost(),
+    )
+
+    service.delegate(
+        {
+            "title": "JD sync recovery contract",
+            "instruction": "Start JD sync from the already open zhipin page.",
+            "preferred_capabilities": ["browser", "computer"],
+            "browser_target": {"url": "https://www.zhipin.com/", "tabId": 9},
+        }
+    )
+
+    rendered_prompt = "\n".join(message.content for request in provider.captured_requests for message in request.messages)
+    assert "DOMAIN,zhipin.com" in rendered_prompt
+    assert "匹配只看 URL host/domain，忽略 path 与 query" in rendered_prompt
+    assert "目标 host 精确等于 browser_target.domain 或属于其子域才允许视为同一目标站点" in rendered_prompt
+    assert "拼接伪装域名不匹配" in rendered_prompt
+    assert "需要 origin 级比较时仍要求 scheme 和显式端口匹配" in rendered_prompt
+    assert "当前可见页已经在目标站点内但不是招聘管理、岗位列表或岗位详情页，这不是 JD sync 的终局 blocker" in rendered_prompt
+    assert "browser_list_tabs、browser_snapshot/query" in rendered_prompt
+    assert "通过 VirtualHID 执行这些同站点入口、返回、滚动或点击" in rendered_prompt
+    assert "不得硬编码站点选择器或岗位管理精确 URL" in rendered_prompt
+    assert "不得通过浏览器地址栏、直接输入 URL 或 browser 导航工具跳转" in rendered_prompt
+    assert "招聘站点页面恢复/导航点击必须使用 browser 观察到的侧边栏主入口语义：职位管理、推荐牛人、搜索、沟通" in rendered_prompt
+    assert "职位管理页包含标题 职位管理、页签 全部职位/开放中/待开放/审核不通过/已关闭" in rendered_prompt
+    assert "JD sync 只读职位信息，不点击 发布职位、关闭、升级、曝光刷新" in rendered_prompt
+    assert "推荐牛人页包含标题 推荐牛人、推荐/最新、JD 选择器示例如 产品实习生_北京 2-4K" in rendered_prompt
+    assert "实际职位标题、城市、薪资和关键词以本次启用/选中 JD 为准" in rendered_prompt
+    assert "不得为了匹配截图示例而跨 JD" in rendered_prompt
+    assert "沟通页包含 全部/新招呼/沟通中/已约面/已获取简历/已交换电话/已交换微信/收藏/更多" in rendered_prompt
+
+
+@pytest.mark.parametrize(
+    ("label", "click_point"),
+    [
+        ("职位管理", {"x": 88, "y": 240}),
+        ("推荐牛人", {"x": 88, "y": 300}),
+        ("搜索", {"x": 88, "y": 360}),
+        ("沟通", {"x": 88, "y": 420}),
+    ],
+)
+def test_scene_context_allows_recruiting_automation_sidebar_navigation_entries(
+    tmp_path: Path,
+    label: str,
+    click_point: dict[str, int],
+) -> None:
+    result, hid_calls, session_factory = _run_recruiting_site_hid_click_scene(
+        tmp_path,
+        plan_kind="autonomous_recruiting",
+        instruction="Recruiting automation: recover from the current BOSS page.",
+        page_url="https://www.zhipin.com/web/chat/index",
+        page_text="沟通页面",
+        elements=_sidebar_entries(),
+        click_point=click_point,
+        final_status="completed",
+    )
+
+    assert result["status"] == "completed"
+    assert len(hid_calls) == 1
+    with session_factory() as session:
+        episode = session.query(ExecutionEpisode).one()
+        blocked_results = [
+            item
+            for item in episode.observations
+            if item["type"] == "tool_event"
+            and item["payload"]["kind"] == "tool_result_ready"
+            and item["payload"]["tool_name"] == "hid_action"
+            and item["payload"]["content"].get("error") == "scene_recruiting_navigation_target_blocked"
+        ]
+        assert blocked_results == []
+
+
+def test_scene_context_allows_jd_sync_sidebar_job_management_entry(tmp_path: Path) -> None:
+    result, hid_calls, _session_factory_ref = _run_recruiting_site_hid_click_scene(
+        tmp_path,
+        plan_kind="jd_sync",
+        instruction="JD sync: recover from the current BOSS page into job management and sync job descriptions.",
+        page_url="https://www.zhipin.com/web/chat/index",
+        page_text="沟通页面",
+        elements=_sidebar_entries(),
+        click_point={"x": 88, "y": 240},
+        final_status="completed",
+    )
+
+    assert result["status"] == "completed"
+    assert len(hid_calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("element", "click_point", "reason"),
+    [
+        ({"ref": "nav-rules", "text": "招聘规范", "role": "link", "kind": "navigation", "container": "top-nav", "clickPoint": {"x": 510, "y": 72}}, {"x": 510, "y": 72}, "non_recruiting_navigation_target"),
+        ({"ref": "top-chat", "text": "沟通", "role": "link", "kind": "navigation", "container": "top-nav", "clickPoint": {"x": 610, "y": 72}}, {"x": 610, "y": 72}, "requires_allowed_sidebar_entry"),
+        ({"ref": "new-group", "text": "新建分组", "role": "button", "kind": "group_action", "clickPoint": {"x": 260, "y": 190}}, {"x": 260, "y": 190}, "non_recruiting_navigation_target"),
+        ({"ref": "chat-plus", "text": "+", "role": "button", "kind": "group_action", "clickPoint": {"x": 300, "y": 190}}, {"x": 300, "y": 190}, "non_recruiting_navigation_target"),
+        ({"ref": "chat-user", "text": "张三", "role": "link", "kind": "candidate", "clickPoint": {"x": 220, "y": 360}}, {"x": 220, "y": 360}, "non_recruiting_navigation_target"),
+    ],
+)
+def test_scene_context_blocks_non_sidebar_controls_during_recruiting_site_recovery(
+    tmp_path: Path,
+    element: dict[str, object],
+    click_point: dict[str, int],
+    reason: str,
+) -> None:
+    result, hid_calls, session_factory = _run_recruiting_site_hid_click_scene(
+        tmp_path,
+        plan_kind="autonomous_recruiting",
+        instruction="Recruiting automation: recover from the current BOSS page.",
+        page_url="https://www.zhipin.com/web/chat/index",
+        page_text="沟通页面",
+        elements=[*_sidebar_entries(), element],
+        click_point=click_point,
+        final_status="blocked",
+    )
+
+    assert result["status"] == "blocked"
+    assert hid_calls == []
+    with session_factory() as session:
+        episode = session.query(ExecutionEpisode).one()
+        blocked_results = [
+            item["payload"]["content"]
+            for item in episode.observations
+            if item["type"] == "tool_event"
+            and item["payload"]["kind"] == "tool_result_ready"
+            and item["payload"]["tool_name"] == "hid_action"
+            and item["payload"]["content"].get("error") == "scene_recruiting_navigation_target_blocked"
+        ]
+        assert blocked_results
+        assert blocked_results[0]["reason"] == reason
+
+
+@pytest.mark.parametrize(
+    ("label", "click_point"),
+    [
+        ("推荐牛人", {"x": 88, "y": 300}),
+        ("搜索", {"x": 88, "y": 360}),
+        ("沟通", {"x": 88, "y": 420}),
+    ],
+)
+def test_scene_context_blocks_non_job_sidebar_entries_for_jd_sync_recovery(
+    tmp_path: Path,
+    label: str,
+    click_point: dict[str, int],
+) -> None:
+    result, hid_calls, session_factory = _run_recruiting_site_hid_click_scene(
+        tmp_path,
+        plan_kind="jd_sync",
+        instruction="JD sync: recover from the current BOSS page into job management and sync job descriptions.",
+        page_url="https://www.zhipin.com/web/chat/index",
+        page_text="沟通页面",
+        elements=_sidebar_entries(),
+        click_point=click_point,
+        final_status="blocked",
+    )
+
+    assert result["status"] == "blocked"
+    assert hid_calls == []
+    with session_factory() as session:
+        episode = session.query(ExecutionEpisode).one()
+        blocked_results = [
+            item["payload"]["content"]
+            for item in episode.observations
+            if item["type"] == "tool_event"
+            and item["payload"]["kind"] == "tool_result_ready"
+            and item["payload"]["tool_name"] == "hid_action"
+            and item["payload"]["content"].get("error") == "scene_recruiting_navigation_target_blocked"
+        ]
+        assert blocked_results
+        assert blocked_results[0]["reason"] == "jd_sync_requires_job_management_entry"
+
+
+def test_scene_context_allows_jd_sync_job_page_entries_after_job_management_recovery(tmp_path: Path) -> None:
+    result, hid_calls, _session_factory_ref = _run_recruiting_site_hid_click_scene(
+        tmp_path,
+        plan_kind="jd_sync",
+        instruction="JD sync: read job list and job details.",
+        page_url="https://www.zhipin.com/web/geek/job",
+        page_text="职位管理 在招职位",
+        elements=[
+            {"ref": "job-row-1", "text": "高级后端工程师", "role": "link", "kind": "job_row", "href": "https://www.zhipin.com/web/chat/job/edit?encryptId=1", "clickPoint": {"x": 420, "y": 330}},
+            {"ref": "edit-job-1", "text": "编辑", "role": "button", "kind": "job_management_action", "clickPoint": {"x": 760, "y": 330}},
+        ],
+        click_point={"x": 420, "y": 330},
+        final_status="completed",
+    )
+
+    assert result["status"] == "completed"
+    assert len(hid_calls) == 1
+
+
+def test_scene_context_matches_recruiting_navigation_with_document_wrapped_bounds(tmp_path: Path) -> None:
+    result, hid_calls, _session_factory_ref = _run_recruiting_site_hid_click_scene(
+        tmp_path,
+        plan_kind="autonomous_recruiting",
+        instruction="Recruiting automation: recover from the current BOSS page.",
+        page_url="https://www.zhipin.com/web/chat/index",
+        page_text="沟通页面",
+        elements=[
+            {
+                "ref": "nav-search",
+                "text": "搜索",
+                "role": "link",
+                "kind": "navigation",
+                "container": "sidebar",
+                "bounds": {"document": {"x": 72, "y": 340, "width": 88, "height": 40}},
+            }
+        ],
+        click_point={"x": 88, "y": 360},
+        final_status="completed",
+    )
+
+    assert result["status"] == "completed"
+    assert len(hid_calls) == 1
+
+
+def _run_recruiting_site_hid_click_scene(
+    tmp_path: Path,
+    *,
+    plan_kind: str,
+    instruction: str,
+    page_url: str,
+    page_text: str,
+    elements: list[dict[str, object]],
+    click_point: dict[str, int],
+    final_status: str,
+):
+    session_factory = _session_factory(tmp_path)
+    provider = ScriptedProvider(
+        provider_name="scene-scripted",
+        responses=[
+            LLMResponse(tool_calls=[ToolCall(id="snapshot", name="browser_snapshot", arguments={"tabId": 9})], finish_reason="tool_calls"),
+            LLMResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="hid",
+                        name="hid_action",
+                        arguments={
+                            "target": {"tabId": 9},
+                            "primitives": [{"type": "click", "at": click_point, "button": "left"}],
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(
+                content="recruiting site click checked",
+                result_data={"status": final_status, "summary": "recruiting site click checked"},
+            ),
+        ],
+    )
+    hid_calls: list[dict[str, object]] = []
+    tools = ToolRegistry()
+    tools.register(
+        ToolDefinition(
+            name="browser_snapshot",
+            description="Snapshot page.",
+            parameters={"type": "object", "properties": {"tabId": {"type": "integer"}}, "additionalProperties": True},
+            handler=lambda arguments: {
+                "success": True,
+                "tabId": arguments.get("tabId"),
+                "url": page_url,
+                "title": "BOSS 直聘",
+                "text": page_text,
+                "elements": elements,
+            },
+            metadata={"capabilities": ["browser"], "external_tool": True, "real_environment": True},
+        )
+    )
+    tools.register(
+        ToolDefinition(
+            name="hid_action",
+            description="Execute HID.",
+            parameters={"type": "object", "properties": {}, "additionalProperties": True},
+            handler=lambda arguments: hid_calls.append(dict(arguments)) or {"success": True, "ok": True},
+            metadata={"capabilities": ["computer"], "external_tool": True, "real_environment": True},
+        )
+    )
+    service = SceneContextService(
+        session_factory=session_factory,
+        provider=provider,
+        tool_registry=tools,
+        plugin_host=PluginHost(),
+    )
+
+    result = service.delegate(
+        {
+            "title": "Recruiting site navigation gate",
+            "instruction": instruction,
+            "preferred_capabilities": ["browser", "computer"],
+            "context": {"plan_kind": plan_kind},
+            "browser_target": {"url": "https://www.zhipin.com/", "tabId": 9},
+        }
+    )
+    return result, hid_calls, session_factory
+
+
+def _sidebar_entries() -> list[dict[str, object]]:
+    return [
+        {"ref": "nav-jobs", "text": "职位管理", "role": "link", "kind": "navigation", "container": "sidebar", "clickPoint": {"x": 88, "y": 240}},
+        {"ref": "nav-recommend", "text": "推荐牛人", "role": "link", "kind": "navigation", "container": "sidebar", "clickPoint": {"x": 88, "y": 300}},
+        {"ref": "nav-search", "text": "搜索", "role": "link", "kind": "navigation", "container": "sidebar", "clickPoint": {"x": 88, "y": 360}},
+        {"ref": "nav-chat", "text": "沟通", "role": "link", "kind": "navigation", "container": "sidebar", "clickPoint": {"x": 88, "y": 420}},
+    ]
+
+
 def test_scene_context_derives_browser_target_from_instruction_url(tmp_path: Path) -> None:
     session_factory = _session_factory(tmp_path)
     open_calls: list[dict[str, object]] = []
