@@ -236,6 +236,8 @@ def test_jd_sync_run_requires_only_saved_entry_url(tmp_path, monkeypatch) -> Non
     assert runtime_metadata["jd_sync_state"]["pending_job_keys"] == []
     assert "任务范围：" in runtime_metadata["instruction"]
     assert "- 从配置的招聘网站目标网页出发，目标网页可以是该网站任意可访问页面。" in runtime_metadata["instruction"]
+    assert "- 本地 JD 库为空是 JD Sync 的正常启动状态，不是 blocker" in runtime_metadata["instruction"]
+    assert "- 本轮第一次动作必须进入 scene/browser/HID 链路：查找已有 zhipin 页签、同页恢复到职位管理、观察职位列表" in runtime_metadata["instruction"]
     assert "- 根据页面可见导航和内容自行找到职位列表与职位详情。" in runtime_metadata["instruction"]
     assert "- 如果页面动作失败但仍处于同源站点，应先恢复后继续：" in runtime_metadata["instruction"]
     assert "单次点击、返回、滚动或注入超时不是任务终局" in runtime_metadata["instruction"]

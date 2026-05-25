@@ -242,7 +242,13 @@ class InteractionEngine:
                 temperature=self.config.temperature,
                 top_p=self.config.top_p,
                 stop_sequences=list(self.config.stop_sequences),
-                tool_choice=self.config.tool_choice,
+                tool_choice=_tool_choice_for_invocation(
+                    configured=self.config.tool_choice,
+                    runtime=self.config.runtime,
+                    tools=self.config.tools,
+                    history=self.history.snapshot(),
+                    invocation_index=invocation_index,
+                ),
                 thinking=dict(self.config.thinking) if self.config.thinking is not None else None,
                 reasoning=dict(self.config.reasoning) if self.config.reasoning is not None else None,
                 text_format=dict(self.config.text_format) if self.config.text_format is not None else None,
@@ -863,6 +869,102 @@ def _provider_error_payload(exc: ProviderError) -> dict[str, object]:
     if exc.retry_after_seconds is not None:
         payload["retry_after_seconds"] = exc.retry_after_seconds
     return payload
+
+
+def _tool_choice_for_invocation(
+    *,
+    configured: str | dict[str, object] | None,
+    runtime: dict[str, object],
+    tools: list[ToolDefinition],
+    history: list[LLMMessage],
+    invocation_index: int,
+) -> str | dict[str, object] | None:
+    if configured is not None:
+        return configured
+    if _requires_jd_sync_bootstrap_scene_tool(
+        runtime=runtime,
+        tools=tools,
+        history=history,
+        invocation_index=invocation_index,
+    ):
+        return "delegate_scene_context"
+    return None
+
+
+def _requires_jd_sync_bootstrap_scene_tool(
+    *,
+    runtime: dict[str, object],
+    tools: list[ToolDefinition],
+    history: list[LLMMessage],
+    invocation_index: int,
+) -> bool:
+    if invocation_index != 0:
+        return False
+    if not _runtime_is_jd_sync(runtime):
+        return False
+    if not any(tool.name == "delegate_scene_context" for tool in tools):
+        return False
+    if _history_has_tool_use(history, "delegate_scene_context"):
+        return False
+    return _jd_sync_state_needs_bootstrap_scene(runtime)
+
+
+def _runtime_is_jd_sync(runtime: dict[str, object]) -> bool:
+    constraints = runtime.get("constraints")
+    if not isinstance(constraints, dict):
+        constraints = {}
+    context_hints = runtime.get("context_hints")
+    if not isinstance(context_hints, dict):
+        context_hints = {}
+    plan_kind = str(
+        runtime.get("plan_kind")
+        or constraints.get("plan_kind")
+        or context_hints.get("plan_kind")
+        or runtime.get("run_kind")
+        or constraints.get("run_kind")
+        or ""
+    ).strip().lower()
+    return plan_kind in {"jd_sync", "job_description_sync", "recruiting_jd_sync"}
+
+
+def _jd_sync_state_needs_bootstrap_scene(runtime: dict[str, object]) -> bool:
+    constraints = runtime.get("constraints")
+    state_candidates = [runtime.get("jd_sync_state")]
+    if isinstance(constraints, dict):
+        state_candidates.append(constraints.get("jd_sync_state"))
+    for state in state_candidates:
+        if not isinstance(state, dict):
+            continue
+        if _jd_sync_state_has_progress(state):
+            return False
+    return True
+
+
+def _jd_sync_state_has_progress(state: dict[str, object]) -> bool:
+    for key in (
+        "jobs_by_key",
+        "pending_job_keys",
+        "completed_job_keys",
+        "inactive_job_keys",
+        "evidence_refs",
+        "recovery_attempts",
+        "writeback_results",
+    ):
+        value = state.get(key)
+        if isinstance(value, dict) and value:
+            return True
+        if isinstance(value, list) and value:
+            return True
+    return False
+
+
+def _history_has_tool_use(history: list[LLMMessage], tool_name: str) -> bool:
+    for message in history:
+        if message.role == "assistant" and any(use.name == tool_name for use in message.tool_uses):
+            return True
+        if message.role == "tool" and message.name == tool_name:
+            return True
+    return False
 
 
 def _turn_failed_payload(exc: Exception) -> dict[str, object]:

@@ -318,6 +318,44 @@ def test_provider_options_are_mapped_only_when_supported() -> None:
     assert "truncation" not in anthropic_payload
 
 
+def test_named_tool_choice_maps_to_provider_specific_payloads() -> None:
+    request = LLMRequest(
+        id="req-1",
+        turn_id="turn-1",
+        invocation_id="llm-1",
+        messages=[LLMMessage(role="user", content="sync jd")],
+        tools=[
+            ToolSchema(
+                name="delegate_scene_context",
+                description="Delegate scene.",
+                input_schema={"type": "object"},
+            )
+        ],
+        tool_choice="delegate_scene_context",
+    )
+    captured: dict[str, dict[str, object]] = {}
+
+    def openai_transport(url, payload, headers, timeout):
+        captured["openai"] = dict(payload)
+        return {"id": "resp-openai", "output": []}
+
+    def anthropic_transport(url, payload, headers, timeout):
+        captured["anthropic"] = dict(payload)
+        return {"id": "msg-anthropic", "content": []}
+
+    OpenAIProvider(
+        ProviderConfig(provider_name="openai", model="gpt", base_url="https://api.openai.com/v1", api_key="key"),
+        transport=openai_transport,
+    ).invoke(request)
+    AnthropicProvider(
+        ProviderConfig(provider_name="anthropic", model="claude", base_url="https://api.anthropic.com", api_key="key"),
+        transport=anthropic_transport,
+    ).invoke(request)
+
+    assert captured["openai"]["tool_choice"] == {"type": "function", "name": "delegate_scene_context"}
+    assert captured["anthropic"]["tool_choice"] == {"type": "tool", "name": "delegate_scene_context"}
+
+
 def test_openai_responses_history_flattens_assistant_tool_calls() -> None:
     captured: dict[str, object] = {}
 

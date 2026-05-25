@@ -990,7 +990,9 @@ def _anthropic_tool_payload(tool: ToolSchema) -> dict[str, Any]:
 
 def _openai_tool_choice(choice: str | dict[str, Any]) -> str | dict[str, Any]:
     if isinstance(choice, str):
-        return choice
+        if choice in {"auto", "none", "required"}:
+            return choice
+        return {"type": "function", "name": choice}
     return dict(choice)
 
 

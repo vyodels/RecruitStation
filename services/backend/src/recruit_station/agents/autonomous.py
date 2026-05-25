@@ -1940,6 +1940,9 @@ def _definition_system_prompt(definition: AgentDefinition | None, *, agent_kind:
 
 def _append_jd_sync_runtime_invariants(prompt: str) -> str:
     invariants = (
+        "JD 同步启动契约：本地 JD 库为空是正常启动状态，不是 blocker；不得要求已有本地 JD、候选人或候选上下文作为前置条件。"
+        "本轮第一次动作必须进入 scene/browser/HID 链路：查找已有 zhipin 页签、同页恢复到职位管理、观察职位列表；"
+        "在没有当前 run 的 scene/browser 证据前，不得只用 assistant 回复无法继续。"
         "JD 同步运行约束：如果只完成部分职位详情读取，可以写入已完整确认的 JD 作为进度，但不得把本轮作为成功终局。"
         "在完成全量职位发现、全量详情读取、更新/下架识别和生效 JD 选择前，必须继续执行或返回明确的恢复条件。"
         "遇到点击、返回、滚动、光标干扰、按键状态异常或单次注入超时等可恢复执行异常时，不得在第一次失败后结束；"

@@ -119,6 +119,8 @@ def jd_sync_scene_instruction(*, sync_mode: str, max_job_descriptions: int | Non
         "enumerate_open_jobs -> open_job_detail -> extract_detail -> validate_detail -> writeback_jd -> "
         "verify_coverage -> completed。"
         f"{scope_rule}"
+        "本地 JD 库为空是正常启动状态，不是 blocker；JD Sync 的职责就是从已登录页面发现并同步 JD。"
+        "首次 scene 必须先查找已有 zhipin/BOSS 页签、同页恢复到职位管理、观察职位列表。"
         "从当前同源招聘网页出发，使用 browser 只读观察和 computer/HID 页面内操作；"
         "browser-mcp 不能点击、导航、打开新页、操作地址栏或执行写动作，执行只允许走 VirtualHID。"
         "不得主动聚焦浏览器地址栏、输入 URL、粘贴 URL、打开新 BOSS/zhipin 标签或窗口。"

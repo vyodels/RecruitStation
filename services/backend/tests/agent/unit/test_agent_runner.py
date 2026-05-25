@@ -151,6 +151,88 @@ def test_runner_projects_normalized_tool_input_in_tool_started_event() -> None:
     assert started.data["input"]["output_contract"]["result_data_required"] is True
 
 
+def test_jd_sync_empty_state_first_request_requires_scene_tool_and_hides_candidate_tools() -> None:
+    provider = ScriptedProvider(provider_name="jd-sync-scripted", responses=[LLMResponse(content="无法继续。")])
+    registry = ToolRegistry()
+    registry.register(
+        build_delegate_scene_context_tool(
+            lambda arguments: {
+                "status": "partial",
+                "result_data": {"status": "partial", "observed_jobs": [], "completed_job_details": []},
+            },
+        )
+    )
+    registry.register(
+        ToolDefinition(
+            name="upsert_candidate",
+            description="Must not be available to JD sync.",
+            parameters={"type": "object", "additionalProperties": True},
+            handler=lambda arguments: {"candidate_id": "candidate-1"},
+            category="core",
+        )
+    )
+
+    run_agent_turn(
+        provider=provider,
+        tool_registry=registry,
+        agent_definition_id=None,
+        conversation_id="jd-sync-primary",
+        initial_messages=[],
+        turn_input="同步招聘站点 JD",
+        max_llm_invocations=1,
+        runtime={
+            "constraints": {
+                "plan_kind": "jd_sync",
+                "jd_sync_state": {
+                    "jobs_by_key": {},
+                    "pending_job_keys": [],
+                    "completed_job_keys": [],
+                    "inactive_job_keys": [],
+                    "evidence_refs": [],
+                    "recovery_attempts": [],
+                    "writeback_results": [],
+                },
+            }
+        },
+    )
+
+    request = provider.captured_requests[0]
+    assert request.tool_choice == "delegate_scene_context"
+    assert "delegate_scene_context" in {tool.name for tool in request.tools}
+    assert "upsert_candidate" not in {tool.name for tool in request.tools}
+
+
+def test_jd_sync_top_level_existing_state_does_not_force_bootstrap_scene_tool() -> None:
+    provider = ScriptedProvider(provider_name="jd-sync-scripted", responses=[LLMResponse(content="继续处理已有状态。")])
+    registry = ToolRegistry()
+    registry.register(build_delegate_scene_context_tool(lambda arguments: {"status": "partial"}))
+
+    run_agent_turn(
+        provider=provider,
+        tool_registry=registry,
+        agent_definition_id=None,
+        conversation_id="jd-sync-primary",
+        initial_messages=[],
+        turn_input="继续 JD 同步",
+        max_llm_invocations=1,
+        runtime={
+            "constraints": {"plan_kind": "jd_sync"},
+            "jd_sync_state": {
+                "jobs_by_key": {"job-1": {"title": "销售工程师", "sync_state": "pending"}},
+                "pending_job_keys": ["job-1"],
+                "completed_job_keys": [],
+                "inactive_job_keys": [],
+                "evidence_refs": ["scene:turn-1"],
+                "recovery_attempts": [],
+                "writeback_results": [],
+            },
+        },
+    )
+
+    assert provider.captured_requests[0].tool_choice is None
+    assert "delegate_scene_context" in {tool.name for tool in provider.captured_requests[0].tools}
+
+
 def test_runner_can_resolve_terminal_status_from_final_output_text() -> None:
     provider = ScriptedProvider(provider_name="autonomous-scripted", responses=[LLMResponse(content="结果：已阻塞，等待恢复。")])
 
@@ -231,6 +313,24 @@ def test_jd_sync_continuation_rejects_partial_final_output_after_tool_calls() ->
     assert continuation is not None
     assert "即使本轮已经调用过 scene 或业务工具" in continuation
     assert "继续同一个 turn" in continuation
+
+
+def test_jd_sync_continuation_treats_empty_local_jd_library_as_scene_bootstrap_not_blocker() -> None:
+    resolver = _final_output_continuation_resolver(agent_kind="jd_sync")
+    assert resolver is not None
+
+    continuation = resolver(
+        "当前无法继续执行 JD 同步：本地工作区中没有可用的 JD 记录可供推进，"
+        "且我这边未获得可用于观察/操作 zhipin 浏览器会话的有效页面证据。",
+        [],
+        [],
+        0,
+        {},
+    )
+
+    assert continuation is not None
+    assert "本轮没有调用任何 scene 或业务工具" in continuation
+    assert "必须调用 delegate_scene_context" in continuation
 
 
 def test_jd_sync_continuation_respects_explicit_attempt_limit() -> None:
