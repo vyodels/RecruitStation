@@ -342,6 +342,11 @@ class SceneContextService:
                 timeout_seconds=scene_turn_timeout_seconds,
             )
             blockers = _collect_blockers(last_outcome, engine_events)
+        jd_sync_observation_repair = _force_jd_sync_job_management_snapshot_if_needed(
+            request=request,
+            scene_tool_registry=scene_tool_registry,
+            engine_events=engine_events,
+        )
         snapshot_ids.extend(
             _append_environment_snapshots(
                 session=session,
@@ -371,6 +376,7 @@ class SceneContextService:
             outcome=last_outcome,
             blockers=blockers,
             snapshot_ids=snapshot_ids,
+            jd_sync_observation_repair=jd_sync_observation_repair,
         )
 
     def _finalize_success(
@@ -384,6 +390,7 @@ class SceneContextService:
         outcome: AgentTurnOutcome,
         blockers: list[dict[str, Any]],
         snapshot_ids: list[str],
+        jd_sync_observation_repair: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         blockers = list(blockers or [])
         evidence_blocker = _missing_required_scene_browser_hid_evidence_blocker(episode)
@@ -391,6 +398,11 @@ class SceneContextService:
             blockers.append(evidence_blocker)
         result_data = _scene_result_data(outcome, output_contract=output_contract)
         result_data = _normalize_scene_result_contract_data(result_data, output_contract)
+        if jd_sync_observation_repair is not None:
+            result_data = {
+                **result_data,
+                "jd_sync_observation_repair": jd_sync_observation_repair,
+            }
         jd_sync_snapshot_blocker = _jd_sync_requires_job_list_snapshot_blocker(episode, output_contract)
         if jd_sync_snapshot_blocker is not None:
             blockers.append(jd_sync_snapshot_blocker)
@@ -1572,6 +1584,54 @@ def _scene_tool_registry(
             cloned.handler = _handler
         registry.register(cloned)
     return registry
+
+
+def _force_jd_sync_job_management_snapshot_if_needed(
+    *,
+    request: dict[str, Any],
+    scene_tool_registry: ToolRegistry,
+    engine_events: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    if not _is_jd_sync_result_contract(_as_dict(request.get("output_contract"))):
+        return None
+    if _events_have_successful_jd_sync_page_observation(engine_events):
+        return None
+    target = _events_identified_boss_job_management_target(engine_events)
+    if target is None:
+        return None
+    next_action = _jd_sync_job_management_snapshot_next_action(target)
+    if "browser_snapshot" not in scene_tool_registry.tools:
+        return {
+            "status": "requires_next_action",
+            "reason": "browser_snapshot_unavailable",
+            "next_action": next_action,
+        }
+
+    event_seq = max((_safe_int(event.get("engine_output_seq")) for event in engine_events), default=0) + 1
+    result = scene_tool_registry.execute("browser_snapshot", dict(next_action["arguments"]))
+    engine_events.append(
+        {
+            "type": "tool_event",
+            "engine_output_seq": event_seq,
+            "payload": {
+                "kind": "tool_result_ready",
+                "tool_name": "browser_snapshot",
+                "tool_use_id": "jd-sync-observation-repair",
+                "tool_call_id": "jd-sync-observation-repair",
+                "is_error": bool(result.is_error),
+                "content": result.output,
+            },
+            "recorded_at": utcnow().isoformat(),
+        }
+    )
+    status = "completed" if not result.is_error and _tool_result_content_succeeded(result.output) else "blocked"
+    return {
+        "status": status,
+        "reason": "forced_browser_snapshot_after_job_management_tab_identification",
+        "tool_name": "browser_snapshot",
+        "arguments": dict(result.arguments or next_action["arguments"]),
+        "next_action": next_action,
+    }
 
 
 def _is_allowed_scene_tool(tool: ToolDefinition) -> bool:
@@ -3578,14 +3638,18 @@ def _jd_sync_requires_job_list_snapshot_blocker(episode: Any, contract: dict[str
         return None
     if _episode_has_successful_jd_sync_page_observation(episode):
         return None
-    if not _episode_identified_boss_job_management_tab(episode):
+    target = _episode_identified_boss_job_management_target(episode)
+    if target is None:
         return None
+    next_action = _jd_sync_job_management_snapshot_next_action(target)
     return {
         "kind": "jd_sync_requires_job_list_snapshot_or_detail",
         "message": (
             "JD sync identified a BOSS job-management tab but did not observe the job list or job detail page. "
             "Call browser_snapshot or an equivalent page observation tool before returning a final JD sync result."
         ),
+        "recoverable": True,
+        "next_action": next_action,
     }
 
 
@@ -3601,15 +3665,106 @@ def _episode_has_successful_jd_sync_page_observation(episode: Any) -> bool:
 
 
 def _episode_identified_boss_job_management_tab(episode: Any) -> bool:
-    for payload in _episode_successful_tool_result_payloads(episode):
+    return _episode_identified_boss_job_management_target(episode) is not None
+
+
+def _episode_identified_boss_job_management_target(episode: Any) -> dict[str, Any] | None:
+    return _successful_payloads_identified_boss_job_management_target(
+        _episode_successful_tool_result_payloads(episode)
+    )
+
+
+def _events_have_successful_jd_sync_page_observation(events: list[dict[str, Any]]) -> bool:
+    for payload in _events_successful_tool_result_payloads(events):
+        tool_name = str(payload.get("tool_name") or "").strip()
+        if tool_name not in _SCENE_BROWSER_PAGE_OBSERVATION_TOOL_NAMES:
+            continue
+        content = payload.get("content")
+        if _jd_sync_observation_content_has_job_list_or_detail(content):
+            return True
+    return False
+
+
+def _events_identified_boss_job_management_target(events: list[dict[str, Any]]) -> dict[str, Any] | None:
+    return _successful_payloads_identified_boss_job_management_target(
+        _events_successful_tool_result_payloads(events)
+    )
+
+
+def _successful_payloads_identified_boss_job_management_target(payloads: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for payload in payloads:
         tool_name = str(payload.get("tool_name") or "").strip()
         if tool_name not in _SCENE_BROWSER_TARGET_IDENTIFICATION_TOOL_NAMES:
             continue
-        for url in _browser_result_urls(payload.get("content")):
-            if _is_boss_job_management_url(url):
-                return True
-    return False
+        for target in _browser_result_tab_candidates(payload.get("content")):
+            if _is_boss_job_management_url(str(target.get("url") or "")):
+                return target
+    return None
 
+
+def _events_successful_tool_result_payloads(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    payloads: list[dict[str, Any]] = []
+    for event in events:
+        if str(event.get("type") or "") != "tool_event":
+            continue
+        payload = _as_dict(event.get("payload"))
+        if payload.get("kind") != "tool_result_ready":
+            continue
+        if _tool_event_result_succeeded(event):
+            payloads.append(payload)
+    return payloads
+
+
+def _jd_sync_job_management_snapshot_next_action(target: dict[str, Any]) -> dict[str, Any]:
+    arguments: dict[str, Any] = {
+        "expectedHost": "www.zhipin.com",
+        "expectedOrigin": "https://www.zhipin.com",
+        "targetPolicy": "same-origin",
+        "includeText": True,
+        "clickableLimit": 120,
+    }
+    tab_id = target.get("tabId")
+    if tab_id is None:
+        tab_id = target.get("tab_id")
+    if tab_id is not None:
+        arguments["tabId"] = tab_id
+    return {
+        "tool_name": "browser_snapshot",
+        "arguments": arguments,
+    }
+
+
+def _browser_result_tab_candidates(value: Any) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+
+    def collect(candidate: Any) -> None:
+        if isinstance(candidate, dict):
+            url = _optional_string(candidate.get("url") or candidate.get("href") or candidate.get("external_url"))
+            if url:
+                target = {"url": url}
+                for source_key, target_key in (("tabId", "tabId"), ("tab_id", "tab_id"), ("id", "tabId"), ("title", "title")):
+                    if candidate.get(source_key) is not None:
+                        target[target_key] = candidate.get(source_key)
+                candidates.append(target)
+            for key in ("snapshot", "tab", "target", "tabs", "items", "results", "observed_entities"):
+                nested = candidate.get(key)
+                if isinstance(nested, (dict, list)):
+                    collect(nested)
+            return
+        if isinstance(candidate, list):
+            for item in candidate:
+                collect(item)
+
+    collect(value)
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in candidates:
+        key = (str(item.get("tabId") or item.get("tab_id") or ""), str(item.get("url") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
 
 def _episode_successful_tool_result_payloads(episode: Any) -> list[dict[str, Any]]:
     payloads: list[dict[str, Any]] = []

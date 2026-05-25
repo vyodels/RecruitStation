@@ -1595,12 +1595,20 @@ def test_scene_context_blocks_jd_sync_candidate_chat_result_without_job_evidence
     assert result["blockers"][0]["kind"] == "jd_sync_wrong_page_candidate_context"
 
 
-def test_scene_context_blocks_jd_sync_final_after_only_job_tab_identification(tmp_path: Path) -> None:
+def test_scene_context_forces_jd_sync_snapshot_after_only_job_tab_identification(tmp_path: Path) -> None:
     session_factory = _session_factory(tmp_path)
     final_payload = {
-        "status": "completed",
+        "status": "blocked",
         "summary": "Active tab is already the BOSS job list page.",
+        "observed_jobs": [],
+        "completed_job_details": [],
+        "inactive_or_closed_jobs": [],
+        "activation_entry_observed": False,
+        "blockers": [],
+        "limitations": [],
+        "evidence": [],
     }
+    snapshot_calls: list[dict[str, object]] = []
     provider = ScriptedProvider(
         provider_name="scene-scripted",
         responses=[
@@ -1650,6 +1658,22 @@ def test_scene_context_blocks_jd_sync_final_after_only_job_tab_identification(tm
             metadata={"capabilities": ["browser", "document"], "external_tool": True, "real_environment": True},
         )
     )
+    tools.register(
+        ToolDefinition(
+            name="browser_snapshot",
+            description="Observe browser page.",
+            parameters={"type": "object", "properties": {}, "additionalProperties": True},
+            handler=lambda arguments: snapshot_calls.append(dict(arguments)) or {
+                "success": True,
+                "tabId": arguments.get("tabId"),
+                "url": "https://www.zhipin.com/web/chat/job/list",
+                "title": "职位管理",
+                "text": "职位管理 全部职位 开放中 待开放 审核不通过 已关闭",
+                "elements": [{"role": "tab", "text": "全部职位"}],
+            },
+            metadata={"capabilities": ["browser", "document"], "external_tool": True, "real_environment": True},
+        )
+    )
     service = SceneContextService(
         session_factory=session_factory,
         provider=provider,
@@ -1682,15 +1706,26 @@ def test_scene_context_blocks_jd_sync_final_after_only_job_tab_identification(tm
 
     assert result["status"] == "blocked"
     assert result["result_data"]["status"] == "blocked"
-    assert result["result_data"]["reported_status"] == "completed"
     assert result["result_data"]["observed_jobs"] == []
     assert result["result_data"]["completed_job_details"] == []
     assert result["result_data"]["inactive_or_closed_jobs"] == []
     assert result["result_data"]["activation_entry_observed"] is False
     assert result["result_data"]["limitations"] == []
     assert result["result_data"]["evidence"] == []
-    assert result["result_data"]["jd_sync_observation_guard"]["reason"] == "jd_sync_requires_job_list_snapshot_or_detail"
-    assert [blocker["kind"] for blocker in result["blockers"]] == ["jd_sync_requires_job_list_snapshot_or_detail"]
+    assert snapshot_calls == [
+        {
+            "tabId": 9,
+            "expectedHost": "www.zhipin.com",
+            "expectedOrigin": "https://www.zhipin.com",
+            "targetPolicy": "same-origin",
+            "includeText": True,
+            "clickableLimit": 120,
+        }
+    ]
+    assert result["result_data"]["jd_sync_observation_repair"]["status"] == "completed"
+    assert result["result_data"]["jd_sync_observation_repair"]["tool_name"] == "browser_snapshot"
+    assert "jd_sync_observation_guard" not in result["result_data"]
+    assert [blocker["kind"] for blocker in result["blockers"]] == []
     assert "output_contract_incomplete" not in json.dumps(result["blockers"], ensure_ascii=False)
 
 
