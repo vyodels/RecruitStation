@@ -6,8 +6,11 @@ from recruit_station.agent_runtime.types import LLMMessage
 from recruit_station.capabilities.tools import ToolDefinition, ToolRegistry, build_delegate_scene_context_tool
 from recruit_station.agents.autonomous import (
     _final_output_continuation_resolver,
+    _jd_sync_result_data_needs_tool_continuation,
     _jd_sync_recoverable_scene_retry_needed,
+    _jd_sync_scene_result_needs_continuation,
     _outcome_from_final_output_text,
+    _outcome_from_structured_result_data,
 )
 from recruit_station.product_adapters.agent_runner import run_agent_turn
 from recruit_station.product_adapters.context_builder import build_assistant_turn_context, build_autonomous_turn_context
@@ -359,6 +362,24 @@ def test_jd_sync_continuation_reads_recoverable_scene_tool_result_even_with_blan
 
     assert continuation is not None
     assert "继续同一个 turn" in continuation
+
+
+def test_jd_sync_continuation_treats_in_progress_scene_result_as_recoverable() -> None:
+    result_data = {
+        "status": "in_progress",
+        "completed_job_details": [
+            {
+                "title": "产品实习生",
+                "description": "岗位职责、任职要求、地点、部门等完整职位详情已在 scene 证据中确认可见。",
+                "requirements": "完整任职要求已在职位详情页中确认可见。",
+            }
+        ],
+        "remaining_work": ["read concrete responsibilities and requirements before writeback"],
+    }
+
+    assert _outcome_from_structured_result_data(result_data) == ("continue", "continue")
+    assert _jd_sync_result_data_needs_tool_continuation(result_data)
+    assert _jd_sync_scene_result_needs_continuation({"status": "in_progress", "result_data": result_data})
 
 
 def test_jd_sync_continuation_retries_after_boss_main_navigation_recovery() -> None:

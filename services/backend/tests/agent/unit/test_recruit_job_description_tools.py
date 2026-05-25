@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import pytest
+from sqlalchemy import func, select
 
 from recruit_station.core.settings import AppSettings
+from recruit_station.models.domain import Candidate, CandidateApplication
 from recruit_station.plugins.recruit.toolkit import list_job_descriptions, upsert_job_description
 from recruit_station.services.container import AppContainer
 
@@ -270,6 +272,65 @@ def test_jd_sync_upsert_rejects_new_or_draft_job_url(tmp_path) -> None:
         )
 
     assert list_job_descriptions(container.session_factory) == []
+
+
+def test_jd_sync_upsert_rejects_placeholder_detail_assertions_without_candidate_writes(tmp_path) -> None:
+    container = _build_container(tmp_path)
+
+    with pytest.raises(ValueError, match="concrete page-derived responsibilities"):
+        upsert_job_description(
+            container.session_factory,
+            title="产品实习生",
+            location="北京",
+            employment_type="全职",
+            status="active",
+            source="jd_sync",
+            platform="boss_zhipin",
+            external_id="boss-product-intern-001",
+            external_url="https://www.zhipin.com/web/geek/job?encryptId=boss-product-intern-001",
+            description="岗位职责、任职要求、地点、部门等完整职位详情已在 scene 证据中确认可见。",
+            requirements="完整任职要求已在职位详情页中确认可见。",
+            sync_metadata={
+                "detail_complete": True,
+                "observed_detail_url": "https://www.zhipin.com/web/geek/job?encryptId=boss-product-intern-001",
+                "blockers": [],
+                "missing_fields": [],
+            },
+            _runtime_constraints={"plan_kind": "jd_sync"},
+        )
+
+    assert list_job_descriptions(container.session_factory) == []
+    with container.session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(Candidate)) == 0
+        assert session.scalar(select(func.count()).select_from(CandidateApplication)) == 0
+
+
+def test_jd_sync_upsert_accepts_concrete_page_detail_text(tmp_path) -> None:
+    container = _build_container(tmp_path)
+
+    stored = upsert_job_description(
+        container.session_factory,
+        title="产品实习生",
+        location="北京",
+        employment_type="全职",
+        status="active",
+        source="jd_sync",
+        platform="boss_zhipin",
+        external_id="boss-product-intern-002",
+        external_url="https://www.zhipin.com/web/geek/job?encryptId=boss-product-intern-002",
+        description="负责产品需求调研、竞品分析、原型文档整理，并跟进研发和测试环节的问题闭环。",
+        requirements="本科及以上在读，熟悉产品文档和数据分析，沟通主动，能够每周到岗四天以上。",
+        sync_metadata={
+            "detail_complete": True,
+            "observed_detail_url": "https://www.zhipin.com/web/geek/job?encryptId=boss-product-intern-002",
+            "blockers": [],
+            "missing_fields": [],
+        },
+        _runtime_constraints={"plan_kind": "jd_sync"},
+    )
+
+    assert stored["action"] == "created"
+    assert stored["job_description"]["source"] == "jd_sync"
 
 
 class _FakeUrlResponse:

@@ -926,6 +926,8 @@ def _outcome_from_structured_result_data(value: Any) -> tuple[str, str] | None:
         return "error", "escalate"
     if execution_status in {"blocked", "blocked_environment", "escalate"}:
         return "escalate", "escalate"
+    if execution_status in {"in_progress", "partial", "incomplete", "continuable", "continue", "pending", "needs_continuation"}:
+        return "continue", "continue"
     if execution_status in {"completed", "complete", "success", "done"}:
         return "complete", "run_done"
     return None
@@ -1483,9 +1485,16 @@ def _jd_sync_result_data_needs_tool_continuation(value: Any) -> bool:
     if not isinstance(value, dict) or not value:
         return False
     status = str(value.get("status") or value.get("execution_status") or value.get("result_status") or "").strip().lower()
-    if status in {"partial", "incomplete", "needs_continuation", "blocked_partial"}:
+    if status in {"partial", "incomplete", "in_progress", "continuable", "continue", "pending", "needs_continuation", "blocked_partial"}:
         return True
-    for key in ("remaining_jobs", "unread_details", "remaining_items", "pending_jobs", "unfinished_jobs"):
+    for key in (
+        "remaining_jobs",
+        "unread_details",
+        "remaining_items",
+        "pending_jobs",
+        "unfinished_jobs",
+        "remaining_work",
+    ):
         items = value.get(key)
         if isinstance(items, (list, tuple, dict, set)) and len(items) > 0:
             return True
@@ -1517,7 +1526,7 @@ def _jd_sync_scene_result_needs_continuation(value: Any) -> bool:
         return False
 
     status = str(value.get("status") or value.get("execution_status") or value.get("result_status") or "").strip().lower()
-    if status in {"partial", "incomplete", "needs_continuation", "blocked_partial"}:
+    if status in {"partial", "incomplete", "in_progress", "continuable", "continue", "pending", "needs_continuation", "blocked_partial"}:
         return True
     if status == "blocked" and _jd_sync_text_has_recoverable_scene_boundary(text):
         return True

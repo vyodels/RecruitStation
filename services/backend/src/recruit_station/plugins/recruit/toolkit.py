@@ -181,6 +181,8 @@ def upsert_job_description(
         _validate_jd_sync_current_run_evidence(
             job_description_id=job_description_id,
             external_url=normalized_external_url,
+            description=None if description is _UNSET else _normalize_optional_text(description),
+            requirements=None if requirements is _UNSET else _normalize_optional_text(requirements),
             detail_metadata=normalized_detail_metadata,
             sync_metadata=normalized_sync_metadata,
         )
@@ -1408,15 +1410,25 @@ def _validate_jd_sync_current_run_evidence(
     *,
     job_description_id: str | None,
     external_url: str | None,
+    description: str | None,
+    requirements: str | None,
     detail_metadata: dict[str, Any] | None,
     sync_metadata: dict[str, Any] | None,
 ) -> None:
     metadata = {**dict(detail_metadata or {}), **dict(sync_metadata or {})}
+    if not _metadata_truthy(metadata.get("detail_complete")):
+        raise ValueError("jd_sync upsert requires detail_complete=true after reading concrete current-page JD details.")
+    if _metadata_has_items(metadata.get("blockers")):
+        raise ValueError("jd_sync upsert cannot save while blockers are present.")
+    if _metadata_has_items(metadata.get("missing_fields")):
+        raise ValueError("jd_sync upsert cannot save while required JD detail fields are missing.")
     if external_url and _is_new_or_draft_jd_url(external_url):
         raise ValueError("jd_sync upsert requires a published/current JD detail URL, not a new or draft job form.")
     observed_detail_url = _normalize_optional_text(metadata.get("observed_detail_url"))
     if observed_detail_url and _is_new_or_draft_jd_url(observed_detail_url):
         raise ValueError("jd_sync upsert requires a published/current JD detail URL, not a new or draft job form.")
+    if not (external_url or observed_detail_url):
+        raise ValueError("jd_sync upsert requires a current-run observed_detail_url or external_url.")
     forbidden_keys = {
         "observed_from_memory_run",
         "memory_run",
@@ -1449,6 +1461,10 @@ def _validate_jd_sync_current_run_evidence(
         raise ValueError("jd_sync upsert requires current-run page evidence; historical memory or local-JD notes are not allowed.")
     if job_description_id and not _normalize_optional_text(job_description_id):
         raise ValueError("job_description_id must not be blank")
+    if not _is_concrete_jd_detail_text(description, field_name="description"):
+        raise ValueError("jd_sync upsert requires concrete page-derived responsibilities in description, not a generic assertion.")
+    if not _is_concrete_jd_detail_text(requirements, field_name="requirements"):
+        raise ValueError("jd_sync upsert requires concrete page-derived requirements text, not a generic assertion.")
 
 
 def _is_new_or_draft_jd_url(value: str) -> bool:
@@ -1464,6 +1480,57 @@ def _metadata_truthy(value: Any) -> bool:
     if value is None:
         return False
     return str(value).strip().lower() in {"1", "true", "yes", "y"}
+
+
+def _metadata_has_items(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, dict):
+        return bool(value)
+    if isinstance(value, (list, tuple, set)):
+        return any(_metadata_has_items(item) for item in value)
+    return bool(value)
+
+
+def _is_concrete_jd_detail_text(value: str | None, *, field_name: str) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    normalized = re.sub(r"\s+", "", text.lower())
+    generic_markers = (
+        "scene证据中确认可见",
+        "scene证据确认可见",
+        "证据中确认可见",
+        "职位详情页中确认可见",
+        "详情页中确认可见",
+        "已确认可见",
+        "确认可见",
+        "完整职位详情",
+        "完整任职要求",
+        "完整岗位职责",
+        "已在职位详情页",
+        "已在scene证据",
+        "已读取完整",
+        "已获取完整",
+        "已查看完整",
+        "confirmedvisible",
+        "confirmedasvisible",
+        "hasbeenconfirmedvisible",
+        "detailpagehasbeenread",
+    )
+    if any(marker in normalized for marker in generic_markers):
+        return False
+    if re.search(r"(岗位职责|职责|任职要求|要求).{0,8}(已|已经).{0,16}(确认|可见|读取|获取|查看)", text):
+        return False
+    if re.search(r"(已|已经).{0,12}(scene|证据|页面|详情页).{0,12}(确认|可见|读取|获取|查看)", text, flags=re.IGNORECASE):
+        return False
+    label_pattern = r"^(岗位职责|职位描述|工作职责|职责|任职要求|职位要求|要求|description|requirements)[:：\s、，。-]*"
+    body = re.sub(label_pattern, "", text, flags=re.IGNORECASE).strip()
+    body = re.sub(r"[\s,，.。;；:：、\-]+", "", body)
+    min_chars = 8 if field_name == "requirements" else 12
+    return len(body) >= min_chars
 
 
 def _mock_recruiting_site_sync_json(source_url: str) -> dict[str, Any]:
