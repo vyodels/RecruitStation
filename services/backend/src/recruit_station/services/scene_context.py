@@ -1726,6 +1726,13 @@ def _force_jd_sync_job_management_snapshot_if_needed(
             scene_tool_registry=scene_tool_registry,
             engine_events=engine_events,
         )
+    text_anchor = _events_identified_boss_job_management_text_anchor(engine_events)
+    if text_anchor is not None:
+        return _force_jd_sync_job_management_text_anchor_recovery(
+            text_anchor,
+            scene_tool_registry=scene_tool_registry,
+            engine_events=engine_events,
+        )
     target = _events_identified_boss_job_management_target(engine_events)
     if target is None:
         return None
@@ -1761,6 +1768,58 @@ def _force_jd_sync_job_management_snapshot_if_needed(
         "tool_name": "browser_snapshot",
         "arguments": dict(result.arguments or next_action["arguments"]),
         "next_action": next_action,
+    }
+
+
+def _force_jd_sync_job_management_text_anchor_recovery(
+    target: dict[str, Any],
+    *,
+    scene_tool_registry: ToolRegistry,
+    engine_events: list[dict[str, Any]],
+) -> dict[str, Any]:
+    attempts: list[dict[str, Any]] = []
+    lookup_actions = _jd_sync_job_management_entry_lookup_actions(target)
+    for index, action in enumerate(lookup_actions, start=1):
+        tool_name = str(action.get("tool_name") or "").strip()
+        if tool_name not in scene_tool_registry.tools:
+            continue
+        arguments = dict(_as_dict(action.get("arguments")))
+        event_seq = max((_safe_int(event.get("engine_output_seq")) for event in engine_events), default=0) + 1
+        result = scene_tool_registry.execute(tool_name, arguments)
+        _append_forced_scene_tool_result_event(
+            engine_events,
+            engine_output_seq=event_seq,
+            tool_name=tool_name,
+            tool_use_id=f"jd-sync-job-management-entry-lookup-{index}",
+            is_error=bool(result.is_error),
+            content=result.output,
+        )
+        attempts.append(
+            {
+                "tool_name": tool_name,
+                "status": "completed" if not result.is_error and _tool_result_content_succeeded(result.output) else "blocked",
+                "arguments": dict(result.arguments or arguments),
+            }
+        )
+        recovered_target = _jd_sync_job_management_target_from_lookup_result(result.output, fallback=target)
+        if recovered_target is not None:
+            recovery = _force_jd_sync_job_management_visible_entry_recovery(
+                recovered_target,
+                scene_tool_registry=scene_tool_registry,
+                engine_events=engine_events,
+            )
+            return {
+                **recovery,
+                "lookup_attempts": attempts,
+                "lookup_reason": "job_management_text_anchor_clickable_repaired",
+            }
+
+    next_action = lookup_actions[0] if lookup_actions else _jd_sync_job_management_snapshot_next_action(target)
+    return {
+        "status": "requires_next_action",
+        "reason": "visible_job_management_text_anchor_missing_structured_click_point",
+        "next_action": next_action,
+        "lookup_attempts": attempts,
     }
 
 
@@ -1877,12 +1936,19 @@ def _jd_sync_job_management_visible_entry_click_action(target: dict[str, Any]) -
     primitive: dict[str, Any] = {
         "type": "click",
         "at": at,
+        "clickPoint": at,
         "button": "left",
         "label": "职位管理",
     }
     ref = _optional_string(entry.get("ref"))
     if ref:
         primitive["ref"] = ref
+    href = _optional_string(entry.get("href") or entry.get("url"))
+    if href:
+        primitive["href"] = href
+    role = _optional_string(entry.get("role"))
+    if role:
+        primitive["role"] = role
     return {
         "tool_name": "hid_action",
         "arguments": {
@@ -1895,6 +1961,114 @@ def _jd_sync_job_management_visible_entry_click_action(target: dict[str, Any]) -
             "primitives": [primitive],
         },
     }
+
+
+def _jd_sync_job_management_entry_lookup_actions(target: dict[str, Any]) -> list[dict[str, Any]]:
+    tab_id = target.get("tabId")
+    if tab_id is None:
+        tab_id = target.get("tab_id")
+    base_arguments: dict[str, Any] = {}
+    if tab_id is not None:
+        base_arguments["tabId"] = tab_id
+    base_arguments["expectedHost"] = "www.zhipin.com"
+    base_arguments["expectedOrigin"] = "https://www.zhipin.com"
+    base_arguments["targetPolicy"] = "same-origin"
+    selector = "a[href*='/web/chat/job/list']"
+    return [
+        {
+            "tool_name": "browser_get_element",
+            "arguments": {
+                **base_arguments,
+                "selector": selector,
+                "text": "职位管理",
+            },
+        },
+        {
+            "tool_name": "browser_query_elements",
+            "arguments": {
+                **base_arguments,
+                "selector": selector,
+                "text": "职位管理",
+                "limit": 20,
+            },
+        },
+        {
+            "tool_name": "browser_snapshot",
+            "arguments": {
+                **base_arguments,
+                "includeText": True,
+                "clickableLimit": 240,
+            },
+        },
+    ]
+
+
+def _jd_sync_job_management_target_from_lookup_result(output: Any, *, fallback: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(output, dict) or not _tool_result_content_succeeded(output):
+        return None
+    page = _browser_page_semantics_from_output(output)
+    page_url = _optional_string(page.get("url") or _browser_result_url(output) or fallback.get("url"))
+    if not _host_matches_target_domain(_host_from_url(page_url), "zhipin.com"):
+        return None
+    for item in list(page.get("items") or []):
+        if not isinstance(item, dict):
+            continue
+        if _boss_main_navigation_entry_label(item) != "职位管理":
+            continue
+        if not _browser_item_is_visible(item):
+            continue
+        target = {
+            "url": page_url,
+            "title": page.get("title") or output.get("title") or fallback.get("title"),
+            "entry": item,
+        }
+        tab_id = _browser_result_tab_id(output)
+        if tab_id is None:
+            tab_id = _optional_int(fallback.get("tabId") or fallback.get("tab_id"))
+        if tab_id is not None:
+            target["tabId"] = tab_id
+        for source_key in ("windowId", "window_id"):
+            window_id = _optional_int(output.get(source_key) or fallback.get(source_key))
+            if window_id is not None:
+                target["windowId"] = window_id
+                break
+        window_title = _optional_string(
+            output.get("windowTitle")
+            or output.get("window_title")
+            or fallback.get("windowTitle")
+            or fallback.get("window_title")
+            or target.get("title")
+        )
+        if window_title:
+            target["windowTitle"] = window_title
+        return target
+    return None
+
+
+def _append_forced_scene_tool_result_event(
+    engine_events: list[dict[str, Any]],
+    *,
+    engine_output_seq: int,
+    tool_name: str,
+    tool_use_id: str,
+    is_error: bool,
+    content: Any,
+) -> None:
+    engine_events.append(
+        {
+            "type": "tool_event",
+            "engine_output_seq": engine_output_seq,
+            "payload": {
+                "kind": "tool_result_ready",
+                "tool_name": tool_name,
+                "tool_use_id": tool_use_id,
+                "tool_call_id": tool_use_id,
+                "is_error": is_error,
+                "content": content,
+            },
+            "recorded_at": utcnow().isoformat(),
+        }
+    )
 
 
 def _force_jd_sync_safe_action_candidate_execution_if_needed(
@@ -2717,6 +2891,9 @@ def _recruiting_site_click_hint(arguments: dict[str, Any], *, primitive: dict[st
             "url",
             "role",
             "kind",
+            "clickPoint",
+            "click_point",
+            "region",
         ):
             value = source.get(key) if isinstance(source, dict) else None
             if value not in (None, "", [], {}) and key not in merged:
@@ -5097,6 +5274,54 @@ def _events_identified_visible_boss_job_management_entry(events: list[dict[str, 
                 target["windowTitle"] = window_title
             return target
     return None
+
+
+def _events_identified_boss_job_management_text_anchor(events: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for payload in reversed(_events_successful_tool_result_payloads(events)):
+        tool_name = str(payload.get("tool_name") or "").strip()
+        if tool_name not in _SCENE_BROWSER_PAGE_OBSERVATION_TOOL_NAMES:
+            continue
+        content = payload.get("content")
+        if not isinstance(content, dict):
+            continue
+        page = _browser_page_semantics_from_output(content)
+        page_url = _optional_string(page.get("url") or _browser_result_url(content))
+        if not _host_matches_target_domain(_host_from_url(page_url), "zhipin.com"):
+            continue
+        text = _normalize_ui_text(
+            " ".join(
+                str(item)
+                for item in (page.get("title"), page.get("text"))
+                if item not in (None, "", [], {})
+            )
+        )
+        if not _jd_sync_text_has_boss_job_management_main_nav_anchor(text):
+            continue
+        if not _contains_candidate_or_chat_context(text):
+            continue
+        target = {
+            "url": page_url,
+            "title": page.get("title") or content.get("title"),
+            "text_anchor": "职位管理",
+        }
+        tab_id = _browser_result_tab_id(content)
+        if tab_id is not None:
+            target["tabId"] = tab_id
+        window_id = _optional_int(content.get("windowId") or content.get("window_id") or _as_dict(content.get("target")).get("windowId"))
+        if window_id is not None:
+            target["windowId"] = window_id
+        window_title = _optional_string(content.get("windowTitle") or content.get("window_title") or target.get("title"))
+        if window_title:
+            target["windowTitle"] = window_title
+        return target
+    return None
+
+
+def _jd_sync_text_has_boss_job_management_main_nav_anchor(text: str) -> bool:
+    normalized = _normalize_ui_text(text)
+    if "职位管理" not in normalized:
+        return False
+    return any(marker in normalized for marker in ("推荐牛人", "搜索", "沟通"))
 
 
 def _successful_payloads_identified_boss_job_management_target(payloads: list[dict[str, Any]]) -> dict[str, Any] | None:
