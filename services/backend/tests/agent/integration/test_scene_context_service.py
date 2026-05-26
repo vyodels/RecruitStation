@@ -2572,16 +2572,13 @@ def test_scene_context_recovers_jd_sync_from_chat_page_visible_job_management_na
         {
             "type": "click",
             "at": {"x": 88, "y": 240},
-            "clickPoint": {"x": 88, "y": 240},
             "button": "left",
             "label": "职位管理",
             "ref": "nav-jobs",
-            "text": "职位管理",
-            "kind": "navigation",
-            "href": "https://www.zhipin.com/web/chat/job/list",
-            "role": "link",
         }
     ]
+    assert hid_call["metadata"]["browserEvidence"]["href"] == "https://www.zhipin.com/web/chat/job/list"
+    assert hid_call["metadata"]["browserEvidence"]["clickPoint"] == {"x": 88, "y": 240}
     assert hid_call["target"]["tabId"] == 9
     assert hid_call["target"]["host"] == "www.zhipin.com"
     assert "pasteText" not in json.dumps(hid_call, ensure_ascii=False)
@@ -2701,16 +2698,13 @@ def test_scene_context_recovers_jd_sync_from_communication_contacts_list_nav(tmp
         {
             "type": "click",
             "at": {"x": 88, "y": 240},
-            "clickPoint": {"x": 88, "y": 240},
             "button": "left",
             "label": "职位管理",
             "ref": "nav-jobs",
-            "text": "职位管理",
-            "kind": "navigation",
-            "href": "https://www.zhipin.com/web/chat/job/list",
-            "role": "link",
         }
     ]
+    assert hid_call["metadata"]["browserEvidence"]["href"] == "https://www.zhipin.com/web/chat/job/list"
+    assert hid_call["metadata"]["browserEvidence"]["clickPoint"] == {"x": 88, "y": 240}
     assert result["result_data"]["status"] == "in_progress"
     assert result["result_data"]["observed_jobs"] == []
     assert result["result_data"]["completed_job_details"] == []
@@ -2860,20 +2854,20 @@ def test_scene_context_repairs_omitted_job_management_clickable_before_jd_sync_w
         {
             "type": "click",
             "at": {"x": 100.55, "y": 87.6},
-            "clickPoint": {"x": 100.55, "y": 87.6},
             "button": "left",
             "label": "职位管理",
             "ref": "@e22",
-            "text": "职位管理",
-            "tag": "a",
-            "href": "https://www.zhipin.com/web/chat/job/list",
-            "role": "link",
-            "region": {"top": 80, "left": 6, "width": 156, "height": 46},
-            "inViewport": True,
-            "hitTestState": "top",
-            "detectedBy": "browser_get_element",
         }
     ]
+    browser_evidence = hid_calls[0]["metadata"]["browserEvidence"]
+    assert "region" not in hid_calls[0]["primitives"][0]
+    assert browser_evidence["text"] == "职位管理"
+    assert browser_evidence["href"] == "https://www.zhipin.com/web/chat/job/list"
+    assert browser_evidence["ref"] == "@e22"
+    assert browser_evidence["clickPoint"] == {"x": 100.55, "y": 87.6}
+    assert browser_evidence["region"] == {"top": 80, "left": 6, "width": 156, "height": 46}
+    assert browser_evidence["tag"] == "a"
+    assert browser_evidence["inViewport"] is True
     assert "招聘规范" not in json.dumps(hid_calls, ensure_ascii=False)
     assert result["result_data"]["jd_sync_recovery_guard"]["reason"] == "jd_sync_recovered_to_job_management_needs_detail_read"
     assert result["result_data"]["blockers"] == []
@@ -3050,8 +3044,9 @@ def test_scene_context_snapshots_inactive_zhipin_tab_when_active_tab_is_chrome_e
     assert len(hid_calls) == 1
     assert hid_calls[0]["target"]["tabId"] == 1136767565
     assert hid_calls[0]["target"]["windowId"] == 1136767488
-    assert hid_calls[0]["primitives"][0]["href"] == "https://www.zhipin.com/web/chat/job/list"
-    assert hid_calls[0]["primitives"][0]["region"] == {"top": 80, "left": 6, "width": 156, "height": 46}
+    assert "region" not in hid_calls[0]["primitives"][0]
+    assert hid_calls[0]["metadata"]["browserEvidence"]["href"] == "https://www.zhipin.com/web/chat/job/list"
+    assert hid_calls[0]["metadata"]["browserEvidence"]["region"] == {"top": 80, "left": 6, "width": 156, "height": 46}
     assert result["result_data"]["jd_sync_recovery_guard"]["reason"] == "jd_sync_recovered_to_job_management_needs_detail_read"
     assert result["result_data"]["blockers"] == []
     with session_factory() as session:

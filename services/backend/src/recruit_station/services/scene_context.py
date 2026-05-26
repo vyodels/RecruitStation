@@ -1975,9 +1975,12 @@ def _jd_sync_job_management_visible_entry_click_action(target: dict[str, Any]) -
     primitive: dict[str, Any] = {
         "type": "click",
         "at": at,
-        "clickPoint": at,
         "button": "left",
         "label": "职位管理",
+    }
+    evidence: dict[str, Any] = {
+        "label": "职位管理",
+        "clickPoint": at,
     }
     for key in (
         "ref",
@@ -1998,8 +2001,11 @@ def _jd_sync_job_management_visible_entry_click_action(target: dict[str, Any]) -
         "container",
     ):
         value = entry.get(key)
-        if value not in (None, "", [], {}) and key not in primitive:
-            primitive[key] = value
+        if value not in (None, "", [], {}) and key not in evidence:
+            evidence[key] = value
+    ref = _optional_string(evidence.get("ref"))
+    if ref:
+        primitive["ref"] = ref
     return {
         "tool_name": "hid_action",
         "arguments": {
@@ -2007,6 +2013,10 @@ def _jd_sync_job_management_visible_entry_click_action(target: dict[str, Any]) -
             "context": {
                 "host": "www.zhipin.com",
                 "url": page_url,
+                "recovery": "boss_main_navigation_job_management",
+            },
+            "metadata": {
+                "browserEvidence": evidence,
                 "recovery": "boss_main_navigation_job_management",
             },
             "primitives": [primitive],
@@ -2921,7 +2931,15 @@ def _resolve_recruiting_site_click_evidence(arguments: dict[str, Any], *, primit
 
 def _recruiting_site_click_hint(arguments: dict[str, Any], *, primitive: dict[str, Any]) -> dict[str, Any]:
     merged: dict[str, Any] = {}
-    for source in (arguments, _as_dict(arguments.get("target")), _as_dict(arguments.get("context")), _as_dict(arguments.get("metadata")), primitive):
+    metadata = _as_dict(arguments.get("metadata"))
+    for source in (
+        arguments,
+        _as_dict(arguments.get("target")),
+        _as_dict(arguments.get("context")),
+        metadata,
+        _as_dict(metadata.get("browserEvidence") or metadata.get("browser_evidence") or metadata.get("elementEvidence") or metadata.get("element_evidence")),
+        primitive,
+    ):
         for key in (
             "ref",
             "element_ref",
