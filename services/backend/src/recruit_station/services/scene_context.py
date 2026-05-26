@@ -1734,6 +1734,10 @@ def _force_jd_sync_job_management_snapshot_if_needed(
             engine_events=engine_events,
         )
     target = _events_identified_boss_job_management_target(engine_events)
+    reason = "forced_browser_snapshot_after_job_management_tab_identification"
+    if target is None:
+        target = _events_identified_existing_boss_recruiting_target(engine_events)
+        reason = "forced_browser_snapshot_after_existing_boss_recruiting_tab_identification"
     if target is None:
         return None
     next_action = _jd_sync_job_management_snapshot_next_action(target)
@@ -1762,9 +1766,44 @@ def _force_jd_sync_job_management_snapshot_if_needed(
         }
     )
     status = "completed" if not result.is_error and _tool_result_content_succeeded(result.output) else "blocked"
+    if status == "completed" and not _jd_sync_observation_content_has_job_list_or_detail(result.output):
+        visible_entry = _events_identified_visible_boss_job_management_entry(engine_events)
+        if visible_entry is not None:
+            recovery = _force_jd_sync_job_management_visible_entry_recovery(
+                visible_entry,
+                scene_tool_registry=scene_tool_registry,
+                engine_events=engine_events,
+            )
+            return {
+                **recovery,
+                "initial_snapshot_repair": {
+                    "status": status,
+                    "reason": reason,
+                    "tool_name": "browser_snapshot",
+                    "arguments": dict(result.arguments or next_action["arguments"]),
+                    "next_action": next_action,
+                },
+            }
+        text_anchor = _events_identified_boss_job_management_text_anchor(engine_events)
+        if text_anchor is not None:
+            recovery = _force_jd_sync_job_management_text_anchor_recovery(
+                text_anchor,
+                scene_tool_registry=scene_tool_registry,
+                engine_events=engine_events,
+            )
+            return {
+                **recovery,
+                "initial_snapshot_repair": {
+                    "status": status,
+                    "reason": reason,
+                    "tool_name": "browser_snapshot",
+                    "arguments": dict(result.arguments or next_action["arguments"]),
+                    "next_action": next_action,
+                },
+            }
     return {
         "status": status,
-        "reason": "forced_browser_snapshot_after_job_management_tab_identification",
+        "reason": reason,
         "tool_name": "browser_snapshot",
         "arguments": dict(result.arguments or next_action["arguments"]),
         "next_action": next_action,
@@ -1940,15 +1979,27 @@ def _jd_sync_job_management_visible_entry_click_action(target: dict[str, Any]) -
         "button": "left",
         "label": "职位管理",
     }
-    ref = _optional_string(entry.get("ref"))
-    if ref:
-        primitive["ref"] = ref
-    href = _optional_string(entry.get("href") or entry.get("url"))
-    if href:
-        primitive["href"] = href
-    role = _optional_string(entry.get("role"))
-    if role:
-        primitive["role"] = role
+    for key in (
+        "ref",
+        "text",
+        "tag",
+        "role",
+        "kind",
+        "href",
+        "url",
+        "region",
+        "bounds",
+        "rect",
+        "viewport",
+        "inViewport",
+        "hitTestState",
+        "detectedBy",
+        "parentRef",
+        "container",
+    ):
+        value = entry.get(key)
+        if value not in (None, "", [], {}) and key not in primitive:
+            primitive[key] = value
     return {
         "tool_name": "hid_action",
         "arguments": {
@@ -2891,9 +2942,18 @@ def _recruiting_site_click_hint(arguments: dict[str, Any], *, primitive: dict[st
             "url",
             "role",
             "kind",
+            "tag",
             "clickPoint",
             "click_point",
             "region",
+            "bounds",
+            "rect",
+            "viewport",
+            "inViewport",
+            "hitTestState",
+            "detectedBy",
+            "parentRef",
+            "container",
         ):
             value = source.get(key) if isinstance(source, dict) else None
             if value not in (None, "", [], {}) and key not in merged:
@@ -5239,6 +5299,12 @@ def _events_identified_boss_job_management_target(events: list[dict[str, Any]]) 
     )
 
 
+def _events_identified_existing_boss_recruiting_target(events: list[dict[str, Any]]) -> dict[str, Any] | None:
+    return _successful_payloads_identified_existing_boss_recruiting_target(
+        _events_successful_tool_result_payloads(events)
+    )
+
+
 def _events_identified_visible_boss_job_management_entry(events: list[dict[str, Any]]) -> dict[str, Any] | None:
     for payload in reversed(_events_successful_tool_result_payloads(events)):
         tool_name = str(payload.get("tool_name") or "").strip()
@@ -5335,6 +5401,22 @@ def _successful_payloads_identified_boss_job_management_target(payloads: list[di
     return None
 
 
+def _successful_payloads_identified_existing_boss_recruiting_target(payloads: list[dict[str, Any]]) -> dict[str, Any] | None:
+    candidates: list[tuple[int, int, dict[str, Any]]] = []
+    for payload_index, payload in enumerate(payloads):
+        tool_name = str(payload.get("tool_name") or "").strip()
+        if tool_name not in _SCENE_BROWSER_TARGET_IDENTIFICATION_TOOL_NAMES:
+            continue
+        for target_index, target in enumerate(_browser_result_tab_candidates(payload.get("content"))):
+            priority = _boss_recruiting_tab_priority(str(target.get("url") or ""))
+            if priority is None:
+                continue
+            candidates.append((priority, payload_index * 1000 + target_index, target))
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda item: (item[0], item[1]))[0][2]
+
+
 def _browser_result_tab_id(value: dict[str, Any]) -> int | None:
     for candidate in (
         value.get("tabId"),
@@ -5402,7 +5484,17 @@ def _browser_result_tab_candidates(value: Any) -> list[dict[str, Any]]:
             url = _optional_string(candidate.get("url") or candidate.get("href") or candidate.get("external_url"))
             if url:
                 target = {"url": url}
-                for source_key, target_key in (("tabId", "tabId"), ("tab_id", "tab_id"), ("id", "tabId"), ("title", "title")):
+                for source_key, target_key in (
+                    ("tabId", "tabId"),
+                    ("tab_id", "tab_id"),
+                    ("id", "tabId"),
+                    ("title", "title"),
+                    ("windowId", "windowId"),
+                    ("window_id", "windowId"),
+                    ("windowTitle", "windowTitle"),
+                    ("window_title", "windowTitle"),
+                    ("active", "active"),
+                ):
                     if candidate.get(source_key) is not None:
                         target[target_key] = candidate.get(source_key)
                 candidates.append(target)

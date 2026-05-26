@@ -2576,6 +2576,8 @@ def test_scene_context_recovers_jd_sync_from_chat_page_visible_job_management_na
             "button": "left",
             "label": "职位管理",
             "ref": "nav-jobs",
+            "text": "职位管理",
+            "kind": "navigation",
             "href": "https://www.zhipin.com/web/chat/job/list",
             "role": "link",
         }
@@ -2703,6 +2705,8 @@ def test_scene_context_recovers_jd_sync_from_communication_contacts_list_nav(tmp
             "button": "left",
             "label": "职位管理",
             "ref": "nav-jobs",
+            "text": "职位管理",
+            "kind": "navigation",
             "href": "https://www.zhipin.com/web/chat/job/list",
             "role": "link",
         }
@@ -2798,12 +2802,16 @@ def test_scene_context_repairs_omitted_job_management_clickable_before_jd_sync_w
                 "url": "https://www.zhipin.com/web/chat/index",
                 "title": "沟通",
                 "element": {
-                    "ref": "nav-jobs",
+                    "ref": "@e22",
+                    "tag": "a",
                     "text": "职位管理",
                     "role": "link",
                     "href": "https://www.zhipin.com/web/chat/job/list",
-                    "clickPoint": {"x": 88, "y": 240},
-                    "region": {"x": 24, "y": 218, "width": 128, "height": 44},
+                    "clickPoint": {"x": 100.55, "y": 87.6},
+                    "region": {"top": 80, "left": 6, "width": 156, "height": 46},
+                    "inViewport": True,
+                    "hitTestState": "top",
+                    "detectedBy": "browser_get_element",
                 },
             },
             metadata={"capabilities": ["browser", "document"], "external_tool": True, "real_environment": True},
@@ -2851,16 +2859,199 @@ def test_scene_context_repairs_omitted_job_management_clickable_before_jd_sync_w
     assert hid_calls[0]["primitives"] == [
         {
             "type": "click",
-            "at": {"x": 88, "y": 240},
-            "clickPoint": {"x": 88, "y": 240},
+            "at": {"x": 100.55, "y": 87.6},
+            "clickPoint": {"x": 100.55, "y": 87.6},
             "button": "left",
             "label": "职位管理",
-            "ref": "nav-jobs",
+            "ref": "@e22",
+            "text": "职位管理",
+            "tag": "a",
             "href": "https://www.zhipin.com/web/chat/job/list",
             "role": "link",
+            "region": {"top": 80, "left": 6, "width": 156, "height": 46},
+            "inViewport": True,
+            "hitTestState": "top",
+            "detectedBy": "browser_get_element",
         }
     ]
     assert "招聘规范" not in json.dumps(hid_calls, ensure_ascii=False)
+    assert result["result_data"]["jd_sync_recovery_guard"]["reason"] == "jd_sync_recovered_to_job_management_needs_detail_read"
+    assert result["result_data"]["blockers"] == []
+    with session_factory() as session:
+        assert session.query(JobDescription).count() == 0
+        assert session.query(Candidate).count() == 0
+        assert session.query(ConversationSession).count() == 0
+
+
+def test_scene_context_snapshots_inactive_zhipin_tab_when_active_tab_is_chrome_extensions(tmp_path: Path) -> None:
+    session_factory = _session_factory(tmp_path)
+    final_payload = {
+        "status": "in_progress",
+        "summary": "Still locating the JD sync page.",
+        "observed_jobs": [],
+        "pending_jobs": [],
+        "completed_job_details": [],
+        "inactive_or_closed_jobs": [],
+        "blockers": [],
+        "action_candidates": [],
+    }
+    hid_calls: list[dict[str, object]] = []
+    snapshot_calls: list[dict[str, object]] = []
+    provider = ScriptedProvider(
+        provider_name="scene-scripted",
+        responses=[
+            LLMResponse(
+                tool_calls=[
+                    ToolCall(id="tabs", name="browser_list_tabs", arguments={}),
+                    ToolCall(id="active", name="browser_get_active_tab", arguments={}),
+                ],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(content=json.dumps(final_payload, ensure_ascii=False), finish_reason="stop"),
+        ],
+    )
+    tools = ToolRegistry()
+    tools.register(
+        ToolDefinition(
+            name="browser_list_tabs",
+            description="List browser tabs.",
+            parameters={"type": "object", "properties": {}, "additionalProperties": True},
+            handler=lambda arguments: {
+                "success": True,
+                "tabs": [
+                    {
+                        "tabId": 1136767565,
+                        "url": "https://www.zhipin.com/web/chat/index",
+                        "title": "沟通",
+                        "active": False,
+                        "windowId": 1136767488,
+                    },
+                    {
+                        "tabId": 1136767000,
+                        "url": "chrome://extensions/",
+                        "title": "Extensions",
+                        "active": True,
+                        "windowId": 1136767488,
+                    },
+                    {
+                        "tabId": 42,
+                        "url": "http://localhost:5173/",
+                        "title": "RecruitStation",
+                        "active": True,
+                        "windowId": 42,
+                    },
+                ],
+            },
+            metadata={"capabilities": ["browser", "document"], "external_tool": True, "real_environment": True},
+        )
+    )
+    tools.register(
+        ToolDefinition(
+            name="browser_get_active_tab",
+            description="Get active browser tab.",
+            parameters={"type": "object", "properties": {}, "additionalProperties": True},
+            handler=lambda arguments: {
+                "success": True,
+                "tab": {
+                    "tabId": 1136767000,
+                    "url": "chrome://extensions/",
+                    "title": "Extensions",
+                    "active": True,
+                    "windowId": 1136767488,
+                },
+            },
+            metadata={"capabilities": ["browser", "document"], "external_tool": True, "real_environment": True},
+        )
+    )
+
+    def browser_snapshot(arguments: dict[str, object]) -> dict[str, object]:
+        snapshot_calls.append(dict(arguments))
+        if len(snapshot_calls) == 1:
+            assert arguments.get("tabId") == 1136767565
+            return {
+                "success": True,
+                "tabId": 1136767565,
+                "windowId": 1136767488,
+                "url": "https://www.zhipin.com/web/chat/index",
+                "title": "沟通",
+                "text": "职位管理 推荐牛人 搜索 沟通 全部 新招呼(35) 沟通中 王新苗 产品实习生",
+                "elements": [
+                    {
+                        "ref": "@e22",
+                        "tag": "a",
+                        "text": "职位管理",
+                        "role": "link",
+                        "href": "https://www.zhipin.com/web/chat/job/list",
+                        "clickPoint": {"x": 100.55, "y": 87.6},
+                        "region": {"top": 80, "left": 6, "width": 156, "height": 46},
+                        "inViewport": True,
+                        "hitTestState": "top",
+                        "detectedBy": "browser_snapshot",
+                    }
+                ],
+            }
+        return {
+            "success": True,
+            "tabId": 1136767565,
+            "windowId": 1136767488,
+            "url": "https://www.zhipin.com/web/chat/job/list",
+            "title": "职位管理",
+            "text": "职位管理 全部职位 开放中 待开放 审核不通过 已关闭",
+            "elements": [
+                {"ref": "open-jobs", "text": "开放中", "role": "tab", "clickPoint": {"x": 360, "y": 180}},
+            ],
+        }
+
+    tools.register(
+        ToolDefinition(
+            name="browser_snapshot",
+            description="Observe browser page.",
+            parameters={"type": "object", "properties": {}, "additionalProperties": True},
+            handler=browser_snapshot,
+            metadata={"capabilities": ["browser", "document"], "external_tool": True, "real_environment": True},
+        )
+    )
+    tools.register(
+        ToolDefinition(
+            name="hid_action",
+            description="Execute HID.",
+            parameters={"type": "object", "properties": {}, "additionalProperties": True},
+            handler=lambda arguments: hid_calls.append(dict(arguments)) or {"success": True, "ok": True},
+            metadata={"capabilities": ["computer"], "external_tool": True, "real_environment": True},
+        )
+    )
+    service = SceneContextService(
+        session_factory=session_factory,
+        provider=provider,
+        tool_registry=tools,
+        plugin_host=PluginHost(),
+    )
+
+    result = service.delegate(
+        {
+            "instruction": "Return JD sync scene result JSON.",
+            "context": {"plan_kind": "jd_sync"},
+            "preferred_capabilities": ["browser", "computer"],
+            "browser_target": {"url": "https://www.zhipin.com/", "tabId": 1136767565},
+            "output_contract": {"contract_kind": "jd_sync", "result_data_required": True},
+        }
+    )
+
+    assert result["status"] == "incomplete"
+    assert snapshot_calls[0] == {
+        "tabId": 1136767565,
+        "expectedHost": "www.zhipin.com",
+        "expectedOrigin": "https://www.zhipin.com",
+        "targetPolicy": "same-origin",
+        "includeText": True,
+        "clickableLimit": 120,
+    }
+    assert [call.get("tabId") for call in snapshot_calls] == [1136767565, 1136767565]
+    assert len(hid_calls) == 1
+    assert hid_calls[0]["target"]["tabId"] == 1136767565
+    assert hid_calls[0]["target"]["windowId"] == 1136767488
+    assert hid_calls[0]["primitives"][0]["href"] == "https://www.zhipin.com/web/chat/job/list"
+    assert hid_calls[0]["primitives"][0]["region"] == {"top": 80, "left": 6, "width": 156, "height": 46}
     assert result["result_data"]["jd_sync_recovery_guard"]["reason"] == "jd_sync_recovered_to_job_management_needs_detail_read"
     assert result["result_data"]["blockers"] == []
     with session_factory() as session:
