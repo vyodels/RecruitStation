@@ -7,7 +7,15 @@ import pytest
 
 from recruit_station.core.settings import AppSettings
 from recruit_station.db.session import create_engine_from_settings, create_session_factory, initialize_database
-from recruit_station.models.domain import AgentGlobalState, AgentLearning, EnvironmentSnapshot, ExecutionEpisode, ExecutionPlan, TaskSpec
+from recruit_station.models.domain import (
+    AgentGlobalState,
+    AgentLearning,
+    EnvironmentSnapshot,
+    ExecutionEpisode,
+    ExecutionPlan,
+    ExternalObservationRawPayload,
+    TaskSpec,
+)
 from recruit_station.plugins.host import PluginHost
 from agent_runtime.fixtures import LLMResponse, ToolCall
 from agent_runtime.fixtures import ScriptedProvider
@@ -16,6 +24,8 @@ from recruit_station.agents.outcome import AgentTurnOutcome
 from recruit_station.services.scene_context import (
     SceneContextService,
     _scene_tool_registry,
+    _should_retry_scene_for_actionable_jd_detail_entry,
+    _should_retry_scene_for_jd_edit_page_field_read,
     _should_retry_scene_for_missing_hid,
     _should_retry_scene_for_transient_hid_error,
 )
@@ -171,6 +181,222 @@ def test_scene_context_creates_episode_records_without_learning_side_effects(tmp
         assert observed_snapshot.resource_locator == "https://example.test/jobs/1"
         assert observed_snapshot.action_hints == [{"kind": "button", "label": "立即沟通"}]
         assert observed_snapshot.environment_descriptor["environment_kind"] == "job_detail"
+
+
+def test_scene_context_persists_raw_browser_snapshot_payload_losslessly(tmp_path: Path) -> None:
+    session_factory = _session_factory(tmp_path)
+    clickables = [
+        {"ref": f"node-{index}", "label": f"Action {index}", "selector": f"[data-action='{index}']"}
+        for index in range(30)
+    ]
+    provider = ScriptedProvider(
+        provider_name="scene-scripted",
+        responses=[
+            LLMResponse(
+                tool_calls=[ToolCall(id="tool-raw", name="browser_snapshot", arguments={"capture": "full"})],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(content="raw payload captured"),
+        ],
+    )
+    tools = ToolRegistry()
+    tools.register(
+        ToolDefinition(
+            name="browser_snapshot",
+            description="Capture current browser scene.",
+            parameters={"type": "object", "properties": {"capture": {"type": "string"}}, "additionalProperties": False},
+            handler=lambda arguments: {
+                "success": True,
+                "source": "browser",
+                "environment_key": "tab-raw",
+                "url": "https://example.test/raw",
+                "title": "Raw Snapshot",
+                "page_type": "browser_page",
+                "clickables": clickables,
+                "runtime_metadata": {"capture": arguments.get("capture")},
+            },
+            metadata={"capabilities": ["browser", "document"], "external_tool": True, "real_environment": True},
+        )
+    )
+    service = SceneContextService(
+        session_factory=session_factory,
+        provider=provider,
+        tool_registry=tools,
+        plugin_host=PluginHost(),
+    )
+
+    result = service.delegate(
+        {
+            "title": "capture raw browser snapshot",
+            "instruction": "Capture a browser snapshot and summarize it.",
+            "preferred_capabilities": ["browser"],
+        }
+    )
+
+    assert result["status"] == "completed"
+    with session_factory() as session:
+        episode = session.query(ExecutionEpisode).one()
+        raw_record = session.query(ExternalObservationRawPayload).one()
+        observed_snapshot = session.query(EnvironmentSnapshot).filter(EnvironmentSnapshot.status == "observed").one()
+
+        compact_result = next(
+            item["payload"]
+            for item in episode.actions
+            if item["type"] == "tool_event"
+            and item["payload"]["kind"] == "tool_result_ready"
+            and item["payload"]["tool_name"] == "browser_snapshot"
+        )
+        assert compact_result["raw_ref"] == raw_record.raw_ref
+        assert compact_result["raw_sha256"] == raw_record.payload_sha256
+        assert compact_result["raw_size_bytes"] == raw_record.payload_size_bytes
+        assert compact_result["raw_storage_kind"] == "db_json"
+        assert compact_result["content"]["clickables"] == clickables
+        assert len(compact_result["content"]["clickables"]) == 30
+
+        assert raw_record.tool_name == "browser_snapshot"
+        assert raw_record.environment_snapshot_id == observed_snapshot.id
+        assert raw_record.payload["content"]["clickables"] == clickables
+        assert len(raw_record.payload["content"]["clickables"]) == 30
+        assert raw_record.payload_sha256
+        assert session.query(ExternalObservationRawPayload).filter_by(raw_ref=raw_record.raw_ref).one().id == raw_record.id
+        assert session.query(ExternalObservationRawPayload).filter_by(payload_sha256=raw_record.payload_sha256).one().id == raw_record.id
+
+        metadata = observed_snapshot.runtime_metadata
+        assert metadata["raw_ref"] == raw_record.raw_ref
+        assert metadata["raw_sha256"] == raw_record.payload_sha256
+        assert metadata["raw_size_bytes"] == raw_record.payload_size_bytes
+        assert metadata["raw_storage_kind"] == "db_json"
+        assert "raw" not in metadata
+        assert metadata["summary"] == {"capture": "full"}
+
+
+def test_scene_context_rolls_back_raw_and_snapshot_when_finalization_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_factory = _session_factory(tmp_path)
+    provider = ScriptedProvider(
+        provider_name="scene-scripted",
+        responses=[
+            LLMResponse(
+                tool_calls=[ToolCall(id="tool-raw", name="browser_snapshot", arguments={"capture": "full"})],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(content="raw payload captured"),
+        ],
+    )
+    tools = ToolRegistry()
+    tools.register(
+        ToolDefinition(
+            name="browser_snapshot",
+            description="Capture current browser scene.",
+            parameters={"type": "object", "properties": {"capture": {"type": "string"}}, "additionalProperties": False},
+            handler=lambda arguments: {
+                "success": True,
+                "source": "browser",
+                "environment_key": "tab-raw",
+                "url": "https://example.test/raw",
+                "title": "Raw Snapshot",
+                "page_type": "browser_page",
+                "clickables": [{"ref": "node-1", "label": "Action"}],
+                "runtime_metadata": {"capture": arguments.get("capture")},
+            },
+            metadata={"capabilities": ["browser", "document"], "external_tool": True, "real_environment": True},
+        )
+    )
+
+    def _raise_before_episode_events(**kwargs: object) -> None:
+        raise RuntimeError("forced finalization boundary failure")
+
+    monkeypatch.setattr(
+        "recruit_station.services.scene_context._append_episode_engine_events",
+        _raise_before_episode_events,
+    )
+    service = SceneContextService(
+        session_factory=session_factory,
+        provider=provider,
+        tool_registry=tools,
+        plugin_host=PluginHost(),
+    )
+
+    result = service.delegate(
+        {
+            "title": "capture raw browser snapshot",
+            "instruction": "Capture a browser snapshot and summarize it.",
+            "preferred_capabilities": ["browser"],
+        }
+    )
+
+    assert result["status"] == "error"
+    assert result["summary"] == "forced finalization boundary failure"
+    with session_factory() as session:
+        episode = session.query(ExecutionEpisode).one()
+        snapshots = session.query(EnvironmentSnapshot).all()
+
+        assert episode.status == "failed"
+        assert episode.actions == []
+        assert episode.observations == []
+        assert session.query(ExternalObservationRawPayload).count() == 0
+        assert len(snapshots) == 1
+        assert snapshots[0].status == "requested"
+        assert result["metrics"]["environment_snapshot_count"] == 1
+
+
+def test_scene_context_does_not_persist_raw_for_non_observation_browser_tool(tmp_path: Path) -> None:
+    session_factory = _session_factory(tmp_path)
+    provider = ScriptedProvider(
+        provider_name="scene-scripted",
+        responses=[
+            LLMResponse(
+                tool_calls=[ToolCall(id="tool-maintenance", name="browser_clear_cache", arguments={})],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(content="maintenance tool completed"),
+        ],
+    )
+    tools = ToolRegistry()
+    tools.register(
+        ToolDefinition(
+            name="browser_clear_cache",
+            description="Synthetic browser maintenance operation.",
+            parameters={"type": "object", "properties": {}, "additionalProperties": False},
+            handler=lambda arguments: {
+                "success": True,
+                "source": "browser",
+                "operation": "clear_cache",
+                "large_non_observation_payload": [{"index": index} for index in range(30)],
+            },
+            metadata={"capabilities": ["browser"], "external_tool": True, "real_environment": True},
+        )
+    )
+    service = SceneContextService(
+        session_factory=session_factory,
+        provider=provider,
+        tool_registry=tools,
+        plugin_host=PluginHost(),
+    )
+
+    result = service.delegate(
+        {
+            "title": "run browser maintenance",
+            "instruction": "Run the browser maintenance tool and summarize it.",
+            "preferred_capabilities": ["browser"],
+        }
+    )
+
+    assert result["status"] in {"blocked", "completed"}
+    with session_factory() as session:
+        episode = session.query(ExecutionEpisode).one()
+        compact_result = next(
+            item["payload"]
+            for item in episode.actions
+            if item["type"] == "tool_event"
+            and item["payload"]["kind"] == "tool_result_ready"
+            and item["payload"]["tool_name"] == "browser_clear_cache"
+        )
+        assert session.query(ExternalObservationRawPayload).count() == 0
+        assert "raw_ref" not in compact_result
+        assert "raw_external_observation" not in compact_result
 
 
 def test_scene_context_with_browser_target_requires_browser_or_hid_tool_evidence(tmp_path: Path) -> None:
@@ -398,6 +624,113 @@ def test_scene_context_timeout_is_episode_boundary_not_same_engine_retry() -> No
         outcome=outcome,
         blockers=blockers,
         events=events,
+    )
+
+
+def test_jd_sync_scene_retries_when_actionable_detail_entry_is_only_returned_as_next_step() -> None:
+    output_contract = {
+        "result_data_required": True,
+        "required_fields": [
+            "status",
+            "observed_jobs",
+            "completed_job_details",
+            "inactive_or_closed_jobs",
+            "activation_entry_observed",
+            "blockers",
+            "limitations",
+            "evidence",
+        ],
+    }
+    outcome = AgentTurnOutcome(
+        status="complete",
+        gate_signal="run_done",
+        result_data={
+            "status": "partial",
+            "observed_jobs": [{"title": "产品实习生", "status": "开放中"}],
+            "completed_job_details": [],
+            "inactive_or_closed_jobs": [],
+            "activation_entry_observed": True,
+            "blockers": [],
+            "limitations": ["当前是职位管理列表，已看到产品实习生和编辑入口，但尚未进入任一职位详情。"],
+            "evidence": ["页面显示职位管理列表，存在编辑/关闭操作入口。"],
+            "next_step": "继续点击编辑入口，进入详情后读取完整字段。",
+        },
+    )
+
+    assert _should_retry_scene_for_actionable_jd_detail_entry(
+        outcome=outcome,
+        blockers=[],
+        output_contract=output_contract,
+    )
+
+
+def test_jd_sync_scene_does_not_retry_actionable_entry_when_hard_blocked() -> None:
+    output_contract = {
+        "result_data_required": True,
+        "required_fields": ["status", "completed_job_details"],
+    }
+    outcome = AgentTurnOutcome(
+        status="complete",
+        gate_signal="run_done",
+        result_data={
+            "status": "blocked",
+            "completed_job_details": [],
+            "blockers": [{"kind": "login_required", "message": "需要重新登录"}],
+            "limitations": ["职位管理入口可见但登录弹窗阻断。"],
+            "next_action": "登录后继续打开职位详情。",
+        },
+    )
+
+    assert not _should_retry_scene_for_actionable_jd_detail_entry(
+        outcome=outcome,
+        blockers=[{"kind": "login_required", "message": "需要重新登录"}],
+        output_contract=output_contract,
+    )
+
+
+def test_jd_sync_scene_retries_when_edit_page_field_read_is_deferred() -> None:
+    output_contract = {
+        "result_data_required": True,
+        "required_fields": ["status", "completed_job_details"],
+    }
+    outcome = AgentTurnOutcome(
+        status="complete",
+        gate_signal="run_done",
+        result_data={
+            "status": "partial",
+            "completed_job_details": [],
+            "summary": "已成功从职位管理列表进入职位编辑页，页面中出现发布职位等编辑页元素。",
+            "limitations": "本轮尚未完成单个职位详情字段的完整核验。",
+            "next_step": "继续在编辑页中核对并补全职位标题、地点、薪酬、经验、学历、职位描述和要求等关键字段。",
+        },
+    )
+
+    assert _should_retry_scene_for_jd_edit_page_field_read(
+        outcome=outcome,
+        blockers=[],
+        output_contract=output_contract,
+    )
+
+
+def test_jd_sync_scene_does_not_retry_edit_page_when_detail_is_complete() -> None:
+    output_contract = {
+        "result_data_required": True,
+        "required_fields": ["status", "completed_job_details"],
+    }
+    outcome = AgentTurnOutcome(
+        status="complete",
+        gate_signal="run_done",
+        result_data={
+            "status": "completed",
+            "completed_job_details": [{"title": "产品实习生", "external_id": "job-1"}],
+            "summary": "已在职位编辑页读取完整字段。",
+        },
+    )
+
+    assert not _should_retry_scene_for_jd_edit_page_field_read(
+        outcome=outcome,
+        blockers=[],
+        output_contract=output_contract,
     )
 
 
@@ -1031,6 +1364,64 @@ def test_scene_context_normalizes_contract_aliases_without_marking_complete(tmp_
     assert result["result_data"]["limitations"] == []
     assert result["result_data"]["activation_entry_observed"] is False
     assert result["result_data"]["evidence"] == ["已完成 1 个 JD 的详情核验。"]
+
+
+def test_scene_context_rejects_completed_jd_detail_observation_summaries(tmp_path: Path) -> None:
+    session_factory = _session_factory(tmp_path)
+    final_payload = {
+        "status": "completed",
+        "observed_jobs": [{"title": "产品实习生", "status": "招聘中"}],
+        "completed_job_details": [
+            {
+                "title": "产品实习生",
+                "external_id": "boss-job-004",
+                "description": "岗位描述已可见，包含 B 端产品、AI 产品等内容。",
+                "requirements": "任职要求已可见，包含本科及以上等字段。",
+            }
+        ],
+        "inactive_or_closed_jobs": [],
+        "activation_entry_observed": False,
+        "blockers": [],
+        "limitations": [],
+        "evidence": ["当前详情页显示产品实习生。"],
+    }
+    provider = ScriptedProvider(
+        provider_name="scene-scripted",
+        responses=[LLMResponse(content=json.dumps(final_payload, ensure_ascii=False), finish_reason="stop")],
+    )
+    service = SceneContextService(
+        session_factory=session_factory,
+        provider=provider,
+        tool_registry=ToolRegistry(),
+        plugin_host=PluginHost(),
+    )
+
+    result = service.delegate(
+        {
+            "instruction": "Return scene result JSON.",
+            "output_contract": {
+                "result_data_required": True,
+                "required_fields": [
+                    "status",
+                    "observed_jobs",
+                    "completed_job_details",
+                    "inactive_or_closed_jobs",
+                    "activation_entry_observed",
+                    "blockers",
+                    "limitations",
+                    "evidence",
+                ],
+            },
+        }
+    )
+
+    assert result["status"] == "blocked"
+    assert result["result_data"]["contract_validation"]["status"] == "failed"
+    assert result["blockers"][0]["kind"] == "output_contract_incomplete"
+    assert result["blockers"][0]["invalid_fields"] == [
+        {"index": 0, "field": "description"},
+        {"index": 0, "field": "requirements"},
+    ]
 
 
 def test_scene_context_uses_blocked_final_json_for_public_status_without_writeback(tmp_path: Path) -> None:
@@ -2228,6 +2619,65 @@ def test_scene_context_blocks_wrong_tab_page_observation_tools(
             and item["payload"]["content"].get("error") == "scene_browser_target_mismatch"
         ]
         assert blocked_results
+
+
+def test_scene_context_observes_cached_same_origin_tab_when_model_requests_active_wrong_tab(tmp_path: Path) -> None:
+    session_factory = _session_factory(tmp_path)
+    observed_arguments: list[dict[str, object]] = []
+    provider = ScriptedProvider(
+        provider_name="scene-scripted",
+        responses=[
+            LLMResponse(tool_calls=[ToolCall(id="tabs", name="browser_list_tabs", arguments={})], finish_reason="tool_calls"),
+            LLMResponse(tool_calls=[ToolCall(id="observe", name="browser_snapshot", arguments={"tabId": 9})], finish_reason="tool_calls"),
+            LLMResponse(content="same-origin tab observed", result_data={"status": "completed", "summary": "same-origin tab observed"}),
+        ],
+    )
+    tools = ToolRegistry()
+    tools.register(
+        ToolDefinition(
+            name="browser_list_tabs",
+            description="List browser tabs.",
+            parameters={"type": "object", "properties": {}, "additionalProperties": False},
+            handler=lambda arguments: {
+                "tabs": [
+                    {"tabId": 9, "url": "http://127.0.0.1:5174/", "title": "RecruitStation", "active": True},
+                    {"tabId": 8, "url": "https://recruit.example.test/web/chat/index", "title": "Recruit", "active": False},
+                ]
+            },
+            metadata={"capabilities": ["browser", "document"], "external_tool": True, "real_environment": True},
+        )
+    )
+    tools.register(
+        ToolDefinition(
+            name="browser_snapshot",
+            description="Page observation.",
+            parameters={"type": "object", "properties": {}, "additionalProperties": True},
+            handler=lambda arguments: observed_arguments.append(dict(arguments))
+            or {
+                "success": True,
+                "snapshot": {"url": "https://recruit.example.test/web/chat/index", "title": "Recruit"},
+            },
+            metadata={"capabilities": ["browser", "document"], "external_tool": True, "real_environment": True},
+        )
+    )
+    service = SceneContextService(
+        session_factory=session_factory,
+        provider=provider,
+        tool_registry=tools,
+        plugin_host=PluginHost(),
+    )
+
+    result = service.delegate(
+        {
+            "title": "same origin tab recovery",
+            "instruction": "Recover from an active local app tab.",
+            "preferred_capabilities": ["browser"],
+            "browser_target": {"url": "https://recruit.example.test/jobs"},
+        }
+    )
+
+    assert result["status"] == "completed"
+    assert observed_arguments == [{"tabId": 8}]
 
 
 def test_scene_context_treats_virtual_hid_capability_as_computer_execution(tmp_path: Path) -> None:

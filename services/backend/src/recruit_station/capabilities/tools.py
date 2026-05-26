@@ -11,6 +11,7 @@ import json
 from typing import Any, Awaitable, Callable, Protocol, TypeVar
 
 _T = TypeVar("_T")
+JD_SYNC_SCENE_MIN_LLM_INVOCATIONS = 20
 
 
 class ToolExecutionError(RuntimeError):
@@ -84,6 +85,14 @@ def _runtime_requires_browser_computer_scene(runtime: dict[str, Any]) -> bool:
         or ""
     ).strip().lower()
     return plan_kind == "jd_sync"
+
+
+def _positive_int(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
 
 
 @dataclass(slots=True)
@@ -175,9 +184,11 @@ class ToolRegistry:
                     )
                     if _runtime_requires_browser_computer_scene(runtime) and not arguments.get("preferred_capabilities"):
                         arguments["preferred_capabilities"] = ["browser", "computer"]
-                    if _runtime_requires_browser_computer_scene(runtime) and not arguments.get("max_llm_invocations"):
-                        arguments["max_llm_invocations"] = 20
                     if _runtime_requires_browser_computer_scene(runtime):
+                        arguments["max_llm_invocations"] = max(
+                            _positive_int(arguments.get("max_llm_invocations")) or 0,
+                            JD_SYNC_SCENE_MIN_LLM_INVOCATIONS,
+                        )
                         arguments = _normalize_jd_sync_scene_arguments(arguments)
                 return arguments
 
@@ -630,8 +641,14 @@ def _normalize_jd_sync_scene_arguments(arguments: dict[str, Any]) -> dict[str, A
 _JD_SYNC_SCENE_INSTRUCTION = (
     "执行招聘站点 JD 同步 scene。规则：从当前同源招聘网页出发，使用 browser 观察和 computer/HID 页面内操作，"
     "基于页面可见导航发现职位列表并逐个进入职位详情；列表摘要、职位数量或候选人概况不能作为职位详情完成证据。"
-    "如果列表页文本、计数器或 snapshot/clickables 表明有 N 个招聘中岗位，必须把 N 当作本轮最小发现数量；"
-    "即使部分“查看职位详情”链接 inViewport=false，也必须先用 HID 滚动让该入口进入 viewport，再重新观察并点击，不能跳过。"
+    "雇主端可编辑岗位表单、岗位管理详情或等价详情区域，只要真实展示该岗位的标题、地点、薪酬、经验、学历、描述、职责、要求等字段，就是有效 JD 详情来源；"
+    "读取后可以使用页面可见的关闭、返回或岗位管理导航回到职位列表并继续下一个职位。"
+    "候选人列表、沟通/消息页或投递推进页说明已进入非 JD 同步业务域，不能作为 JD 详情读取进度或完成证据。"
+    "如果页面显示还有未读取的在招岗位，应用滚动、翻页、返回、关闭详情或页面内岗位管理导航等自然页面动作继续查找，而不是停留在当前摘要。"
+    "当页面已经出现与岗位明确绑定的安全入口（例如岗位条目、详情、查看、编辑、继续编辑、岗位管理中的同类入口）时，"
+    "这不是可交回父 Agent 的 next_step，而是本 scene 应继续完成的页面动作；应先尝试进入该岗位详情或可编辑表单并读取字段。"
+    "只要安全岗位入口仍可见或可通过页面内滚动/返回/关闭/岗位管理导航恢复可见，就不要输出“建议继续”“next_step”或“下一步”；"
+    "应在本 scene 内选择一个与岗位明确绑定、非关闭/发布/刷新/升级的入口继续执行。"
     "每个完成详情必须同时具备当前目标 host 的详情 URL、详情页标题/职位名、职责和要求等页面证据；"
     "不得把旧页面、其他端口、历史摘要或模型推断中的职位名当作当前站点证据。"
     "不得处理请求目标之外的业务域、业务实体或业务流程；不得主动聚焦浏览器地址栏、输入 URL 或粘贴 URL。"
@@ -640,7 +657,7 @@ _JD_SYNC_SCENE_INSTRUCTION = (
     "只有登录、验证码、权限、必要执行工具缺失或目标站点不可达才可返回硬阻塞。"
     "返回必须遵守 output_contract：把本次实际观察到的职位发现、完整详情、未完成项、下架/关闭线索和生效入口线索写入结构化 result_data。"
     "不要把历史摘要中的具体职位名、数量、比例或推断进度写进 instruction 或自然语言结论；具体进度只允许出现在结构化字段中。"
-    "若已发现岗位数量大于已完成详情数量，或仍有 offscreen 详情入口未进入详情页读取，status 必须是 partial/blocked，不能 completed。"
+    "若页面证据表明仍有岗位未读取详情，status 必须是 partial/blocked，不能 completed。"
 )
 
 
@@ -661,16 +678,17 @@ def _jd_sync_scene_output_contract() -> dict[str, Any]:
         ],
         "field_contract": {
             "observed_jobs": "Jobs actually observed in this scene turn; use stable current-host page-visible identifiers when available. If the list shows a total count, observed_jobs must account for every listed/open job, including entries below the viewport.",
-            "completed_job_details": "Only jobs whose current-host detail page was opened/read in this scene turn or whose full detail evidence is present. Each item must include title, department, location, status, external_id or external_url, summary/description, requirements when visible, and detail evidence from the current detail URL.",
+            "completed_job_details": "Only jobs whose current-host detail page, employer-side editable job form, job management detail surface, or equivalent detail region was opened/read in this scene turn or whose full detail evidence is present. Each item must include title, department, location, status, compensation, experience, education, external_id or external_url, detail evidence from the current detail surface, and original visible JD text. Use summary only for a short summary. Use description for the original 职位描述 text; if the site splits 职位描述/职责 and 任职要求, combine the original visible text into description and optionally also return raw requirements. Do not put paraphrases such as 已可见/包含/聚焦 in description or requirements.",
             "inactive_or_closed_jobs": "Jobs observed as inactive, closed, unavailable, or removed.",
             "activation_entry_observed": "Whether the scene observed a page entry for choosing active/effective JD.",
             "blockers": "Hard blockers only: login, captcha, permission, missing required tools, or unreachable target site.",
-            "limitations": "Recoverable or incomplete conditions; include any offscreen details not yet opened and any mismatch between listed open jobs and completed detail pages.",
-            "evidence": "Short current-host evidence references or page facts that justify each completed job detail.",
+            "limitations": "Recoverable or incomplete conditions; include any details not yet opened and any mismatch between listed open jobs and completed detail pages. A visible safe job-bound detail/edit entry is not a blocker by itself; the scene should try to open it before returning.",
+            "evidence": "Short current-host evidence references or page facts that justify each completed job detail. Candidate lists, communication/message pages, and application progression pages are wrong-domain evidence for JD sync progress.",
         },
         "completion_rule": (
             "status may be completed only when the scene has returned all currently required complete JD details in completed_job_details "
-            "and no required detail is missing. If only list summaries, partial details, offscreen links, stale-host evidence, or inferred jobs are available, status must be partial or blocked."
+            "and no required detail is missing. If only list summaries, partial details, visible but unopened job-bound entries, stale-host evidence, or inferred jobs are available, status must be partial or blocked and must not be presented as a final scene result when a safe entry can still be opened. "
+            "Returning a recommendation/next_step to open a visible safe job-bound detail/edit entry is an output-contract violation; execute that page action inside the scene instead."
         ),
     }
 

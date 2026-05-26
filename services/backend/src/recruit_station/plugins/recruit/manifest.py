@@ -168,16 +168,22 @@ class RecruitPluginManifest:
                         "summary": {"type": "string", "description": "Short business summary; not a substitute for the full detail page."},
                         "description": {
                             "type": "string",
-                            "description": "Captured job responsibilities or full job detail text from the detail page.",
+                            "description": (
+                                "Original page text for the job description field. For JD sync, preserve the visible wording; "
+                                "if the site splits responsibilities/description and requirements, combine them here as one 职位描述 text instead of saving an observation summary."
+                            ),
                         },
                         "requirements": {
                             "type": "string",
-                            "description": "Captured qualifications, requirements, or must-have criteria from the detail page.",
+                            "description": (
+                                "Original visible qualifications or must-have criteria from the detail page when kept separately; "
+                                "do not write paraphrases such as 已可见/包含/聚焦."
+                            ),
                         },
                         "benefit_tags": {"type": "array", "items": {"type": "string"}},
                         "detail_metadata": {
                             "type": "object",
-                            "description": "Structured detail-page facts that support local recruiting work, such as responsibilities, requirements, or raw detail text.",
+                            "description": "Structured detail-page facts that support local recruiting work, such as original responsibilities, requirements, or raw detail text.",
                         },
                         "status": {"type": "string"},
                         "source": {

@@ -126,6 +126,7 @@ function rowMatchesKeyword(row: JdManagementRow, keyword: string): boolean {
 }
 
 function makeFormState(job: JobDescriptionSummaryRecord): JdFormState {
+  const description = combineJobDescriptionText(job.description || "", job.requirements || "");
   return {
     title: job.title || "",
     jobDescriptionId: job.jobDescriptionId || "",
@@ -141,8 +142,8 @@ function makeFormState(job: JobDescriptionSummaryRecord): JdFormState {
     employmentType: job.employmentType || "",
     source: job.source || "",
     summary: job.summary || "",
-    description: job.description || "",
-    requirements: job.requirements || "",
+    description,
+    requirements: "",
     benefitTags: job.benefitTags.join("，"),
   };
 }
@@ -164,7 +165,7 @@ function formToPayload(form: JdFormState, original?: JobDescriptionSummaryRecord
     educationRequirement: form.educationRequirement.trim() || null,
     summary: form.summary.trim() || null,
     description: form.description.trim() || null,
-    requirements: form.requirements.trim() || null,
+    requirements: null,
     benefitTags: form.benefitTags
       .split(/[，,]/)
       .map((item) => item.trim())
@@ -173,6 +174,23 @@ function formToPayload(form: JdFormState, original?: JobDescriptionSummaryRecord
     status: statusApiValue(form.status),
     source: form.source.trim() || undefined,
   };
+}
+
+function combineJobDescriptionText(description: string, requirements: string): string {
+  const normalizedDescription = description.trim();
+  const normalizedRequirements = requirements.trim();
+  if (!normalizedRequirements) {
+    return normalizedDescription;
+  }
+  if (!normalizedDescription) {
+    return normalizedRequirements;
+  }
+  const compactDescription = normalizedDescription.replace(/\s+/g, "");
+  const compactRequirements = normalizedRequirements.replace(/\s+/g, "");
+  if (compactDescription.includes(compactRequirements)) {
+    return normalizedDescription;
+  }
+  return `${normalizedDescription}\n\n任职要求：\n${normalizedRequirements}`;
 }
 
 function percentOf(value: number, total: number): string {
@@ -267,7 +285,7 @@ function JdDetailCard({
 
   const job = row.job;
   const recommendedBy = optionalJdMetadataString(job, ["recommendedBy", "recommended_by", "sourceName"]);
-  const focus = optionalJdMetadataString(job, ["focus", "focusText", "focus_text", "keyFocus"]) ?? job.requirements;
+  const focus = optionalJdMetadataString(job, ["focus", "focusText", "focus_text", "keyFocus"]) ?? job.description ?? job.summary;
 
   return (
     <aside className="jd-management-detail">
@@ -379,12 +397,12 @@ function JdDetailCard({
 
         <section className="jd-management-panel-card">
           <div className="jd-management-detail__section-head">
-            <strong className="jd-management-drawer__section-title">JD 预览摘要</strong>
+            <strong className="jd-management-drawer__section-title">职位描述</strong>
             <button type="button" className="jd-management-link-button" onClick={() => onOpenDrawer(row)}>
               查看完整 JD
             </button>
           </div>
-          <p className="jd-management-summary-text">{job.summary || job.description || "—"}</p>
+          <p className="jd-management-summary-text">{job.description || job.summary || "—"}</p>
         </section>
       </div>
     </aside>
@@ -490,15 +508,7 @@ function JdFullDrawer({
             </section>
 
             <section className="jd-management-drawer__card">
-              <strong className="jd-management-drawer__section-title">三、任职要求</strong>
-              <label className="jd-management-drawer__field">
-                <span className="jd-management-drawer__label">任职要求</span>
-                <FormTextarea className="jd-management-drawer__textarea" value={form.requirements} onChange={(event) => setField("requirements", event.target.value)} />
-              </label>
-            </section>
-
-            <section className="jd-management-drawer__card">
-              <strong className="jd-management-drawer__section-title">四、招聘信息</strong>
+              <strong className="jd-management-drawer__section-title">三、招聘信息</strong>
               <div className="jd-management-drawer__grid">
                 <label className="jd-management-drawer__field">
                   <span className="jd-management-drawer__label">学历要求</span>

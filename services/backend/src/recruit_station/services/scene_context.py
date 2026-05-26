@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
@@ -10,13 +11,14 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from recruit_station.agent_runtime.engine import InteractionEngine, InteractionEngineConfig
 from recruit_station.agent_runtime.types import InteractionOutput
-from recruit_station.db.base import utcnow
+from recruit_station.db.base import generate_id, utcnow
 from recruit_station.models.domain import AgentGlobalState
 from recruit_station.plugins.host import PluginHost
 from recruit_station.repositories.domain import (
     EnvironmentSnapshotRepository,
     ExecutionEpisodeRepository,
     ExecutionPlanRepository,
+    ExternalObservationRawPayloadRepository,
     TaskSpecRepository,
 )
 from recruit_station.product_adapters.limits import SceneExecutionLimits
@@ -48,6 +50,12 @@ _SCENE_BROWSER_TARGET_IDENTIFICATION_TOOL_NAMES = {
     "browser_get_active_tab",
 }
 _SCENE_BROWSER_PAGE_OBSERVATION_TOOL_NAMES = _SCENE_BROWSER_READ_ONLY_TOOL_NAMES - _SCENE_BROWSER_TARGET_IDENTIFICATION_TOOL_NAMES
+_SCENE_BROWSER_RAW_OBSERVATION_TOOL_NAMES = {
+    "browser_snapshot",
+    "browser_query_elements",
+    "browser_get_element",
+    "browser_debug_dom",
+}
 _SCENE_HID_BROWSER_SEQUENCE_PRIMITIVE_TYPES = {"click", "drag", "scroll", "type", "pasteText", "key"}
 
 
@@ -205,6 +213,11 @@ class SceneContextService:
                     snapshot_ids=snapshot_ids,
                 )
             except Exception as exc:  # pragma: no cover - defensive guard
+                session.rollback()
+                snapshot_ids = [
+                    snapshot.id
+                    for snapshot in snapshot_repo.for_episode(episode.id)
+                ]
                 return self._finalize_error(
                     session=session,
                     task_spec=task_spec,
@@ -342,6 +355,43 @@ class SceneContextService:
                 timeout_seconds=scene_turn_timeout_seconds,
             )
             blockers = _collect_blockers(last_outcome, engine_events)
+        raw_blockers = _collect_blockers(last_outcome, engine_events, ignore_recovered=False)
+        if not _is_workspace_paused_outcome(last_outcome) and _should_retry_scene_for_actionable_jd_detail_entry(
+            outcome=last_outcome,
+            blockers=raw_blockers,
+            output_contract=dict(request["output_contract"]),
+        ):
+            last_outcome = _scene_outcome_from_engine_with_timeout(
+                engine=engine,
+                instruction=_actionable_jd_detail_entry_retry_instruction(),
+                engine_events=engine_events,
+                browser_semantics=browser_semantics,
+                workspace_pause_checker=lambda: _workspace_control_paused(self.session_factory),
+                timeout_seconds=scene_turn_timeout_seconds,
+            )
+            blockers = _collect_blockers(last_outcome, engine_events)
+        raw_blockers = _collect_blockers(last_outcome, engine_events, ignore_recovered=False)
+        if not _is_workspace_paused_outcome(last_outcome) and _should_retry_scene_for_jd_edit_page_field_read(
+            outcome=last_outcome,
+            blockers=raw_blockers,
+            output_contract=dict(request["output_contract"]),
+        ):
+            last_outcome = _scene_outcome_from_engine_with_timeout(
+                engine=engine,
+                instruction=_jd_edit_page_field_read_retry_instruction(),
+                engine_events=engine_events,
+                browser_semantics=browser_semantics,
+                workspace_pause_checker=lambda: _workspace_control_paused(self.session_factory),
+                timeout_seconds=scene_turn_timeout_seconds,
+            )
+            blockers = _collect_blockers(last_outcome, engine_events)
+        _persist_raw_external_observation_payloads(
+            session=session,
+            task_spec=task_spec,
+            plan=plan,
+            episode=episode,
+            events=engine_events,
+        )
         snapshot_ids.extend(
             _append_environment_snapshots(
                 session=session,
@@ -805,7 +855,6 @@ def _append_episode_engine_events(
         "blocker_count": len(blockers),
         "last_gate_signal": outcome.gate_signal,
     }
-    session.commit()
 
 
 def _missing_required_scene_browser_hid_evidence_blocker(episode: Any) -> dict[str, Any] | None:
@@ -838,6 +887,56 @@ def _episode_has_successful_browser_or_hid_tool_result(episode: Any) -> bool:
     return False
 
 
+def _persist_raw_external_observation_payloads(
+    *,
+    session: Session,
+    task_spec: Any,
+    plan: Any,
+    episode: Any,
+    events: list[dict[str, Any]],
+) -> None:
+    raw_repo = ExternalObservationRawPayloadRepository(session)
+    for event in events:
+        raw_payload = _as_dict(event.get("_raw_external_observation_payload"))
+        if not raw_payload:
+            continue
+        payload = _as_dict(event.get("payload"))
+        if payload.get("raw_ref"):
+            continue
+        raw_id = generate_id()
+        payload_bytes = _canonical_json_bytes(raw_payload)
+        payload_sha256 = hashlib.sha256(payload_bytes).hexdigest()
+        raw_ref = f"external_observation_raw_payload:{raw_id}"
+        raw_repo.add_pending(
+            {
+                "id": raw_id,
+                "raw_ref": raw_ref,
+                "task_spec_id": task_spec.id,
+                "execution_plan_id": plan.id,
+                "execution_episode_id": episode.id,
+                "source": "scene_context",
+                "tool_name": str(raw_payload.get("tool_name") or payload.get("tool_name") or ""),
+                "payload_sha256": payload_sha256,
+                "payload_size_bytes": len(payload_bytes),
+                "storage_kind": "db_json",
+                "payload": raw_payload,
+                "raw_metadata": {
+                    "engine_output_seq": event.get("engine_output_seq"),
+                    "interaction_output_type": event.get("type"),
+                },
+            }
+        )
+        raw_metadata = {
+            "raw_ref": raw_ref,
+            "raw_sha256": payload_sha256,
+            "raw_size_bytes": len(payload_bytes),
+            "raw_storage_kind": "db_json",
+        }
+        payload.update(raw_metadata)
+        payload["raw_external_observation"] = dict(raw_metadata)
+        event["payload"] = payload
+
+
 def _append_environment_snapshots(
     *,
     session: Session,
@@ -848,6 +947,7 @@ def _append_environment_snapshots(
     events: list[dict[str, Any]],
 ) -> list[str]:
     snapshot_repo = EnvironmentSnapshotRepository(session)
+    raw_repo = ExternalObservationRawPayloadRepository(session)
     snapshot_ids: list[str] = []
     for event in events:
         if str(event.get("type") or "") != "tool_event":
@@ -856,9 +956,11 @@ def _append_environment_snapshots(
         if payload.get("kind") != "tool_result_ready":
             continue
         tool_name = str(payload.get("tool_name") or "")
-        output = payload.get("content")
+        raw_payload = _as_dict(event.get("_raw_external_observation_payload"))
+        output = raw_payload.get("content") if raw_payload else payload.get("content")
+        raw_metadata = _raw_observation_metadata_from_payload(payload)
         for candidate in _snapshot_candidates(tool_name=tool_name, output=output):
-            snapshot = snapshot_repo.create(
+            snapshot = snapshot_repo.add_pending(
                 {
                     "task_spec_id": task_spec.id,
                     "execution_plan_id": plan.id,
@@ -884,11 +986,18 @@ def _append_environment_snapshots(
                     "runtime_metadata": {
                         "engine_output_seq": event.get("engine_output_seq"),
                         "tool_name": tool_name,
+                        **raw_metadata,
+                        "raw_external_observation": dict(raw_metadata) if raw_metadata else {},
                         "environment_descriptor": _compact_value(_environment_descriptor(candidate)),
-                        "raw": _compact_value(candidate.get("runtime_metadata") or candidate),
+                        "summary": _compact_value(candidate.get("runtime_metadata") or candidate),
                     },
                 }
             )
+            raw_ref = raw_metadata.get("raw_ref")
+            if raw_ref:
+                raw_record = raw_repo.get_by_raw_ref(str(raw_ref))
+                if raw_record is not None and raw_record.environment_snapshot_id is None:
+                    raw_record.environment_snapshot_id = snapshot.id
             snapshot_ids.append(snapshot.id)
     return snapshot_ids
 
@@ -1168,6 +1277,167 @@ def _incomplete_progress_retry_instruction() -> str:
     )
 
 
+def _should_retry_scene_for_actionable_jd_detail_entry(
+    *,
+    outcome: AgentTurnOutcome,
+    blockers: list[dict[str, Any]],
+    output_contract: dict[str, Any] | None,
+) -> bool:
+    contract = _as_dict(output_contract)
+    required_fields = {str(item).strip() for item in contract.get("required_fields") or []}
+    if "completed_job_details" not in required_fields:
+        return False
+    if _is_scene_context_timeout(outcome, blockers):
+        return False
+    result_data = _normalize_scene_result_contract_data(
+        _scene_result_data(outcome, output_contract=contract),
+        contract,
+    )
+    completed_details = result_data.get("completed_job_details")
+    if isinstance(completed_details, list) and completed_details:
+        return False
+    if _has_hard_scene_blocker(blockers, result_data):
+        return False
+    text = f"{_compact_value(result_data)}\n{outcome.final_output or ''}".lower()
+    has_actionable_entry = any(
+        marker in text
+        for marker in (
+            "职位管理",
+            "job list",
+            "job_edit_form",
+            "岗位条目",
+            "职位项",
+            "岗位详情",
+            "职位详情",
+            "编辑入口",
+            "编辑/关闭",
+            "编辑、关闭",
+            "可编辑",
+            "detail entry",
+            "edit entry",
+        )
+    )
+    returned_next_step = any(
+        marker in text
+        for marker in (
+            "next_step",
+            "next_action",
+            "下一步",
+            "继续点击",
+            "继续从",
+            "尚未进入",
+            "未进入任一",
+            "没有职位详情",
+            "进入详情",
+            "打开职位详情",
+            "打开岗位详情",
+            "读取完整",
+        )
+    )
+    wrong_domain_only = any(marker in text for marker in ("沟通类页面", "沟通/消息", "候选人列表")) and not has_actionable_entry
+    return has_actionable_entry and returned_next_step and not wrong_domain_only
+
+
+def _has_hard_scene_blocker(blockers: list[dict[str, Any]], result_data: dict[str, Any]) -> bool:
+    text = f"{_compact_value(blockers)}\n{_compact_value(result_data.get('blockers'))}".lower()
+    return any(
+        marker in text
+        for marker in (
+            "login",
+            "登录",
+            "captcha",
+            "验证码",
+            "permission",
+            "权限",
+            "missing required tools",
+            "必要执行工具缺失",
+            "unreachable",
+            "不可达",
+            "tool_error",
+            "budget_exhausted",
+        )
+    )
+
+
+def _actionable_jd_detail_entry_retry_instruction() -> str:
+    return (
+        "你刚才已经观察到职位管理列表、岗位条目、详情/编辑入口或等价的安全岗位入口，但把可执行页面动作写成了 next_step。"
+        "这不是本 scene 可以交回父 Agent 的终局。请继续在当前同源页面内执行：重新观察当前页面，选择与岗位明确绑定且非破坏性的详情、查看、编辑或等价入口；"
+        "如入口不在可见区域，先滚动或使用页面内导航让它可见；进入岗位详情或可编辑岗位表单后，读取标题、地点、薪酬、经验、学历、描述、职责、要求等真实字段。"
+        "读取完成后再返回结构化 completed_job_details；若读完一个岗位后列表仍有未读岗位，再用页面可见的关闭、返回或岗位管理导航回到列表继续。"
+        "只有登录、验证码、权限、必要执行工具缺失或目标站点不可达，才可以返回 blocked。"
+    )
+
+
+def _should_retry_scene_for_jd_edit_page_field_read(
+    *,
+    outcome: AgentTurnOutcome,
+    blockers: list[dict[str, Any]],
+    output_contract: dict[str, Any] | None,
+) -> bool:
+    contract = _as_dict(output_contract)
+    required_fields = {str(item).strip() for item in contract.get("required_fields") or []}
+    if "completed_job_details" not in required_fields:
+        return False
+    if _is_scene_context_timeout(outcome, blockers):
+        return False
+    result_data = _normalize_scene_result_contract_data(
+        _scene_result_data(outcome, output_contract=contract),
+        contract,
+    )
+    completed_details = result_data.get("completed_job_details")
+    if isinstance(completed_details, list) and completed_details:
+        return False
+    if _has_hard_scene_blocker(blockers, result_data):
+        return False
+    text = f"{_compact_value(result_data)}\n{outcome.final_output or ''}".lower()
+    has_edit_surface = any(
+        marker in text
+        for marker in (
+            "职位编辑页",
+            "职位编辑",
+            "岗位编辑",
+            "编辑页",
+            "编辑表单",
+            "发布职位",
+            "job_edit",
+            "job edit",
+            "edit page",
+            "edit form",
+        )
+    )
+    deferred_field_read = any(
+        marker in text
+        for marker in (
+            "next_step",
+            "next_action",
+            "下一步",
+            "建议继续",
+            "继续在编辑页",
+            "核对",
+            "补全",
+            "关键字段",
+            "尚未完成",
+            "暂不能确认",
+            "读取字段",
+            "读取完整字段",
+        )
+    )
+    wrong_domain = any(marker in text for marker in ("沟通/消息", "候选人", "简历", "投递推进"))
+    return has_edit_surface and deferred_field_read and not wrong_domain
+
+
+def _jd_edit_page_field_read_retry_instruction() -> str:
+    return (
+        "你刚才已经进入岗位编辑页、岗位编辑表单或等价岗位详情表面，但把“核对/补全字段”写成了 next_step。"
+        "这不是本 scene 可以交回父 Agent 的终局。请留在当前同源编辑页内继续读取真实字段："
+        "职位名称、岗位类别、地点、薪酬、经验、学历、工作期限、职位描述、岗位职责、任职要求。"
+        "如果字段在当前 viewport 之外，使用页面内滚动并重新 browser_snapshot/query；不要点击发布、关闭、刷新、升级等破坏性或权益动作。"
+        "读取到完整字段后返回结构化 completed_job_details；如果本地已有同 external_id/external_url 或同详情文本指纹的 JD，只需把它作为已验证详情返回，不要建议父 Agent 再核对。"
+        "只有登录、验证码、权限、必要执行工具缺失或目标站点不可达，才可以返回 blocked。"
+    )
+
+
 def _should_retry_scene_for_transient_hid_error(
     *,
     outcome: AgentTurnOutcome,
@@ -1423,11 +1693,50 @@ def _is_actionable_browser_item(value: Any) -> bool:
 
 
 def _runtime_output_event(output: InteractionOutput) -> dict[str, Any]:
-    return {
+    event = {
         "type": output.type,
         "engine_output_seq": output.seq,
         "payload": _compact_value(dict(output.data or {})),
         "recorded_at": utcnow().isoformat(),
+    }
+    raw_payload = _raw_external_observation_payload(output)
+    if raw_payload:
+        event["_raw_external_observation_payload"] = raw_payload
+    return event
+
+
+def _raw_external_observation_payload(output: InteractionOutput) -> dict[str, Any]:
+    if output.type != "tool_event":
+        return {}
+    payload = dict(output.data or {})
+    if payload.get("kind") != "tool_result_ready":
+        return {}
+    tool_name = str(payload.get("tool_name") or "")
+    if not _is_raw_external_observation_tool(tool_name):
+        return {}
+    return payload
+
+
+def _is_raw_external_observation_tool(tool_name: str) -> bool:
+    return tool_name in _SCENE_BROWSER_RAW_OBSERVATION_TOOL_NAMES
+
+
+def _canonical_json_bytes(payload: dict[str, Any]) -> bytes:
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _raw_observation_metadata_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    raw_ref = _optional_string(payload.get("raw_ref"), max_length=128)
+    raw_sha256 = _optional_string(payload.get("raw_sha256"), max_length=64)
+    raw_size_bytes = _optional_int(payload.get("raw_size_bytes"))
+    raw_storage_kind = _optional_string(payload.get("raw_storage_kind"), max_length=32)
+    if not raw_ref or not raw_sha256 or raw_size_bytes is None or not raw_storage_kind:
+        return {}
+    return {
+        "raw_ref": raw_ref,
+        "raw_sha256": raw_sha256,
+        "raw_size_bytes": raw_size_bytes,
+        "raw_storage_kind": raw_storage_kind,
     }
 
 
@@ -1807,6 +2116,14 @@ def _validate_scene_browser_tool_target(
         return None
     if not tab_url and tab_host and _scene_url_matches_target_origin(tab_host, target_origin=target_origin):
         return None
+    replacement_tab_id = _find_scene_same_origin_tab_id(
+        browser_semantics,
+        target_origin=target_origin,
+        exclude_tab_id=tab_id,
+    )
+    if replacement_tab_id is not None:
+        _set_browser_tab_id_argument(arguments, replacement_tab_id)
+        return None
     if not tab_info or (not tab_url and not tab_host):
         return _scene_browser_tab_blocker(
             error="scene_browser_target_not_established",
@@ -1852,6 +2169,38 @@ def _browser_tab_id_from_arguments(arguments: dict[str, Any]) -> int | None:
     if "tabId" in arguments:
         return _optional_int(arguments.get("tabId"))
     return _optional_int(arguments.get("tab_id"))
+
+
+def _set_browser_tab_id_argument(arguments: dict[str, Any], tab_id: int) -> None:
+    if "tab_id" in arguments and "tabId" not in arguments:
+        arguments["tab_id"] = tab_id
+        return
+    arguments["tabId"] = tab_id
+    arguments.pop("tab_id", None)
+
+
+def _find_scene_same_origin_tab_id(
+    browser_semantics: dict[str, Any],
+    *,
+    target_origin: str,
+    exclude_tab_id: int | None = None,
+) -> int | None:
+    tabs = browser_semantics.get("tabs")
+    if not isinstance(tabs, dict):
+        return None
+    for raw_tab_id, tab_info in tabs.items():
+        tab_id = _optional_int(raw_tab_id)
+        if tab_id is None or tab_id == exclude_tab_id or not isinstance(tab_info, dict):
+            continue
+        if not bool(tab_info.get("observed")):
+            continue
+        tab_url = _optional_string(tab_info.get("url"))
+        tab_host = _optional_string(tab_info.get("host"), max_length=255)
+        if tab_url and _scene_url_matches_target_origin(tab_url, target_origin=target_origin):
+            return tab_id
+        if not tab_url and tab_host and _scene_url_matches_target_origin(tab_host, target_origin=target_origin):
+            return tab_id
+    return None
 
 
 def _scene_browser_tab_blocker(
@@ -2066,7 +2415,7 @@ def _initial_browser_semantics(request: dict[str, Any]) -> dict[str, Any]:
     if url:
         state["last_url"] = url
     if tab_id is not None and (host or url):
-        state["tabs"][tab_id] = {"tabId": tab_id, "host": host, "url": url}
+        state["tabs"][tab_id] = {"tabId": tab_id, "host": host, "url": url, "sceneRequestTarget": True}
     return state
 
 
@@ -2145,6 +2494,7 @@ def _remember_browser_tab(browser_semantics: dict[str, Any], tab: dict[str, Any]
                 "browserWindowBounds": window_bounds,
                 "active": bool(tab.get("active")),
                 "viewport": viewport or None,
+                "observed": True,
             }.items()
             if value not in (None, "", {})
         }
@@ -2773,7 +3123,51 @@ def _scene_result_contract_blockers(result_data: dict[str, Any], output_contract
                     "missing_fields": ["completed_job_details"],
                 }
             )
+        else:
+            summary_like_fields = _summary_like_completed_job_detail_fields(completed_details)
+            if summary_like_fields:
+                blockers.append(
+                    {
+                        "kind": "output_contract_incomplete",
+                        "message": "scene completed_job_details must contain original JD field text, not observation summaries",
+                        "invalid_fields": summary_like_fields,
+                    }
+                )
     return blockers
+
+
+def _summary_like_completed_job_detail_fields(completed_details: list[Any]) -> list[dict[str, Any]]:
+    invalid: list[dict[str, Any]] = []
+    for index, detail in enumerate(completed_details):
+        if not isinstance(detail, dict):
+            continue
+        for field in ("description", "requirements"):
+            value = detail.get(field)
+            if _looks_like_scene_jd_summary(value):
+                invalid.append({"index": index, "field": field})
+    return invalid
+
+
+def _looks_like_scene_jd_summary(value: Any) -> bool:
+    if isinstance(value, list):
+        return any(_looks_like_scene_jd_summary(item) for item in value)
+    text = str(value or "").strip()
+    if not text:
+        return False
+    markers = (
+        "已可见",
+        "已读取",
+        "已展示",
+        "已记录",
+        "包含",
+        "聚焦",
+        "侧重",
+        "可见内容",
+        "相关内容",
+        "等内容",
+        "等字段",
+    )
+    return any(marker in text for marker in markers)
 
 
 def _align_result_data_status(result_data: dict[str, Any], public_status: str) -> dict[str, Any]:
@@ -2888,22 +3282,35 @@ def _available_mcp_names(tool_registry: ToolRegistry) -> list[str]:
     return sorted(names)
 
 
-def _compact_value(value: Any, *, depth: int = 0) -> Any:
+_LOSSLESS_BROWSER_OBSERVATION_LIST_KEYS = {
+    "clickables",
+    "matches",
+    "elements",
+    "action_hints",
+    "affordances",
+}
+
+
+def _compact_value(value: Any, *, depth: int = 0, key_hint: str | None = None) -> Any:
     if isinstance(value, str):
         limit = 320 if depth < 2 else 180
         return value if len(value) <= limit else f"{value[: limit - 3]}..."
     if isinstance(value, (int, float, bool)) or value is None:
         return value
     if isinstance(value, list):
-        items = [_compact_value(item, depth=depth + 1) for item in value[:4]]
+        preserve_all = str(key_hint or "") in _LOSSLESS_BROWSER_OBSERVATION_LIST_KEYS
+        source = value if preserve_all else value[:4]
+        items = [_compact_value(item, depth=depth + 1) for item in source]
         if len(value) > 4:
+            if preserve_all:
+                return items
             items.append(f"... {len(value) - 4} more items omitted")
         return items
     if isinstance(value, dict):
         compact: dict[str, Any] = {}
         for raw_key in list(value.keys())[:12]:
             key = str(raw_key)
-            compact[key] = _compact_value(value[raw_key], depth=depth + 1)
+            compact[key] = _compact_value(value[raw_key], depth=depth + 1, key_hint=key)
         if len(value) > 12:
             compact["_truncated_keys"] = len(value) - 12
         return compact

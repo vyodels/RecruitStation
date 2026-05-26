@@ -785,7 +785,7 @@ function recommendedAutomationJobStrategy(
   fallbackPolicy?: RecruitingPolicyConfig,
 ): AutomationJobStrategyDraft {
   return {
-    screeningCriteria: fallbackPolicy?.jdStandards || job.requirements || job.summary || "围绕该 JD 的岗位目标、核心职责、硬性门槛、加分项和排除项筛选候选人；所有判断必须引用 JD 要求或候选人证据。",
+    screeningCriteria: fallbackPolicy?.jdStandards || job.requirements || job.description || job.summary || "围绕该 JD 的岗位目标、核心职责、硬性门槛、加分项和排除项筛选候选人；所有判断必须引用 JD 要求或候选人证据。",
     onlineResumeCriteria: fallbackPolicy?.onlineResumeCriteria || "在线简历优先判断 JD 匹配度、最近岗位相关性、核心技能证据、项目深度、稳定性和明显风险；不足以判断时进入补充材料环节。",
     offlineResumeCriteria: fallbackPolicy?.offlineResumeCriteria || "离线简历用于补齐在线资料缺失的信息，重点检查项目细节、影响指标、职责边界、联系方式和时间线一致性。",
     compositeScoring: fallbackPolicy?.compositeScoring || "综合评分基于 JD 匹配、在线简历、离线简历、沟通记录和风险项生成，必须输出维度分、证据引用、通过/淘汰建议和下一步动作。",

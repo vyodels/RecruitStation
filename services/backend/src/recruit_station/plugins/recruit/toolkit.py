@@ -163,7 +163,59 @@ def upsert_job_description(
     normalized_sync_status = None if sync_status is _UNSET else (_normalize_optional_text(sync_status) or "synced")
     normalized_department = None if department is _UNSET else _normalize_optional_text(department)
     normalized_location = None if location is _UNSET else _normalize_optional_text(location)
+    normalized_source = None if source is _UNSET else _normalize_optional_text(source)
+    normalized_description = None if description is _UNSET else _normalize_optional_text(description)
+    normalized_requirements = None if requirements is _UNSET else _normalize_optional_text(requirements)
     normalized_sync_metadata = None if sync_metadata is _UNSET else _normalize_mapping(sync_metadata, field_name="sync_metadata")
+    normalized_detail_metadata = (
+        None if detail_metadata is _UNSET else _normalize_mapping(detail_metadata, field_name="detail_metadata")
+    )
+    if normalized_external_id is None and normalized_detail_metadata:
+        normalized_external_id = _first_metadata_text(
+            normalized_detail_metadata,
+            "external_id",
+            "externalId",
+            "job_id",
+            "jobId",
+            "encryptId",
+            "encrypt_id",
+        )
+    if normalized_external_url is None and normalized_detail_metadata:
+        normalized_external_url = _first_metadata_text(
+            normalized_detail_metadata,
+            "external_url",
+            "externalUrl",
+            "observed_detail_url",
+            "observedDetailUrl",
+            "source_url",
+            "sourceUrl",
+        )
+    if normalized_platform is None:
+        normalized_platform = _infer_job_platform(
+            source=normalized_source,
+            external_url=normalized_external_url,
+            detail_metadata=normalized_detail_metadata,
+        )
+    is_jd_sync_write = _is_jd_sync_write(
+        source=normalized_source,
+        platform=normalized_platform,
+        external_url=normalized_external_url,
+        detail_metadata=normalized_detail_metadata,
+        sync_metadata=normalized_sync_metadata,
+    )
+    matching_description = _job_description_storage_text(
+        description=normalized_description,
+        requirements=normalized_requirements,
+        detail_metadata=normalized_detail_metadata,
+        existing_description=None,
+        jd_sync=is_jd_sync_write,
+    )
+    matching_requirements = _job_requirements_storage_text(
+        requirements=normalized_requirements,
+        detail_metadata=normalized_detail_metadata,
+        existing_requirements=None,
+        jd_sync=is_jd_sync_write,
+    )
 
     _validate_mock_recruiting_site_exact_jd_fields(
         title=normalized_title,
@@ -202,6 +254,14 @@ def upsert_job_description(
                 department=normalized_department,
                 location=normalized_location,
             )
+        if item is None:
+            item = _find_matching_job_by_detail_fingerprint(
+                session,
+                location=normalized_location,
+                compensation_text=None if compensation_text is _UNSET else _normalize_optional_text(compensation_text),
+                description=matching_description,
+                requirements=matching_requirements,
+            )
 
         payload: dict[str, Any] = {"title": normalized_title}
         _set_if_provided(payload, "company_name", company_name, _normalize_optional_text)
@@ -215,10 +275,28 @@ def upsert_job_description(
         _set_if_provided(payload, "experience_requirement", experience_requirement, _normalize_optional_text)
         _set_if_provided(payload, "education_requirement", education_requirement, _normalize_optional_text)
         _set_if_provided(payload, "summary", summary, _normalize_optional_text)
-        _set_if_provided(payload, "description", description, _normalize_optional_text)
-        _set_if_provided(payload, "requirements", requirements, _normalize_optional_text)
+        if description is not _UNSET or (is_jd_sync_write and detail_metadata is not _UNSET):
+            stored_description = _job_description_storage_text(
+                description=normalized_description,
+                requirements=normalized_requirements,
+                detail_metadata=normalized_detail_metadata,
+                existing_description=item.description if item is not None else None,
+                jd_sync=is_jd_sync_write,
+            )
+            if stored_description is not None or description is not _UNSET:
+                payload["description"] = stored_description
+        if requirements is not _UNSET or (is_jd_sync_write and detail_metadata is not _UNSET):
+            stored_requirements = _job_requirements_storage_text(
+                requirements=normalized_requirements,
+                detail_metadata=normalized_detail_metadata,
+                existing_requirements=item.requirements if item is not None else None,
+                jd_sync=is_jd_sync_write,
+            )
+            if stored_requirements is not None or requirements is not _UNSET:
+                payload["requirements"] = stored_requirements
         _set_if_provided(payload, "benefit_tags", benefit_tags, _normalize_string_list)
-        _set_if_provided(payload, "detail_metadata", detail_metadata, lambda value: _normalize_mapping(value, field_name="detail_metadata"))
+        if detail_metadata is not _UNSET:
+            payload["detail_metadata"] = normalized_detail_metadata or {}
 
         if status is _UNSET:
             if item is None:
@@ -230,7 +308,7 @@ def upsert_job_description(
             if item is None:
                 payload["source"] = "platform_sync"
         else:
-            payload["source"] = _normalize_optional_text(source) or "platform_sync"
+            payload["source"] = normalized_source or "platform_sync"
 
         action = "created"
         if item is None:
@@ -1287,12 +1365,272 @@ def _find_matching_job(session: Session, *, title: str, department: str | None, 
     return candidates[0][3]
 
 
+def _find_matching_job_by_detail_fingerprint(
+    session: Session,
+    *,
+    location: str | None,
+    compensation_text: str | None,
+    description: str | None,
+    requirements: str | None,
+) -> JobDescription | None:
+    description_key = _text_fingerprint(description)
+    requirements_key = _text_fingerprint(requirements)
+    if not description_key and not requirements_key:
+        return None
+
+    candidates = []
+    stmt = select(JobDescription).where(JobDescription.status == "active").order_by(
+        JobDescription.updated_at.desc(),
+        JobDescription.id.asc(),
+    )
+    for item in session.scalars(stmt).all():
+        score = 0
+        if location and item.location == location:
+            score += 2
+        if compensation_text and item.compensation_text == compensation_text:
+            score += 1
+        if description_key and _text_fingerprint(item.description) == description_key:
+            score += 4
+        if requirements_key and _text_fingerprint(item.requirements) == requirements_key:
+            score += 4
+        if score >= 6:
+            candidates.append((score, item.updated_at, item.id, item))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda candidate: (-candidate[0], -candidate[1], candidate[2]))
+    return candidates[0][3]
+
+
 def _external_urls_compatible(left: str, right: str) -> bool:
     if left == right:
         return True
     left_host = urlparse(left).netloc
     right_host = urlparse(right).netloc
     return bool(left_host and right_host and left_host == right_host)
+
+
+def _is_jd_sync_write(
+    *,
+    source: str | None,
+    platform: str | None,
+    external_url: str | None,
+    detail_metadata: dict[str, Any] | None,
+    sync_metadata: dict[str, Any] | None,
+) -> bool:
+    metadata = detail_metadata or {}
+    text = " ".join(
+        item
+        for item in (
+            source,
+            platform,
+            external_url,
+            _normalize_optional_text(metadata.get("source")),
+            _normalize_optional_text(metadata.get("platform")),
+            _normalize_optional_text((sync_metadata or {}).get("observed_detail_url")),
+        )
+        if item
+    ).lower()
+    return bool(
+        source == "jd_sync"
+        or (sync_metadata and _metadata_truthy(sync_metadata.get("detail_complete")))
+        or "zhipin" in text
+        or "boss" in text
+        or "job edit page" in text
+    )
+
+
+def _job_description_storage_text(
+    *,
+    description: str | None,
+    requirements: str | None,
+    detail_metadata: dict[str, Any] | None,
+    existing_description: str | None,
+    jd_sync: bool,
+) -> str | None:
+    raw_description = _metadata_text_from_keys(
+        detail_metadata,
+        "raw_description",
+        "original_description",
+        "description_original",
+        "page_description_text",
+        "job_description_text",
+        "responsibilities_text",
+        "responsibility_text",
+        "responsibilities",
+        "responsibility",
+        "duties",
+    )
+    raw_requirements = _metadata_text_from_keys(
+        detail_metadata,
+        "raw_requirements",
+        "original_requirements",
+        "requirements_original",
+        "page_requirements_text",
+        "job_requirements_text",
+        "requirements_text",
+        "requirements",
+        "qualifications",
+    )
+
+    description_is_summary = _looks_like_jd_summary(description)
+    requirements_is_summary = _looks_like_jd_summary(requirements)
+    description_parts = [raw_description or (None if description_is_summary else description)]
+    requirement_part = raw_requirements or (None if requirements_is_summary else requirements)
+    composed = _compose_description_with_requirements(description_parts[0], requirement_part)
+    if composed:
+        return composed
+
+    if jd_sync and description_is_summary and existing_description:
+        return existing_description
+    if jd_sync and description_is_summary:
+        return existing_description
+    return description
+
+
+def _job_requirements_storage_text(
+    *,
+    requirements: str | None,
+    detail_metadata: dict[str, Any] | None,
+    existing_requirements: str | None,
+    jd_sync: bool,
+) -> str | None:
+    if jd_sync:
+        return None
+    raw_requirements = _metadata_text_from_keys(
+        detail_metadata,
+        "raw_requirements",
+        "original_requirements",
+        "requirements_original",
+        "page_requirements_text",
+        "job_requirements_text",
+        "requirements_text",
+        "requirements",
+        "qualifications",
+    )
+    if raw_requirements:
+        return raw_requirements
+    if jd_sync and _looks_like_jd_summary(requirements):
+        return existing_requirements
+    return requirements
+
+
+def _compose_description_with_requirements(description: str | None, requirements: str | None) -> str | None:
+    description = _normalize_optional_text(description)
+    requirements = _normalize_optional_text(requirements)
+    if not description and not requirements:
+        return None
+    if description and requirements and _text_contains_normalized(description, requirements):
+        return description
+    parts: list[str] = []
+    if description:
+        parts.append(description)
+    if requirements:
+        if description and not re.search(r"任职要求|职位要求|岗位要求|要求", description):
+            parts.append(f"任职要求：\n{requirements}")
+        else:
+            parts.append(requirements)
+    return "\n\n".join(parts)
+
+
+def _metadata_text_from_keys(metadata: dict[str, Any] | None, *keys: str) -> str | None:
+    if not metadata:
+        return None
+    for key in keys:
+        text = _metadata_value_text(metadata.get(key))
+        if text:
+            return text
+    return None
+
+
+def _metadata_value_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return _normalize_optional_text(value)
+    if isinstance(value, (list, tuple)):
+        parts = []
+        for item in value:
+            text = _metadata_value_text(item)
+            if text:
+                parts.append(text)
+        return "\n".join(parts) or None
+    if isinstance(value, dict):
+        for key in (
+            "text",
+            "content",
+            "value",
+            "description",
+            "requirements",
+            "responsibilities",
+            "raw_text",
+            "rawText",
+        ):
+            text = _metadata_value_text(value.get(key))
+            if text:
+                return text
+    return _normalize_optional_text(value)
+
+
+def _looks_like_jd_summary(value: str | None) -> bool:
+    text = _normalize_optional_text(value)
+    if not text:
+        return False
+    summary_markers = (
+        "已可见",
+        "已读取",
+        "已展示",
+        "已记录",
+        "包含",
+        "聚焦",
+        "侧重",
+        "可见内容",
+        "相关内容",
+        "等内容",
+        "等字段",
+    )
+    return any(marker in text for marker in summary_markers)
+
+
+def _text_contains_normalized(container: str, contained: str) -> bool:
+    left = _text_fingerprint(container)
+    right = _text_fingerprint(contained)
+    return bool(left and right and right in left)
+
+
+def _first_metadata_text(metadata: dict[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        value = _normalize_optional_text(metadata.get(key))
+        if value:
+            return value
+    return None
+
+
+def _infer_job_platform(
+    *,
+    source: str | None,
+    external_url: str | None,
+    detail_metadata: dict[str, Any] | None,
+) -> str | None:
+    source_text = " ".join(
+        item
+        for item in (
+            source,
+            external_url,
+            _normalize_optional_text((detail_metadata or {}).get("source")),
+            _normalize_optional_text((detail_metadata or {}).get("platform")),
+        )
+        if item
+    ).lower()
+    if "zhipin.com" in source_text or "zhipin" in source_text or "boss" in source_text:
+        return "zhipin"
+    return None
+
+
+def _text_fingerprint(value: str | None) -> str:
+    text = _normalize_optional_text(value)
+    if not text:
+        return ""
+    return "".join(ch for ch in text.lower() if ch.isalnum())
 
 
 def _serialize_job_description(session: Session, item: JobDescription) -> dict[str, Any]:

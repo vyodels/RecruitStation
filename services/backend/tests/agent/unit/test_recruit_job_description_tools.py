@@ -139,6 +139,171 @@ def test_upsert_job_description_title_fallback_allows_missing_existing_location(
     assert len(list_job_descriptions(container.session_factory)) == 1
 
 
+def test_upsert_job_description_uses_detail_metadata_external_identity(tmp_path) -> None:
+    container = _build_container(tmp_path)
+
+    created = upsert_job_description(
+        container.session_factory,
+        title="产品实习生",
+        location="北京",
+        source="jd_sync",
+        detail_metadata={
+            "source": "zhipin employer job edit page",
+            "external_id": "boss-job-001",
+            "external_url": "https://www.zhipin.com/web/chat/job/edit?encryptId=boss-job-001",
+        },
+    )
+    updated = upsert_job_description(
+        container.session_factory,
+        title="产品实习生",
+        location="北京朝阳区",
+        source="jd_sync",
+        detail_metadata={
+            "source": "zhipin employer job edit page",
+            "external_id": "boss-job-001",
+            "external_url": "https://www.zhipin.com/web/chat/job/edit?encryptId=boss-job-001",
+        },
+    )
+
+    assert updated["action"] == "updated"
+    assert created["job_description"]["job_description_id"] == updated["job_description"]["job_description_id"]
+    assert updated["platform_identity"]["platform"] == "zhipin"
+    assert updated["platform_identity"]["external_id"] == "boss-job-001"
+    assert len(list_job_descriptions(container.session_factory)) == 1
+
+
+def test_upsert_job_description_reuses_matching_detail_fingerprint_when_title_is_category(tmp_path) -> None:
+    container = _build_container(tmp_path)
+    description = "负责 B 端、数据产品、中后台产品以及 AI 产品的需求分析、产品设计和迭代。"
+    requirements = "本科及以上学历，计算机科学、人工智能或相关专业优先。"
+
+    created = upsert_job_description(
+        container.session_factory,
+        title="产品实习生",
+        location="北京朝阳区建外SOHO东区B座20层2003室",
+        compensation_text="2k-4k",
+        description=description,
+        requirements=requirements,
+        source="jd_sync",
+        detail_metadata={
+            "source": "zhipin employer job edit page",
+            "external_id": "boss-job-002",
+        },
+    )
+    updated = upsert_job_description(
+        container.session_factory,
+        title="AI产品经理",
+        location="北京朝阳区建外SOHO东区B座20层2003室",
+        compensation_text="2k-4k",
+        description=description,
+        requirements=requirements,
+        source="jd_sync",
+        detail_metadata={"source": "zhipin employer job edit page"},
+    )
+
+    assert updated["action"] == "updated"
+    assert created["job_description"]["job_description_id"] == updated["job_description"]["job_description_id"]
+    assert len(list_job_descriptions(container.session_factory)) == 1
+
+
+def test_jd_sync_combines_original_requirements_into_description(tmp_path) -> None:
+    container = _build_container(tmp_path)
+
+    stored = upsert_job_description(
+        container.session_factory,
+        title="产品实习生",
+        description="负责 B 端、数据产品、中后台产品以及 AI 产品的需求分析、产品设计和迭代。",
+        requirements="本科及以上学历，计算机科学、人工智能或相关专业优先。",
+        source="jd_sync",
+        detail_metadata={
+            "source": "zhipin employer job edit page",
+            "external_id": "boss-job-003",
+        },
+        sync_metadata={
+            "detail_complete": True,
+            "observed_detail_url": "https://www.zhipin.com/web/chat/job/edit?encryptId=boss-job-003",
+            "blockers": [],
+            "missing_fields": [],
+        },
+    )
+
+    assert stored["job_description"]["description"] == (
+        "负责 B 端、数据产品、中后台产品以及 AI 产品的需求分析、产品设计和迭代。\n\n"
+        "任职要求：\n"
+        "本科及以上学历，计算机科学、人工智能或相关专业优先。"
+    )
+    assert stored["job_description"]["requirements"] is None
+
+
+def test_jd_sync_prefers_original_metadata_over_observation_summary(tmp_path) -> None:
+    container = _build_container(tmp_path)
+
+    stored = upsert_job_description(
+        container.session_factory,
+        title="产品实习生",
+        description="岗位描述已可见，包含需求分析、产品设计等内容。",
+        requirements="任职要求已可见，包含本科及以上、AI 热情等内容。",
+        source="jd_sync",
+        detail_metadata={
+            "source": "zhipin employer job edit page",
+            "external_id": "boss-job-004",
+            "responsibilities": [
+                "负责B端、数据产品、中后台产品以及AI产品的需求分析、产品设计和迭代，确保产品满足市场和客户需求",
+                "制定产品策略和规划，协调跨部门资源，确保产品按时发布和更新",
+            ],
+            "requirements": [
+                "本科及以上学历，计算机科学、人工智能或相关专业优先",
+                "对AI领域有热情，乐于应对挑战，具备团队合作精神和解决问题的能力",
+            ],
+        },
+        sync_metadata={
+            "detail_complete": True,
+            "observed_detail_url": "https://www.zhipin.com/web/chat/job/edit?encryptId=boss-job-004",
+            "blockers": [],
+            "missing_fields": [],
+        },
+    )
+
+    assert "岗位描述已可见" not in stored["job_description"]["description"]
+    assert "任职要求已可见" not in stored["job_description"]["description"]
+    assert "负责B端、数据产品" in stored["job_description"]["description"]
+    assert "任职要求：\n本科及以上学历" in stored["job_description"]["description"]
+    assert stored["job_description"]["requirements"] is None
+
+
+def test_jd_sync_does_not_overwrite_original_description_with_summary(tmp_path) -> None:
+    container = _build_container(tmp_path)
+    original_description = "负责 B 端产品需求分析和产品设计。"
+
+    created = upsert_job_description(
+        container.session_factory,
+        title="产品实习生",
+        description=original_description,
+        requirements="本科及以上学历。",
+        source="jd_sync",
+        detail_metadata={
+            "source": "zhipin employer job edit page",
+            "external_id": "boss-job-005",
+        },
+    )
+    updated = upsert_job_description(
+        container.session_factory,
+        title="产品实习生",
+        description="岗位描述已可见，包含 B 端产品需求分析等内容。",
+        requirements="任职要求已可见，包含本科及以上等内容。",
+        source="jd_sync",
+        detail_metadata={
+            "source": "zhipin employer job edit page",
+            "external_id": "boss-job-005",
+        },
+    )
+
+    assert updated["action"] == "updated"
+    assert updated["job_description"]["job_description_id"] == created["job_description"]["job_description_id"]
+    assert updated["job_description"]["description"].startswith(original_description)
+    assert "已可见" not in updated["job_description"]["description"]
+
+
 def test_mock_jd_sync_rejects_fields_that_do_not_match_sync_json(tmp_path, monkeypatch) -> None:
     container = _build_container(tmp_path)
     monkeypatch.setattr(

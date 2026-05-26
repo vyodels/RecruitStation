@@ -43,6 +43,18 @@ def test_resume_collection_prompt_uses_task_execution_terms() -> None:
     assert "task execution" in content
 
 
+def test_jd_sync_prompt_uses_semantic_editable_detail_surface_guidance() -> None:
+    content = prompt_path("tasks/job_description_sync").read_text(encoding="utf-8")
+
+    assert "雇主端可编辑岗位表单、岗位管理详情或等价详情区域" in content
+    assert "标题、地点、薪酬、经验、学历、描述、职责、要求" in content
+    assert "页面可见的关闭、返回或岗位管理导航回到职位列表" in content
+    assert "候选人列表、沟通/消息页或投递推进页" in content
+    assert "description` 表示本地 JD 的“职位描述”正文" in content
+    assert "不要把“已可见/包含/聚焦/等内容”" in content
+    assert "web/chat/job/edit" not in content
+
+
 def test_source_surface_inference_does_not_depend_on_site_specific_markers() -> None:
     markers = tuple(marker.lower() for marker in source_surface_markers("browser_accessible_recruiting_pages"))
 
