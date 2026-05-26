@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from itertools import count
+import time
 from typing import Iterator
 from uuid import uuid4
 
 from .history import ConversationHistory
+from .providers import ProviderError
 from .tools import ToolRegistry
 from .transcript import InMemoryTranscript, Transcript, TranscriptState
 from .types import (
@@ -20,6 +23,21 @@ from .types import (
     ToolUse,
     TurnContext,
 )
+
+
+@dataclass(slots=True)
+class ProviderRetryPolicy:
+    max_attempts: int = 3
+    base_delay_seconds: float = 0.5
+    max_delay_seconds: float = 4.0
+    multiplier: float = 2.0
+
+    def next_delay(self, attempt: int, *, retry_after_seconds: float | None = None) -> float:
+        if retry_after_seconds is not None:
+            return min(max(retry_after_seconds, 0.0), self.max_delay_seconds)
+        bounded_attempt = max(attempt - 1, 0)
+        delay = self.base_delay_seconds * (self.multiplier ** bounded_attempt)
+        return min(delay, self.max_delay_seconds)
 
 
 @dataclass(slots=True)
@@ -48,8 +66,15 @@ class InteractionEngineConfig:
     anthropic_payload_overrides: dict[str, object] | None = None
     max_llm_invocations: int = 12
     max_history_messages: int | None = None
+    max_context_chars: int | None = None
     compaction_summary_max_chars: int = 2000
+    provider_retry_policy: ProviderRetryPolicy | None = field(default_factory=ProviderRetryPolicy)
     initial_seq: int = 1
+    runtime: dict[str, object] = field(default_factory=dict)
+    pending_user_input_after_next_tool_call_provider: Callable[
+        [TurnContext, ToolCall, ToolResult],
+        list[LLMMessage],
+    ] | None = None
 
 
 @dataclass(slots=True)
@@ -104,7 +129,7 @@ class InteractionEngine:
             yield self._output("turn_started", turn_id, {})
             yield from self._run_turn(turn_id)
         except Exception as exc:
-            yield self._output("turn_failed", turn_id, {"error": str(exc)})
+            yield self._output("turn_failed", turn_id, _turn_failed_payload(exc))
             raise
         finally:
             self.active_turn_id = None
@@ -143,6 +168,10 @@ class InteractionEngine:
                 if self._abort_requested():
                     yield self._interrupted_output(pending.turn_id)
                     return
+                yield from self._inject_pending_user_input_after_next_tool_call(pending.context, pending.tool_call)
+                if self._abort_requested():
+                    yield self._interrupted_output(pending.turn_id)
+                    return
             else:
                 result = ToolResult(
                     tool_call_id=pending.tool_call.id,
@@ -158,7 +187,7 @@ class InteractionEngine:
                     return
             yield from self._run_turn(pending.turn_id, start_invocation_index=pending.next_invocation_index)
         except Exception as exc:
-            yield self._output("turn_failed", pending.turn_id, {"error": str(exc)})
+            yield self._output("turn_failed", pending.turn_id, _turn_failed_payload(exc))
             raise
         finally:
             self.active_turn_id = None
@@ -174,6 +203,7 @@ class InteractionEngine:
             conversation_id=self.config.conversation_id,
             tools=self.config.tools,
             abort_signal=self._abort_controller.signal,
+            runtime=dict(self.config.runtime or {}),
         )
         for invocation_index in range(start_invocation_index, self.config.max_llm_invocations):
             if self._abort_requested():
@@ -219,7 +249,7 @@ class InteractionEngine:
             if self._abort_requested():
                 yield self._interrupted_output(turn_id)
                 return
-            result = self.config.provider.invoke(request)
+            result = yield from self._invoke_provider_with_retry(turn_id, invocation_id, invocation_index, request)
             if self._abort_requested():
                 yield self._interrupted_output(turn_id)
                 return
@@ -269,6 +299,7 @@ class InteractionEngine:
                     name=tool_use.name,
                     input=dict(tool_use.input or {}),
                 )
+                tool_call = self._normalize_tool_call_input(registry, tool_call, context)
                 yield self._output(
                     "tool_event",
                     turn_id,
@@ -277,12 +308,13 @@ class InteractionEngine:
                         "tool_name": tool_call.name,
                         "tool_use_id": tool_call.tool_use_id,
                         "tool_call_id": tool_call.id,
+                        "input": dict(tool_call.input or {}),
                     },
                 )
                 if self._abort_requested():
                     yield self._interrupted_output(turn_id)
                     return
-                if self._requires_permission(registry, tool_call):
+                if self._requires_permission(registry, tool_call, context):
                     self.pending_permission = PendingPermissionState(
                         turn_id=turn_id,
                         tool_call=tool_call,
@@ -312,9 +344,87 @@ class InteractionEngine:
                 if self._abort_requested():
                     yield self._interrupted_output(turn_id)
                     return
+                yield from self._inject_pending_user_input_after_next_tool_call(context, tool_call)
+                if self._abort_requested():
+                    yield self._interrupted_output(turn_id)
+                    return
         yield self._output("turn_failed", turn_id, {"error": "max_llm_invocations_exhausted"})
 
+    def _invoke_provider_with_retry(
+        self,
+        turn_id: str,
+        invocation_id: str,
+        invocation_index: int,
+        request: LLMRequest,
+    ) -> Iterator[InteractionOutput | LLMInvocationResult]:
+        policy = self.config.provider_retry_policy
+        max_attempts = max(int(policy.max_attempts), 1) if policy is not None else 1
+        attempt = 1
+        while True:
+            try:
+                return self.config.provider.invoke(request)
+            except ProviderError as exc:
+                if self._abort_requested():
+                    raise
+                if not exc.retryable or attempt >= max_attempts:
+                    yield self._output(
+                        "runtime_event",
+                        turn_id,
+                        {
+                            "kind": "provider_retry_exhausted" if exc.retryable else "provider_error_terminal",
+                            "invocation_id": invocation_id,
+                            "invocation_index": invocation_index,
+                            "attempt": attempt,
+                            "max_attempts": max_attempts,
+                            **_provider_error_payload(exc),
+                        },
+                    )
+                    raise
+                delay = policy.next_delay(attempt, retry_after_seconds=exc.retry_after_seconds) if policy is not None else 0.0
+                yield self._output(
+                    "runtime_event",
+                    turn_id,
+                    {
+                        "kind": "provider_retry_scheduled",
+                        "invocation_id": invocation_id,
+                        "invocation_index": invocation_index,
+                        "attempt": attempt,
+                        "next_attempt": attempt + 1,
+                        "max_attempts": max_attempts,
+                        "delay_seconds": delay,
+                        **_provider_error_payload(exc),
+                    },
+                )
+                if delay > 0:
+                    time.sleep(delay)
+                attempt += 1
+
     def _compact_history_if_needed(self) -> dict[str, object] | None:
+        max_context_chars = self.config.max_context_chars
+        if max_context_chars is not None:
+            before_chars = sum(len(str(message.content)) for message in self.history.messages)
+            compacted_for_budget = self.history.compact_for_context_budget(
+                max_chars=max_context_chars,
+                summary_max_chars=self.config.compaction_summary_max_chars,
+                preserve_recent_messages=1,
+            )
+            if compacted_for_budget is not None:
+                self.transcript.replace_messages(self.config.conversation_id, compacted_for_budget)
+                after_chars = sum(len(str(message.content)) for message in compacted_for_budget)
+                summary = next(
+                    (
+                        message
+                        for message in compacted_for_budget
+                        if message.role == "system" and message.metadata.get("kind") == "context_compaction_summary"
+                    ),
+                    None,
+                )
+                return {
+                    "strategy": "context_budget",
+                    "chars_before": before_chars,
+                    "chars_after": after_chars,
+                    "summary": summary.content if summary is not None else "",
+                }
         max_messages = self.config.max_history_messages
         if max_messages is None:
             return None
@@ -340,16 +450,47 @@ class InteractionEngine:
             "summary": summary.content if summary is not None else "",
         }
 
-    def _requires_permission(self, registry: ToolRegistry, call: ToolCall) -> bool:
+    def _requires_permission(self, registry: ToolRegistry, call: ToolCall, context: TurnContext) -> bool:
         try:
             tool = registry.get(call.name)
         except Exception:
             return False
         metadata = dict(tool.metadata or {})
-        return bool(
+        configured_mode = _configured_tool_permission_mode(context.runtime, call.name)
+        hard_requires_confirmation = bool(
             metadata.get("requires_confirmation")
             or metadata.get("external_target")
             or call.input.get("requires_confirmation")
+        )
+        if hard_requires_confirmation:
+            return True
+        if configured_mode == "approval":
+            return True
+        if configured_mode == "auto":
+            return False
+        return False
+
+    def _normalize_tool_call_input(self, registry: ToolRegistry, call: ToolCall, context: TurnContext) -> ToolCall:
+        try:
+            tool = registry.get(call.name)
+        except Exception:
+            return call
+        normalizer = getattr(tool.handler, "normalize_call_input", None)
+        if not callable(normalizer):
+            return call
+        try:
+            normalized = normalizer(call, context)
+        except Exception:
+            return call
+        if not isinstance(normalized, dict):
+            return call
+        return ToolCall(
+            id=call.id,
+            turn_id=call.turn_id,
+            llm_invocation_id=call.llm_invocation_id,
+            tool_use_id=call.tool_use_id,
+            name=call.name,
+            input=normalized,
         )
 
     def _run_tool(self, registry: ToolRegistry, call: ToolCall, context: TurnContext) -> ToolResult:
@@ -368,6 +509,7 @@ class InteractionEngine:
     def _run_tool_call(self, registry: ToolRegistry, call: ToolCall, context: TurnContext) -> Iterator[InteractionOutput]:
         result = self._run_tool(registry, call, context)
         yield from self._record_tool_result(result, call.turn_id)
+        context.runtime["_last_tool_result"] = result
 
     def _record_tool_result(self, result: ToolResult, turn_id: str) -> Iterator[InteractionOutput]:
         self.transcript.record_tool_result(self.config.conversation_id, result)
@@ -390,6 +532,51 @@ class InteractionEngine:
                 "tool_call_id": result.tool_call_id,
                 "is_error": result.is_error,
                 "content": result.content,
+            },
+        )
+
+    def _inject_pending_user_input_after_next_tool_call(
+        self,
+        context: TurnContext,
+        call: ToolCall,
+    ) -> Iterator[InteractionOutput]:
+        provider = self.config.pending_user_input_after_next_tool_call_provider
+        result = context.runtime.pop("_last_tool_result", None)
+        if provider is None or not isinstance(result, ToolResult):
+            return
+        messages = [
+            message
+            for message in provider(context, call, result)
+            if message.role == "user" and _message_text(message).strip()
+        ]
+        if not messages:
+            return
+        pending_input_ids: list[object] = []
+        injected_messages: list[dict[str, object]] = []
+        for message in messages:
+            ids = message.metadata.get("pending_user_input_ids")
+            if isinstance(ids, list):
+                pending_input_ids.extend(ids)
+            injected_messages.append(
+                {
+                    "role": message.role,
+                    "content": _message_text(message),
+                    "metadata": dict(message.metadata or {}),
+                }
+            )
+        self.history.append(messages)
+        self.transcript.record_messages(self.config.conversation_id, messages)
+        yield self._output(
+            "runtime_event",
+            context.turn_id,
+            {
+                "kind": "pending_user_input_after_next_tool_call_injected",
+                "message_count": len(messages),
+                "tool_name": call.name,
+                "tool_use_id": call.tool_use_id,
+                "tool_call_id": call.id,
+                "pending_user_input_ids": pending_input_ids,
+                "messages": injected_messages,
             },
         )
 
@@ -437,6 +624,25 @@ def _message_text(message: LLMMessage) -> str:
         if isinstance(block, dict) and block.get("type") == "text":
             parts.append(str(block.get("text") or ""))
     return "".join(parts)
+
+
+def _configured_tool_permission_mode(runtime: dict[str, object], tool_name: str) -> str | None:
+    permission_policy = runtime.get("permission_policy")
+    if not isinstance(permission_policy, dict):
+        return None
+    tool_policy = permission_policy.get("tool_approval_policy") or permission_policy.get("toolApprovalPolicy")
+    if not isinstance(tool_policy, dict):
+        return None
+    default_mode = str(tool_policy.get("defaultMode") or tool_policy.get("default_mode") or "").strip().lower()
+    overrides = tool_policy.get("overrides")
+    if not isinstance(overrides, dict):
+        overrides = {}
+    mode = str(overrides.get(tool_name) or "").strip().lower()
+    if mode in {"approval", "auto"}:
+        return mode
+    if default_mode in {"approval", "auto"}:
+        return default_mode
+    return None
 
 
 def _tool_result_content(result: ToolResult) -> str:
@@ -584,6 +790,25 @@ def _message_from_payload(payload: dict[str, object]) -> LLMMessage:
         ],
         metadata=dict(payload.get("metadata") or {}),
     )
+
+
+def _provider_error_payload(exc: ProviderError) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "error": str(exc),
+        "error_kind": exc.error_kind,
+        "retryable": exc.retryable,
+    }
+    if exc.status_code is not None:
+        payload["status_code"] = exc.status_code
+    if exc.retry_after_seconds is not None:
+        payload["retry_after_seconds"] = exc.retry_after_seconds
+    return payload
+
+
+def _turn_failed_payload(exc: Exception) -> dict[str, object]:
+    if isinstance(exc, ProviderError):
+        return _provider_error_payload(exc)
+    return {"error": str(exc)}
 
 
 def _positive_int(value: object, *, default: int) -> int:

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from recruit_station.agent_runtime.engine import InteractionEngine, InteractionEngineConfig, transcript_from_checkpoint
+from recruit_station.agent_runtime.engine import InteractionEngine, InteractionEngineConfig, ProviderRetryPolicy, transcript_from_checkpoint
+from recruit_station.agent_runtime.providers import ProviderError
 from recruit_station.agent_runtime.tools import FunctionToolHandler
 from recruit_station.agent_runtime.transcript import InMemoryTranscript
 from recruit_station.agent_runtime.types import (
+    InteractionOutput,
     LLMInvocationResult,
     LLMMessage,
     LLMRequest,
@@ -22,13 +24,28 @@ from recruit_station.agent_runtime.types import (
 
 @dataclass(slots=True)
 class FixtureLLMProvider:
-    responses: list[LLMResponse]
+    responses: list[LLMResponse | Exception]
     provider_name: str = "test"
     captured_requests: list[LLMRequest] = field(default_factory=list)
 
     def invoke(self, request: LLMRequest) -> LLMInvocationResult:
         self.captured_requests.append(request)
-        return LLMInvocationResult(events=[], response=self.responses.pop(0))
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return LLMInvocationResult(events=[], response=response)
+
+
+def _collect_outputs_until_error(engine: InteractionEngine, message: str) -> list[InteractionOutput]:
+    outputs: list[InteractionOutput] = []
+    iterator = engine.submitMessage(message)
+    while True:
+        try:
+            outputs.append(next(iterator))
+        except StopIteration:
+            return outputs
+        except ProviderError:
+            return outputs
 
 
 def test_submit_message_completes_with_assistant_output() -> None:
@@ -50,6 +67,92 @@ def test_submit_message_completes_with_assistant_output() -> None:
     assert [item.type for item in outputs if item.type.startswith("turn_")] == ["turn_started", "turn_completed"]
     assert any(item.type == "assistant_message_completed" and item.data["message"] == "hello" for item in outputs)
     assert provider.captured_requests[0].messages[-1].content == "hi"
+
+
+def test_provider_retryable_error_retries_before_turn_failure() -> None:
+    provider = FixtureLLMProvider(
+        responses=[
+            ProviderError("HTTP 500 calling provider", status_code=500, error_kind="provider_http_error", retryable=True),
+            LLMResponse(
+                id="resp-1",
+                request_id="",
+                invocation_id="",
+                assistant_message=LLMMessage(role="assistant", content="recovered"),
+                usage=TokenUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            ),
+        ]
+    )
+    engine = InteractionEngine(
+        InteractionEngineConfig(
+            conversation_id="conv-retry",
+            provider=provider,
+            provider_retry_policy=ProviderRetryPolicy(max_attempts=2, base_delay_seconds=0, max_delay_seconds=0),
+        )
+    )
+
+    outputs = list(engine.submitMessage("retry once"))
+
+    assert len(provider.captured_requests) == 2
+    assert any(item.type == "runtime_event" and item.data["kind"] == "provider_retry_scheduled" for item in outputs)
+    assert any(item.type == "assistant_message_completed" and item.data["message"] == "recovered" for item in outputs)
+    assert not any(item.type == "turn_failed" for item in outputs)
+
+
+def test_provider_non_retryable_error_fails_without_retry() -> None:
+    provider = FixtureLLMProvider(
+        responses=[
+            ProviderError("HTTP 401 calling provider", status_code=401, error_kind="provider_http_error", retryable=False),
+        ]
+    )
+    engine = InteractionEngine(
+        InteractionEngineConfig(
+            conversation_id="conv-nonretry",
+            provider=provider,
+            provider_retry_policy=ProviderRetryPolicy(max_attempts=3, base_delay_seconds=0, max_delay_seconds=0),
+        )
+    )
+
+    outputs = _collect_outputs_until_error(engine, "fail")
+
+    assert len(provider.captured_requests) == 1
+    assert any(
+        item.type == "runtime_event" and item.data["kind"] == "provider_error_terminal"  # type: ignore[attr-defined]
+        for item in outputs
+    )
+    failed = next(item for item in outputs if item.type == "turn_failed")  # type: ignore[attr-defined]
+    assert failed.data["status_code"] == 401  # type: ignore[attr-defined]
+    assert failed.data["retryable"] is False  # type: ignore[attr-defined]
+
+
+def test_provider_retry_exhaustion_fails_after_max_attempts() -> None:
+    provider = FixtureLLMProvider(
+        responses=[
+            ProviderError("HTTP 500 calling provider", status_code=500, error_kind="provider_http_error", retryable=True),
+            ProviderError("HTTP 500 calling provider", status_code=500, error_kind="provider_http_error", retryable=True),
+        ]
+    )
+    engine = InteractionEngine(
+        InteractionEngineConfig(
+            conversation_id="conv-exhaust",
+            provider=provider,
+            provider_retry_policy=ProviderRetryPolicy(max_attempts=2, base_delay_seconds=0, max_delay_seconds=0),
+        )
+    )
+
+    outputs = _collect_outputs_until_error(engine, "fail after retry")
+
+    assert len(provider.captured_requests) == 2
+    assert any(
+        item.type == "runtime_event" and item.data["kind"] == "provider_retry_scheduled"  # type: ignore[attr-defined]
+        for item in outputs
+    )
+    assert any(
+        item.type == "runtime_event" and item.data["kind"] == "provider_retry_exhausted"  # type: ignore[attr-defined]
+        for item in outputs
+    )
+    failed = next(item for item in outputs if item.type == "turn_failed")  # type: ignore[attr-defined]
+    assert failed.data["status_code"] == 500  # type: ignore[attr-defined]
+    assert failed.data["retryable"] is True  # type: ignore[attr-defined]
 
 
 def test_pre_start_interrupt_is_preserved() -> None:
@@ -113,6 +216,61 @@ def test_tool_loop_uses_injected_business_tool_without_bash() -> None:
     second_request = provider.captured_requests[1]
     assert second_request.messages[-1].role == "tool"
     assert "cand-1" in str(second_request.messages[-1].content)
+
+
+def test_pending_user_input_after_next_tool_call_is_injected_before_next_model_step() -> None:
+    tool_use = ToolUse(id="call-1", name="observe", input={"page": "jobs"})
+    provider = FixtureLLMProvider(
+        responses=[
+            LLMResponse(
+                id="resp-1",
+                request_id="",
+                invocation_id="",
+                assistant_message=LLMMessage(role="assistant", content="", tool_uses=[tool_use]),
+                tool_uses=[tool_use],
+                stop_reason="tool_calls",
+            ),
+            LLMResponse(
+                id="resp-2",
+                request_id="",
+                invocation_id="",
+                assistant_message=LLMMessage(role="assistant", content="done"),
+            ),
+        ]
+    )
+    tool = ToolDefinition(
+        name="observe",
+        description="Observe something.",
+        schema=ToolSchema(
+            name="observe",
+            description="Observe something.",
+            input_schema={"type": "object"},
+        ),
+        handler=FunctionToolHandler(lambda args: {"ok": True}),
+    )
+
+    def _provider(context: TurnContext, call: ToolCall, result: ToolResult) -> list[LLMMessage]:
+        assert context.turn_id == call.turn_id
+        assert result.name == "observe"
+        return [LLMMessage(role="user", content="operator correction after tool")]
+
+    engine = InteractionEngine(
+        InteractionEngineConfig(
+            conversation_id="conv-after-tool",
+            provider=provider,
+            tools=[tool],
+            pending_user_input_after_next_tool_call_provider=_provider,
+        )
+    )
+
+    outputs = list(engine.submitMessage("run tool"))
+
+    assert any(
+        item.type == "runtime_event" and item.data["kind"] == "pending_user_input_after_next_tool_call_injected"
+        for item in outputs
+    )
+    assert provider.captured_requests[1].messages[-1].role == "user"
+    assert provider.captured_requests[1].messages[-1].content == "operator correction after tool"
 
 
 def test_llm_request_and_tool_context_receive_same_abort_signal() -> None:
@@ -271,6 +429,93 @@ def test_permission_resolution_continues_same_runtime_turn() -> None:
     assert second_request.messages[-2].tool_uses[0].id == "call-approval"
     assert second_request.messages[-1].role == "tool"
     assert "hello" in str(second_request.messages[-1].content)
+
+
+def test_runtime_permission_policy_can_force_tool_confirmation() -> None:
+    tool_use = ToolUse(id="call-forced", name="send_message", input={"text": "hello"})
+    provider = FixtureLLMProvider(
+        responses=[
+            LLMResponse(
+                id="resp-1",
+                request_id="",
+                invocation_id="",
+                assistant_message=LLMMessage(role="assistant", content="", tool_uses=[tool_use]),
+                tool_uses=[tool_use],
+                stop_reason="tool_calls",
+            )
+        ]
+    )
+    tool = ToolDefinition(
+        name="send_message",
+        description="Send a message.",
+        schema=ToolSchema(name="send_message", description="Send a message.", input_schema={"type": "object"}),
+        handler=FunctionToolHandler(lambda args: {"sent": args["text"]}),
+        metadata={"requires_confirmation": False},
+    )
+    engine = InteractionEngine(
+        InteractionEngineConfig(
+            conversation_id="conv-forced-approval",
+            provider=provider,
+            tools=[tool],
+            runtime={
+                "permission_policy": {
+                    "tool_approval_policy": {
+                        "defaultMode": "auto",
+                        "overrides": {"send_message": "approval"},
+                    }
+                }
+            },
+        )
+    )
+
+    outputs = list(engine.submitMessage("send hello"))
+
+    assert any(item.type == "permission_requested" for item in outputs)
+    assert engine.pending_permission is not None
+
+
+def test_runtime_permission_policy_auto_override_cannot_bypass_tool_metadata_confirmation() -> None:
+    tool_use = ToolUse(id="call-auto", name="send_message", input={"text": "hello"})
+    provider = FixtureLLMProvider(
+        responses=[
+            LLMResponse(
+                id="resp-1",
+                request_id="",
+                invocation_id="",
+                assistant_message=LLMMessage(role="assistant", content="", tool_uses=[tool_use]),
+                tool_uses=[tool_use],
+                stop_reason="tool_calls",
+            ),
+            LLMResponse(id="resp-2", request_id="", invocation_id="", assistant_message=LLMMessage(role="assistant", content="done")),
+        ]
+    )
+    tool = ToolDefinition(
+        name="send_message",
+        description="Send a message.",
+        schema=ToolSchema(name="send_message", description="Send a message.", input_schema={"type": "object"}),
+        handler=FunctionToolHandler(lambda args: {"sent": args["text"]}),
+        metadata={"requires_confirmation": True},
+    )
+    engine = InteractionEngine(
+        InteractionEngineConfig(
+            conversation_id="conv-auto-approval",
+            provider=provider,
+            tools=[tool],
+            runtime={
+                "permission_policy": {
+                    "tool_approval_policy": {
+                        "defaultMode": "approval",
+                        "overrides": {"send_message": "auto"},
+                    }
+                }
+            },
+        )
+    )
+
+    outputs = list(engine.submitMessage("send hello"))
+
+    assert any(item.type == "permission_requested" for item in outputs)
+    assert engine.pending_permission is not None
 
 
 def test_permission_resolution_can_resume_from_transcript_checkpoint() -> None:

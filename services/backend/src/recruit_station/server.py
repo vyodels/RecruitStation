@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from recruit_station.api import include_api_routers
 from recruit_station.core.settings import AppSettings
+from recruit_station.repositories.domain import ExecutionEpisodeRepository
 from recruit_station.services.container import AppContainer
 from recruit_station.services.autonomy_loop import AutonomyLoop
 
@@ -26,6 +27,8 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+        with container.session_factory() as session:
+            ExecutionEpisodeRepository(session).recover_running(reason="Recovered stale execution episode during startup.")
         container.autonomous_adapter.recover_stale()
         await autonomy_loop.start()
         try:

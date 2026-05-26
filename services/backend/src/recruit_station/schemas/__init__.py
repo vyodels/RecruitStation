@@ -71,6 +71,8 @@ from .domain import (
     ExecutionPlanUpdate,
     FeatureFlags,
     HealthResponse,
+    JobDescriptionBulkDeleteRead,
+    JobDescriptionBulkDeleteRequest,
     JobDescriptionCreate,
     JobDescriptionFunnelStatsRead,
     JobDescriptionFunnelStepRead,

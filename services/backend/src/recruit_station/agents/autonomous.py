@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from datetime import timedelta
 import json
 import re
 from threading import RLock
-from typing import Any
+from typing import Any, Callable
+from uuid import uuid4
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from recruit_station.agent_runtime.engine import InteractionEngine, transcript_from_checkpoint
-from recruit_station.agent_runtime.types import InteractionOutput, LLMProvider
+from recruit_station.agent_runtime.providers import ProviderError
+from recruit_station.agent_runtime.types import InteractionOutput, LLMMessage, LLMProvider, ToolCall, ToolResult, TurnContext
 from recruit_station.db.base import utcnow
 from recruit_station.evolution.learning_writer import LearningWriter
 from recruit_station.memory.filesystem import MemoryFileStore
@@ -22,6 +25,7 @@ from recruit_station.memory.writeback import (
     write_stable_memory_facts_to_files,
 )
 from recruit_station.models.domain import (
+    AgentPendingUserInput,
     AgentRun,
     AgentRunCheckpoint,
     AgentRuntimeEvent,
@@ -36,6 +40,7 @@ from recruit_station.models.domain import (
     Skill,
     TaskQueueItem,
 )
+from recruit_station.repositories.domain import AgentPendingUserInputRepository, TaskQueueRepository
 from recruit_station.product_adapters.limits import TurnLimits
 from recruit_station.agents.outcome import AgentTurnOutcome
 from recruit_station.plugins.host import PluginHost
@@ -47,6 +52,7 @@ from recruit_station.product_adapters.target_contracts import derive_browser_tar
 from recruit_station.capabilities.tools import ToolRegistry
 from recruit_station.skills.context import build_skill_context_injections
 
+MCP_RESOURCE_RUNTIME_TOOL_NAMES: frozenset[str] = frozenset({"list_mcp_resources", "read_mcp_resource"})
 AUTONOMOUS_OPEN_RUN_STATUSES: tuple[str, ...] = (
     "queued",
     "running",
@@ -57,6 +63,11 @@ AUTONOMOUS_OPEN_RUN_STATUSES: tuple[str, ...] = (
     "paused",
     "resumable",
 )
+RUNTIME_AGENT_KINDS: tuple[str, ...] = ("autonomous", "jd_sync")
+AUTONOMOUS_PRIMARY_CONVERSATION_ID = "autonomous-primary"
+JD_SYNC_PRIMARY_CONVERSATION_ID = "jd-sync-primary"
+TRANSIENT_PROVIDER_RETRY_MAX_ATTEMPTS = 3
+JD_SYNC_RECOVERABLE_SCENE_RETRY_MAX_ATTEMPTS = 16
 
 
 @dataclass(slots=True)
@@ -82,13 +93,17 @@ class AutonomousAdapter:
     mcp_registry: Any | None = None
     memory_file_store: MemoryFileStore | None = None
     turn_limits: TurnLimits = field(default_factory=TurnLimits)
+    anti_detection_policy: dict[str, Any] = field(default_factory=dict)
+    behavior_budget: dict[str, Any] = field(default_factory=dict)
+    max_context_chars: int | None = 120000
+    compaction_summary_max_chars: int = 6000
     pending_permission_engines: dict[str, InteractionEngine] = field(default_factory=dict)
     active_turns: dict[str, ActiveAutonomousTurn] = field(default_factory=dict)
     _active_turns_lock: RLock = field(default_factory=RLock)
 
-    def cancel_run(self, run_id: str, *, reviewer: str, reason: str | None = None) -> str:
+    def cancel_run(self, run_id: str, *, reviewer: str, reason: str | None = None, agent_kind: str | None = None) -> str:
         with self.session_factory() as session:
-            run = _resolve_autonomous_run_for_control(session, run_id)
+            run = _resolve_autonomous_run_for_control(session, run_id, agent_kind=agent_kind)
             if run.status == "completed":
                 raise ValueError("Completed run cannot be cancelled.")
             cancel_reason = reason or "cancelled"
@@ -109,7 +124,7 @@ class AutonomousAdapter:
             stmt = (
                 select(AgentRun)
                 .where(
-                    AgentRun.agent_kind == "autonomous",
+                    AgentRun.agent_kind.in_(RUNTIME_AGENT_KINDS),
                     AgentRun.status.in_(AUTONOMOUS_OPEN_RUN_STATUSES),
                 )
                 .order_by(AgentRun.updated_at.desc(), AgentRun.id.desc())
@@ -128,6 +143,24 @@ class AutonomousAdapter:
                 terminated.append(str(run.run_id or run.id))
             session.commit()
             return terminated
+
+    def pause_active_runs(self, *, reviewer: str, reason: str) -> list[str]:
+        with self.session_factory() as session:
+            stmt = (
+                select(AgentRun)
+                .where(
+                    AgentRun.agent_kind.in_(RUNTIME_AGENT_KINDS),
+                    AgentRun.status.in_(("running", "active")),
+                )
+                .order_by(AgentRun.updated_at.desc(), AgentRun.id.desc())
+            )
+            paused: list[str] = []
+            for run in session.scalars(stmt).all():
+                self._interrupt_active_turn(run=run, reason=reason)
+                _pause_active_run_for_control(session, run=run, reviewer=reviewer, reason=reason)
+                paused.append(str(run.run_id or run.id))
+            session.commit()
+            return paused
 
     def run_turn_from_envelope(self, envelope: dict[str, Any]) -> AgentTurnOutcome:
         with self.session_factory() as session:
@@ -189,10 +222,24 @@ class AutonomousAdapter:
             run_constraints["success_criteria"] = dict(instruction_snapshot.get("success_criteria") or {})
             run_constraints["context_hints"] = dict(instruction_snapshot.get("context_hints") or {})
             run_constraints["trial_budget"] = dict(instruction_snapshot.get("trial_budget") or {})
+            run_constraints["anti_detection_policy"] = _merge_policy_dicts(
+                self.anti_detection_policy,
+                run_constraints.get("anti_detection_policy"),
+                (run.context_manifest or {}).get("anti_detection_policy"),
+                (run.runtime_metadata or {}).get("anti_detection_policy"),
+                envelope.get("anti_detection_policy"),
+            )
+            run_constraints["behavior_budget"] = _merge_policy_dicts(
+                self.behavior_budget,
+                run_constraints.get("behavior_budget"),
+                (run.context_manifest or {}).get("behavior_budget"),
+                (run.runtime_metadata or {}).get("behavior_budget"),
+                envelope.get("behavior_budget"),
+            )
             run_constraints["global_scope_ref"] = (
                 str(run_constraints.get("global_scope_ref") or "") or agent_definition_id
             )
-            run_constraints["source_kind"] = "autonomous"
+            run_constraints["source_kind"] = run.agent_kind or "autonomous"
             if resolved_application_id:
                 run_constraints["application_id"] = resolved_application_id
             browser_target = derive_browser_target(
@@ -252,11 +299,17 @@ class AutonomousAdapter:
                     dict(envelope.get("metadata") or {}) if isinstance(envelope.get("metadata"), dict) else {},
                     envelope,
                 )
+                turn_tool_registry = _runtime_tool_registry_for_run(
+                    self.tool_registry,
+                    run=run,
+                    constraints=run_constraints,
+                )
                 adapter_context = build_autonomous_turn_context(
+                    agent_kind=str(run.agent_kind or "autonomous"),
                     title=run_title,
                     instruction=instruction,
                     agent_name=str((agent_definition.name if agent_definition is not None else None) or "Autonomous"),
-                    system_prompt=_definition_system_prompt(agent_definition),
+                    system_prompt=_definition_system_prompt(agent_definition, agent_kind=str(run.agent_kind or "autonomous")),
                     agent_definition_id=agent_definition_id,
                     scope_kind=scope_kind,
                     scope_ref=scope_ref,
@@ -264,7 +317,7 @@ class AutonomousAdapter:
                     world_snapshot=world_snapshot,
                     recent_events=_fetch_recent_events(session, run_id=run.id, limit=8),
                     memory_entries=memory_entries,
-                    available_tools=sorted(self.tool_registry.tools.keys()),
+                    available_tools=sorted(turn_tool_registry.tools.keys()),
                     skill_contexts=self._skill_contexts(
                         session,
                         query=instruction,
@@ -304,15 +357,33 @@ class AutonomousAdapter:
                     if active_turn.interrupt_reason or self._run_has_terminal_interrupt(run.id):
                         engine.interrupt(active_turn.interrupt_reason)
 
+                def _pending_user_input_after_next_tool_call_provider(
+                    context: TurnContext,
+                    tool_call: ToolCall,
+                    tool_result: ToolResult,
+                ) -> list[LLMMessage]:
+                    return _consume_pending_user_input_after_next_tool_call(
+                        session,
+                        run=run,
+                        turn=turn,
+                        agent_kind=str(run.agent_kind or "autonomous").strip() or "autonomous",
+                        conversation_id=_primary_conversation_id_for_run(run),
+                        context=context,
+                        tool_call=tool_call,
+                        tool_result=tool_result,
+                    )
+
                 try:
                     runner_result = run_agent_turn(
                         provider=self.provider,
-                        tool_registry=self.tool_registry,
+                        tool_registry=turn_tool_registry,
                         agent_definition_id=agent_definition_id,
                         conversation_id=runtime_conversation_id,
                         initial_messages=adapter_context.initial_messages,
                         turn_input=adapter_context.turn_input,
                         max_llm_invocations=active_turn_limits.max_llm_invocations or 12,
+                        max_context_chars=self.max_context_chars,
+                        compaction_summary_max_chars=self.compaction_summary_max_chars,
                         initial_seq=runtime_event_seq + 1,
                         transcript=resume_transcript,
                         existing_engine=existing_engine,
@@ -320,6 +391,17 @@ class AutonomousAdapter:
                         output_sink=lambda output: _record_engine_output(session, run=run, turn_id=turn.turn_id, output=output),
                         engine_sink=_bind_engine,
                         structured_status_resolver=_outcome_from_structured_result_data,
+                        final_output_status_resolver=_outcome_from_final_output_text,
+                        final_output_continuation_resolver=_final_output_continuation_resolver(
+                            agent_kind=str(run.agent_kind or "autonomous")
+                        ),
+                        runtime={
+                            "permission_policy": _runtime_permission_policy(run_constraints),
+                            "constraints": run_constraints,
+                            "context_hints": dict(run_constraints.get("context_hints") or {}),
+                            **({"browser_target": browser_target} if browser_target else {}),
+                        },
+                        pending_user_input_after_next_tool_call_provider=_pending_user_input_after_next_tool_call_provider,
                         status_defaults=AgentTurnStatusDefaults(
                             completed_status="complete",
                             completed_gate_signal="run_done",
@@ -345,8 +427,10 @@ class AutonomousAdapter:
                         "tool_calls": runner_result.tool_calls,
                         "pending_tool_calls": runner_result.pending_tool_calls,
                         "tool_results": runner_result.tool_results,
+                        "final_result_data": runner_result.final_result_data,
                         "runtime_checkpoint": runner_result.engine.checkpoint_state(),
                         "interaction_engine": True,
+                        "continuation_attempts": runner_result.continuation_attempts,
                     },
                 )
                 if runner_result.status == "wait_human":
@@ -357,12 +441,26 @@ class AutonomousAdapter:
                 self.pending_permission_engines.pop(run.id, None)
                 session.refresh(run)
                 interrupted_status = _terminal_interrupt_status(run.status)
+                retry_outcome = None
+                if interrupted_status is None and _is_transient_provider_error(exc):
+                    retry_outcome = _queue_transient_provider_retry(
+                        session,
+                        run=run,
+                        turn=turn,
+                        envelope=envelope,
+                        exc=exc,
+                        engine_output_count=engine_output_count,
+                        next_seq=next_seq,
+                    )
+                if retry_outcome is not None:
+                    session.commit()
+                    return retry_outcome
                 turn.status = interrupted_status or "failed"
                 turn.phase = "evaluate"
                 turn.outcome_kind = interrupted_status or "error"
                 turn.turn_metadata = {"error": str(exc), "engine_output_count": engine_output_count}
                 run.turns_count = int(run.turns_count or 0) + 1
-                if interrupted_status:
+                if interrupted_status in {"cancelled", "interrupted"}:
                     if run.finished_at is None:
                         run.finished_at = utcnow()
                 else:
@@ -402,6 +500,18 @@ class AutonomousAdapter:
                 run.finished_at = utcnow()
             if not preserve_interrupted_status:
                 run.last_error = None
+            retry_outcome = _queue_jd_sync_recoverable_scene_retry(
+                session,
+                run=run,
+                turn=turn,
+                envelope=envelope,
+                outcome=last_outcome,
+                engine_output_count=engine_output_count,
+                next_seq=runtime_event_seq + 1,
+            )
+            if retry_outcome is not None:
+                session.commit()
+                return retry_outcome
             if _is_waiting_human(last_outcome):
                 _materialize_wait_human_records(
                     session,
@@ -414,7 +524,8 @@ class AutonomousAdapter:
                 _resolve_wait_human_records(session, run=run)
             session.commit()
             if _terminal_interrupt_status(run.status) is not None:
-                raise AutonomousRunInterrupted(f"Autonomous run {run.run_id or run.id} was interrupted.")
+                if _terminal_interrupt_status(run.status) != "paused":
+                    raise AutonomousRunInterrupted(f"Autonomous run {run.run_id or run.id} was interrupted.")
             session.refresh(run)
             self._maybe_record_trial_skill(
                 session,
@@ -441,6 +552,13 @@ class AutonomousAdapter:
                     memory_file_store=self.memory_file_store,
                 )
                 session.commit()
+                _queue_user_input_after_next_turn(
+                    session,
+                    run=run,
+                    turn=turn,
+                    envelope=envelope,
+                )
+                session.commit()
             return last_outcome
 
     def recover_stale(self) -> int:
@@ -448,10 +566,17 @@ class AutonomousAdapter:
             stmt = select(AgentRun).where(AgentRun.status == "running").order_by(AgentRun.updated_at.desc(), AgentRun.id.desc())
             recovered = 0
             for run in session.scalars(stmt).all():
+                reason = "Recovered stale autonomous run during startup."
                 _interrupt_open_run(
                     session,
                     run=run,
-                    reason="Recovered stale autonomous run during startup.",
+                    reason=reason,
+                )
+                _cancel_open_queue_tasks_for_run(
+                    session,
+                    run=run,
+                    reviewer="startup-recovery",
+                    reason=reason,
                 )
                 recovered += 1
 
@@ -459,7 +584,7 @@ class AutonomousAdapter:
             open_stmt = (
                 select(AgentRun)
                 .where(
-                    AgentRun.agent_kind == "autonomous",
+                    AgentRun.agent_kind.in_(RUNTIME_AGENT_KINDS),
                     AgentRun.status.in_(AUTONOMOUS_OPEN_RUN_STATUSES),
                 )
                 .order_by(
@@ -476,10 +601,17 @@ class AutonomousAdapter:
                     continue
                 if run.id == latest_open_run_id:
                     continue
+                reason = "Superseded during startup recovery because a newer open run already exists."
                 _interrupt_open_run(
                     session,
                     run=run,
-                    reason="Superseded during startup recovery because a newer open run already exists.",
+                    reason=reason,
+                )
+                _cancel_open_queue_tasks_for_run(
+                    session,
+                    run=run,
+                    reviewer="startup-recovery",
+                    reason=reason,
                 )
                 recovered += 1
             if recovered:
@@ -616,9 +748,9 @@ class AutonomousAdapter:
                 learning_content=_skill_learning_audit_log(review_payload, draft_contract),
                 source_run_id=run.id,
                 source_turn_id=turn.turn_id,
-                source_kind="autonomous",
+                source_kind=run.agent_kind or "autonomous",
                 agent_definition_id=agent_definition_id,
-                proposed_by="autonomous",
+                proposed_by=run.agent_kind or "autonomous",
                 environment_scope=_skill_environment_scope(run=run, snapshot=snapshot),
             )
         except Exception as exc:
@@ -678,7 +810,7 @@ def _run_status_from_outcome(outcome: AgentTurnOutcome) -> str:
 
 def _terminal_interrupt_status(status: str | None) -> str | None:
     normalized = str(status or "").strip().lower()
-    if normalized in {"cancelled", "interrupted"}:
+    if normalized in {"cancelled", "interrupted", "paused"}:
         return normalized
     return None
 
@@ -693,9 +825,9 @@ def _turn_status_from_outcome(outcome: AgentTurnOutcome) -> str:
     if outcome.status == "error":
         return "failed"
     if outcome.status == "escalate" or outcome.gate_signal == "escalate":
-        return "failed"
+        return "blocked"
     if outcome.gate_signal == "budget_exhausted":
-        return "failed"
+        return "blocked"
     return "running"
 
 
@@ -720,6 +852,548 @@ def _outcome_from_structured_result_data(value: Any) -> tuple[str, str] | None:
     if execution_status in {"completed", "complete", "success", "done"}:
         return "complete", "run_done"
     return None
+
+
+def _outcome_from_final_output_text(value: str) -> tuple[str, str] | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    normalized = text.lower()
+    if any(marker in normalized for marker in ("provider unavailable", "http 500", "执行失败", "运行失败")):
+        return "error", "escalate"
+    if any(marker in text for marker in ("已阻塞", "阻塞原因", "当前受阻")) or any(
+        marker in normalized for marker in ("blocked", "blocker", "blocked reason")
+    ):
+        return "escalate", "escalate"
+    if any(
+        marker in text
+        for marker in (
+            "仍需继续",
+            "还需要继续",
+            "需要继续",
+            "未成功确认",
+            "还不能调用",
+            "还不能继续",
+            "还不能写回",
+            "不能调用本地 JD 写回",
+            "completed_job_details 仍为空",
+            "没有新的可写回 JD 详情证据",
+        )
+    ):
+        return "escalate", "escalate"
+    return None
+
+
+def _is_transient_provider_error(exc: BaseException) -> bool:
+    if isinstance(exc, ProviderError):
+        if exc.retryable:
+            return True
+        if exc.status_code in {408, 409, 425, 429, 500, 502, 503, 504}:
+            return True
+    message = str(exc or "").strip().lower()
+    if not message or "provider unavailable" in message:
+        return False
+    return any(
+        marker in message
+        for marker in (
+            "http 408",
+            "http 409",
+            "http 425",
+            "http 429",
+            "http 500",
+            "http 502",
+            "http 503",
+            "http 504",
+            "server_error",
+            "internal_server_error",
+            "unexpected eof",
+            " eof",
+            "connection reset",
+            "connection aborted",
+            "temporarily unavailable",
+            "timeout",
+            "timed out",
+        )
+    )
+
+
+def _queue_transient_provider_retry(
+    session: Session,
+    *,
+    run: AgentRun,
+    turn: AgentTurnRecord,
+    envelope: dict[str, Any],
+    exc: BaseException,
+    engine_output_count: int,
+    next_seq: int,
+) -> AgentTurnOutcome | None:
+    metadata = dict(envelope.get("metadata") or {}) if isinstance(envelope.get("metadata"), dict) else {}
+    retry_count = _safe_int(metadata.get("provider_retry_count")) or 0
+    if retry_count >= TRANSIENT_PROVIDER_RETRY_MAX_ATTEMPTS:
+        return None
+
+    next_retry_count = retry_count + 1
+    delay_seconds = min(30, 3 * (2 ** retry_count))
+    retry_envelope = dict(envelope or {})
+    retry_envelope["run_pk"] = run.id
+    retry_envelope["run_id"] = run.run_id
+    retry_envelope["trigger_type"] = "provider_retry"
+    retry_metadata = dict(metadata)
+    retry_metadata.update(
+        {
+            "provider_retry_count": next_retry_count,
+            "provider_retry_error": str(exc),
+            "provider_retry_previous_turn_id": turn.turn_id,
+        }
+    )
+    retry_envelope["metadata"] = retry_metadata
+    task = TaskQueueRepository(session).enqueue(
+        task_id=f"run-{run.id}-provider-retry-{uuid4().hex[:8]}",
+        task_type="autonomous_turn",
+        priority=int(run.priority or 100),
+        payload=retry_envelope,
+        scheduled_for=utcnow() + timedelta(seconds=delay_seconds),
+    )
+
+    turn.status = "retrying"
+    turn.phase = "evaluate"
+    turn.outcome_kind = "provider_retry"
+    turn.turn_metadata = {
+        "error": str(exc),
+        "engine_output_count": engine_output_count,
+        "provider_retry_count": next_retry_count,
+        "retry_task_id": task.id,
+        "retry_delay_seconds": delay_seconds,
+    }
+    run.turns_count = int(run.turns_count or 0) + 1
+    run.status = "queued"
+    run.finished_at = None
+    run.queue_task_id = task.id
+    run.last_error = str(exc)
+    wakeup_state = dict(run.wakeup_state or {})
+    wakeup_state.update(
+        {
+            "provider_retry_count": next_retry_count,
+            "provider_retry_task_id": task.id,
+            "provider_retry_scheduled_at": utcnow().isoformat(),
+            "provider_retry_delay_seconds": delay_seconds,
+            "source_turn_id": turn.turn_id,
+        }
+    )
+    run.wakeup_state = wakeup_state
+    _append_runtime_event(
+        session,
+        run=run,
+        turn_id=turn.turn_id,
+        seq=next_seq,
+        event_type="runtime_event",
+        message="provider_retry_scheduled",
+        payload={
+            "data": {
+                "kind": "provider_retry_scheduled",
+                "status": "retrying",
+                "retry_count": next_retry_count,
+                "retry_delay_seconds": delay_seconds,
+                "task_id": task.id,
+                "error": str(exc),
+            }
+        },
+    )
+    return AgentTurnOutcome(
+        status="continue",
+        gate_signal="continue",
+        metadata={
+            "provider_retry_scheduled": True,
+            "provider_retry_count": next_retry_count,
+            "retry_task_id": task.id,
+            "retry_delay_seconds": delay_seconds,
+            "error": str(exc),
+        },
+    )
+
+
+def _queue_jd_sync_recoverable_scene_retry(
+    session: Session,
+    *,
+    run: AgentRun,
+    turn: AgentTurnRecord,
+    envelope: dict[str, Any],
+    outcome: AgentTurnOutcome,
+    engine_output_count: int,
+    next_seq: int,
+) -> AgentTurnOutcome | None:
+    if str(run.agent_kind or "").strip().lower() != "jd_sync":
+        return None
+    if _terminal_interrupt_status(run.status) is not None:
+        return None
+    if _is_waiting_human(outcome):
+        return None
+    metadata = dict(envelope.get("metadata") or {}) if isinstance(envelope.get("metadata"), dict) else {}
+    retry_count = _safe_int(metadata.get("jd_sync_recoverable_scene_retry_count")) or 0
+    if retry_count >= JD_SYNC_RECOVERABLE_SCENE_RETRY_MAX_ATTEMPTS:
+        return None
+
+    outcome_metadata = dict(outcome.metadata or {})
+    tool_results = [dict(item) for item in list(outcome_metadata.get("tool_results") or []) if isinstance(item, dict)]
+    if not _jd_sync_recoverable_scene_retry_needed(
+        final_output=outcome.final_output,
+        tool_results=tool_results,
+        result_data=dict(outcome_metadata.get("final_result_data") or {}),
+    ):
+        return None
+
+    next_retry_count = retry_count + 1
+    retry_envelope = dict(envelope or {})
+    retry_envelope["run_pk"] = run.id
+    retry_envelope["run_id"] = run.run_id
+    retry_envelope["trigger_type"] = "recoverable_scene_retry"
+    retry_metadata = dict(metadata)
+    context_hints = dict(retry_metadata.get("context_hints") or {})
+    context_hints["jd_sync_recovery"] = {
+        "reason": "recoverable_scene_blocker",
+        "retry_count": next_retry_count,
+        "last_output": str(outcome.final_output or "")[:1200],
+        "directive": (
+            "继续同一个 JD 同步任务；不要把同源可访问时的 HID/frontmost/timeout 异常作为终局。"
+            "重新观察后换恢复路径推进剩余职位详情读取、写回和生效 JD 选择。"
+        ),
+    }
+    retry_metadata.update(
+        {
+            "jd_sync_recoverable_scene_retry_count": next_retry_count,
+            "jd_sync_recoverable_scene_previous_turn_id": turn.turn_id,
+            "context_hints": context_hints,
+        }
+    )
+    retry_envelope["metadata"] = retry_metadata
+    task = TaskQueueRepository(session).enqueue(
+        task_id=f"run-{run.id}-jd-sync-recovery-{uuid4().hex[:8]}",
+        task_type="autonomous_turn",
+        priority=int(run.priority or 100),
+        payload=retry_envelope,
+        scheduled_for=utcnow() + timedelta(seconds=min(10, 2 * next_retry_count)),
+    )
+
+    turn.status = "retrying"
+    turn.phase = "evaluate"
+    turn.outcome_kind = "recoverable_scene_retry"
+    turn.turn_metadata = {
+        "final_output": outcome.final_output,
+        "gate_signal": outcome.gate_signal,
+        "engine_output_count": engine_output_count,
+        "recoverable_scene_retry_count": next_retry_count,
+        "retry_task_id": task.id,
+        "tool_results": tool_results[-6:],
+    }
+    run.status = "queued"
+    run.finished_at = None
+    run.blocked_reason = None
+    run.last_error = None
+    run.queue_task_id = task.id
+    wakeup_state = dict(run.wakeup_state or {})
+    wakeup_state.update(
+        {
+            "jd_sync_recoverable_scene_retry_count": next_retry_count,
+            "jd_sync_recoverable_scene_retry_task_id": task.id,
+            "jd_sync_recoverable_scene_retry_scheduled_at": utcnow().isoformat(),
+        }
+    )
+    run.wakeup_state = wakeup_state
+    _append_runtime_event(
+        session,
+        run=run,
+        turn_id=turn.turn_id,
+        seq=next_seq,
+        event_type="runtime_event",
+        message="jd_sync_recoverable_scene_retry_scheduled",
+        payload={
+            "data": {
+                "kind": "jd_sync_recoverable_scene_retry_scheduled",
+                "status": "retrying",
+                "retry_count": next_retry_count,
+                "task_id": task.id,
+            }
+        },
+    )
+    return AgentTurnOutcome(
+        status="continue",
+        gate_signal="continue",
+        metadata={
+            "jd_sync_recoverable_scene_retry_scheduled": True,
+            "jd_sync_recoverable_scene_retry_count": next_retry_count,
+            "retry_task_id": task.id,
+        },
+    )
+
+
+def _jd_sync_recoverable_scene_retry_needed(
+    *,
+    final_output: str,
+    tool_results: list[dict[str, Any]],
+    result_data: dict[str, Any],
+) -> bool:
+    text = str(final_output or "")
+    if _jd_sync_text_has_terminal_scene_boundary(text.lower()):
+        return False
+    return (
+        _jd_sync_final_output_needs_tool_continuation(text)
+        or _jd_sync_result_data_needs_tool_continuation(result_data)
+        or _jd_sync_tool_results_need_continuation(tool_results)
+    )
+
+
+def _safe_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _final_output_continuation_resolver(
+    *,
+    agent_kind: str,
+) -> Callable[[str, list[dict[str, Any]], list[dict[str, Any]], int], str | None] | None:
+    if str(agent_kind or "").strip().lower() != "jd_sync":
+        return None
+
+    def _resolver(
+        final_output: str,
+        tool_calls: list[dict[str, Any]],
+        tool_results: list[dict[str, Any]],
+        attempt: int,
+        result_data: dict[str, Any] | None = None,
+    ) -> str | None:
+        if attempt >= 16:
+            return None
+        if (
+            not _jd_sync_final_output_needs_tool_continuation(final_output)
+            and not _jd_sync_result_data_needs_tool_continuation(result_data)
+            and not _jd_sync_tool_results_need_continuation(tool_results)
+        ):
+            return None
+        if tool_calls or tool_results:
+            return (
+                "上一条回复仍不能作为 JD 同步终局：即使本轮已经调用过 scene 或业务工具，"
+                "只要仍未完成全量职位发现、全量详情读取、更新/下架识别或生效 JD 选择，就必须继续同一个 turn 的恢复执行，"
+                "不要输出总结或把部分结果当作结束。请基于最近工具结果继续："
+                "若 scene 返回 partial/blocked 但同源站点仍可观察，重新观察页面状态并继续用 VirtualHID 恢复；"
+                "E_TIMEOUT、E_NOT_FRONTMOST、光标/按键干扰或短暂 daemon 无响应都属于可恢复执行异常，"
+                "pending_confirmation 只有在当前主运行真实产生 permission_requested 时才是人工确认边界，不得把 scene 摘要里的该字样直接当作终局；"
+                "只能通过页面内可见链接、按钮、滚动、返回或导航控件恢复；不得主动聚焦浏览器地址栏、输入 URL 或粘贴 URL；"
+                "若已有完整详情证据，调用本地 JD 工具写回。"
+                "只有登录、验证码、权限、必要执行工具未注册/缺失或目标站点不可达，才允许最终 blocked。"
+            )
+        return (
+            "上一条回复不能作为 JD 同步终局：当前仍未完成全量职位发现、全量详情读取、更新/下架识别或生效 JD 选择，"
+            "且本轮没有调用任何 scene 或业务工具。请立即继续执行，不要输出总结；"
+            "必须调用 delegate_scene_context 继续读取剩余职位详情，或在已有完整详情证据时调用本地 JD 工具写回。"
+            "如果单次点击、返回、滚动、wait 或 HID 注入失败但目标同源站点仍可访问，请继续使用 VirtualHID 恢复，"
+            "但只能通过页面内可见链接、按钮、滚动、返回或导航控件恢复；不得主动聚焦浏览器地址栏、输入 URL 或粘贴 URL。"
+            "pending_confirmation 只有在当前主运行真实产生 permission_requested 时才是人工确认边界。"
+            "只有登录、验证码、权限、必要执行工具未注册/缺失或目标站点不可达，才允许最终 blocked。"
+        )
+
+    return _resolver
+
+
+def _jd_sync_result_data_needs_tool_continuation(value: Any) -> bool:
+    if not isinstance(value, dict) or not value:
+        return False
+    status = str(value.get("status") or value.get("execution_status") or value.get("result_status") or "").strip().lower()
+    if status in {"partial", "incomplete", "needs_continuation", "blocked_partial"}:
+        return True
+    for key in ("remaining_jobs", "unread_details", "remaining_items", "pending_jobs", "unfinished_jobs"):
+        items = value.get(key)
+        if isinstance(items, (list, tuple, dict, set)) and len(items) > 0:
+            return True
+        if isinstance(items, int) and items > 0:
+            return True
+    for key in ("blockers", "limitations", "unfinished", "pending"):
+        items = value.get(key)
+        if isinstance(items, (list, tuple, dict, set)) and len(items) > 0:
+            return True
+    return False
+
+
+def _jd_sync_tool_results_need_continuation(values: list[dict[str, Any]]) -> bool:
+    for item in values:
+        tool_name = str(item.get("tool_name") or item.get("name") or "").strip()
+        if tool_name != "delegate_scene_context":
+            continue
+        output = item.get("output")
+        if _jd_sync_scene_result_needs_continuation(output):
+            return True
+    return False
+
+
+def _jd_sync_scene_result_needs_continuation(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    text = json.dumps(value, ensure_ascii=False, default=str).lower()
+    if _jd_sync_text_has_terminal_scene_boundary(text):
+        return False
+
+    status = str(value.get("status") or value.get("execution_status") or value.get("result_status") or "").strip().lower()
+    if status in {"partial", "incomplete", "needs_continuation", "blocked_partial"}:
+        return True
+    if status == "blocked" and _jd_sync_text_has_recoverable_scene_boundary(text):
+        return True
+
+    result_data = value.get("result_data")
+    if isinstance(result_data, dict) and _jd_sync_result_data_needs_tool_continuation(result_data):
+        return True
+
+    for key in (
+        "remaining_jobs",
+        "unread_details",
+        "remaining_items",
+        "pending_jobs",
+        "unfinished_jobs",
+        "remaining_work",
+        "limitations",
+        "unfinished",
+        "pending",
+    ):
+        item = value.get(key)
+        if isinstance(item, (list, tuple, dict, set)) and len(item) > 0:
+            return True
+        if isinstance(item, int) and item > 0:
+            return True
+
+    if "completed_job_details" in text and ("completed_job_details\": []" in text or "completed_job_details': []" in text):
+        if any(marker in text for marker in ("observed_jobs", "职位", "job", "remaining", "未完成", "待继续")):
+            return True
+    return False
+
+
+def _jd_sync_text_has_terminal_scene_boundary(text: str) -> bool:
+    normalized = str(text or "").strip().lower()
+    if not normalized:
+        return False
+    if _jd_sync_text_has_negated_terminal_scene_boundary(normalized):
+        return False
+    if re.search(r"(要求|需要|必须|重新|无法|不能|不可|阻塞|blocked|blocker)[^。\n]{0,24}(登录|验证码|账号切换|绕过风控|权限不足)", normalized):
+        return True
+    if re.search(r"(登录|验证码|账号切换|绕过风控|权限不足)[^。\n]{0,24}(要求|需要|必须|重新|无法|不能|不可|阻塞|blocked|blocker)", normalized):
+        return True
+    return any(
+        marker in normalized
+        for marker in (
+            "permission_requested",
+            "necessary execution tool missing",
+            "必要执行工具缺失",
+            "hid_action 缺失",
+            "browser-mcp 未注册",
+            "virtualhid 未注册",
+            "目标站点不可达",
+            "site unreachable",
+        )
+    ) or bool(re.search(r"(页面|目标站点|目标网页)[^。\n]{0,12}(不可达|无法访问|访问失败)", normalized))
+
+
+def _jd_sync_text_has_negated_terminal_scene_boundary(text: str) -> bool:
+    return bool(
+        re.search(
+            r"(没有|未发现|无|并未|不涉及|无需|不需要|不是|尚未出现)[^。\n]{0,18}"
+            r"(登录|验证码|账号切换|绕过风控|权限不足|权限|必要执行工具缺失|工具未注册|目标站点不可达|页面不可达|不可达)",
+            text,
+        )
+    )
+
+
+def _jd_sync_text_has_recoverable_scene_boundary(text: str) -> bool:
+    return any(
+        marker in text
+        for marker in (
+            "e_timeout",
+            "e_not_frontmost",
+            "e_daemon_unreachable",
+            "scene_context_timeout",
+            "pending_confirmation",
+            "human-only",
+            "virtualhid",
+            "窗口未置前",
+            "前台",
+            "置前",
+            "光标",
+            "按键",
+            "返回列表",
+            "滚动",
+            "click",
+            "hid",
+            "仍需继续",
+            "待继续",
+            "未完成",
+            "剩余",
+        )
+    )
+
+
+def _jd_sync_final_output_needs_tool_continuation(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    normalized = text.lower()
+    incomplete_markers = (
+        "仍需继续",
+        "还需要继续",
+        "需要继续",
+        "未完成全量",
+        "未完成",
+            "未成功确认",
+            "未能继续",
+            "无法继续",
+            "无法进入职位列表",
+            "无法完成",
+            "无法把操作",
+            "还不能",
+            "不能调用本地 JD 写回",
+            "completed_job_details 仍为空",
+            "没有新的可写回 JD 详情证据",
+        "剩余",
+        "remaining_jobs",
+        "partial",
+        "blocked",
+        "阻塞",
+        "不能宣告同步完成",
+        "不能视为同步完成",
+    )
+    if not any(marker in text or marker in normalized for marker in incomplete_markers):
+        return False
+    recoverable_execution_markers = (
+        "e_timeout",
+        "e_not_frontmost",
+        "e_daemon_unreachable",
+        "pending_confirmation",
+        "virtualhid",
+        "前台",
+        "置前",
+        "光标",
+        "按键",
+        "daemon",
+        "frontmost",
+        "注入",
+        "前台焦点",
+        "执行环境",
+        "执行链路",
+        "电脑执行链路",
+    )
+    if any(marker in text or marker in normalized for marker in recoverable_execution_markers):
+        return True
+    terminal_markers = (
+        "登录",
+        "验证码",
+        "权限",
+        "必要执行工具缺失",
+        "工具未注册",
+        "hid_action 缺失",
+        "browser-mcp 未注册",
+        "virtualhid 未注册",
+        "不可达",
+    )
+    if any(marker in text or marker in normalized for marker in terminal_markers):
+        return False
+    return True
 
 
 def _resolve_turn_limits(defaults: TurnLimits, trial_budget: dict[str, Any] | None) -> TurnLimits:
@@ -919,17 +1593,70 @@ def _memory_writeback_policy(definition: AgentDefinition | None) -> MemoryWriteb
     return memory_writeback_policy_from_config(dict(config or {}))
 
 
-def _definition_system_prompt(definition: AgentDefinition | None) -> str:
+def _runtime_permission_policy(run_constraints: dict[str, Any]) -> dict[str, Any]:
+    tool_policy = dict(run_constraints.get("tool_approval_policy") or {})
+    overrides = dict(tool_policy.get("overrides") or {})
+    normalized_overrides: dict[str, Any] = {}
+    for key, value in overrides.items():
+        normalized_key = str(key).split(":", 1)[-1].strip()
+        if normalized_key:
+            normalized_overrides[normalized_key] = value
+    if normalized_overrides:
+        tool_policy["overrides"] = normalized_overrides
+    return {"tool_approval_policy": tool_policy}
+
+
+def _definition_system_prompt(definition: AgentDefinition | None, *, agent_kind: str = "autonomous") -> str:
     if definition is None:
         return "你是 RecruitStation。你的核心职责是严格在招聘场景中维护候选人与投递记录事实，以投递记录为单位推进流程、记录证据，并把高风险动作交给人工确认。"
-    prompt_config = dict(definition.prompt_config or {})
-    return str(
-        prompt_config.get("system_prompt")
-        or prompt_config.get("systemPrompt")
-        or prompt_config.get("prompt")
+    product_config = dict(definition.product_config or {})
+    product_kind_config = product_config.get(agent_kind)
+    if not isinstance(product_kind_config, dict):
+        product_kind_config = {}
+    base_prompt_config = dict(definition.prompt_config or {})
+    product_prompt_config = dict(product_kind_config.get("prompt_config") or {})
+    base_prompt = str(
+        base_prompt_config.get("system_prompt")
+        or base_prompt_config.get("systemPrompt")
+        or base_prompt_config.get("prompt")
         or definition.description
         or ""
+    ).strip()
+    product_prompt = str(
+        product_prompt_config.get("system_prompt")
+        or product_prompt_config.get("systemPrompt")
+        or product_prompt_config.get("prompt")
+        or ""
+    ).strip()
+    if base_prompt and product_prompt and product_prompt != base_prompt:
+        prompt = "\n".join([base_prompt, product_prompt])
+    else:
+        prompt = product_prompt or base_prompt
+    if str(agent_kind or "").strip().lower() == "jd_sync":
+        prompt = _append_jd_sync_runtime_invariants(prompt)
+    return prompt
+
+
+def _append_jd_sync_runtime_invariants(prompt: str) -> str:
+    invariants = (
+        "JD 同步运行约束：如果只完成部分职位详情读取，可以写入已完整确认的 JD 作为进度，但不得把本轮作为成功终局。"
+        "在完成全量职位发现、全量详情读取、更新/下架识别和生效 JD 选择前，必须继续执行或返回明确的恢复条件。"
+        "遇到点击、返回、滚动、光标干扰、按键状态异常或单次注入超时等可恢复执行异常时，不得在第一次失败后结束；"
+        "应重新观察、等待稳定、释放异常按键状态、改用页面上的其他同源入口、滚动、返回或页面内导航控件后继续。"
+        "恢复执行不是重复同一失败动作；每次恢复都应基于最新观察证据切换页面内路径，例如从当前详情返回职位列表、"
+        "滚动到目标职位入口、或选择已观察到的下一个同源详情入口。"
+        "不得主动聚焦浏览器地址栏、输入 URL 或粘贴 URL 作为恢复路径；如果缺少页面内可执行证据，应说明 blocker 和恢复条件。"
+        "单次 HID 或浏览器动作失败不是任务终局；只要目标站点仍可访问且还有职位详情未完整读取，就应在同一轮继续恢复和推进。"
+        "如果 delegate_scene_context 返回部分结果且仍包含 blockers、limitations 或未完成项，应把它当作继续执行信号，"
+        "继续调用 scene 完成剩余职位；HID 超时、窗口未置前、光标/按键状态干扰或短暂 daemon 无响应都是可恢复执行异常，"
+        "可恢复异常只能作为下一步恢复策略的输入，不能作为当前 turn 的结束理由；只要目标站点仍可观察且仍有职位未完整读取，就应继续恢复和推进，"
+        "如果已经从列表发现多个职位，但本地写回数量少于发现数量或仍有任一职位缺少详情页证据，应继续打开剩余职位详情，不能输出最终总结；"
+        "不得直接作为终局；scene 摘要里出现 pending_confirmation 或 human-only 字样，不等于 JD 同步主任务已经到达终局人工边界，"
+        "除非当前运行真实产生 permission_requested 等待人工确认事件。只有登录、验证码、权限、必要执行工具未注册/缺失、目标页面不可达，才可结束为 blocked。"
     )
+    if invariants in prompt:
+        return prompt
+    return "\n".join([part for part in (prompt, invariants) if part.strip()])
 
 
 def _memory_writeback_state(run: AgentRun) -> dict[str, Any]:
@@ -991,6 +1718,39 @@ def _mcp_resource_contexts(mcp_registry: Any | None, *sources: dict[str, Any]) -
     if not policy.get("resources"):
         return []
     return build_mcp_resource_context(mcp_registry, policy)
+
+
+def _runtime_tool_registry_for_run(
+    registry: ToolRegistry,
+    *,
+    run: AgentRun,
+    constraints: dict[str, Any],
+) -> ToolRegistry:
+    if not _should_hide_mcp_resource_tools(run=run, constraints=constraints):
+        return registry
+    return registry.filtered(lambda tool: tool.name not in MCP_RESOURCE_RUNTIME_TOOL_NAMES)
+
+
+def _should_hide_mcp_resource_tools(*, run: AgentRun, constraints: dict[str, Any]) -> bool:
+    normalized_kind = str(run.run_type or "").strip().lower()
+    if normalized_kind == "jd_sync":
+        return True
+    if _has_browser_target(constraints):
+        return True
+    context_hints = constraints.get("context_hints")
+    if isinstance(context_hints, dict) and _has_browser_target(context_hints):
+        return True
+    return False
+
+
+def _has_browser_target(value: Any) -> bool:
+    if isinstance(value, dict):
+        if value.get("browser_target") or value.get("browserTarget") or value.get("target_recruiting_site"):
+            return True
+        return any(_has_browser_target(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_has_browser_target(item) for item in value)
+    return False
 
 
 def _approved_tool_calls_from_envelope(envelope: dict[str, Any], *, run: AgentRun) -> list[dict[str, Any]]:
@@ -1110,6 +1870,14 @@ def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int
     return max(minimum, min(parsed, maximum))
 
 
+def _merge_policy_dicts(*values: Any) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for value in values:
+        if isinstance(value, dict):
+            merged.update({str(key): item for key, item in value.items() if str(key).strip()})
+    return merged
+
+
 def _skill_environment_scope(*, run: AgentRun, snapshot: dict[str, Any]) -> str:
     run_constraints = dict(snapshot.get("constraints") or {})
     context_hints = dict(run_constraints.get("context_hints") or snapshot.get("context_hints") or {})
@@ -1171,11 +1939,20 @@ def _summarize_turn_tool_activity(events: list[AgentRuntimeEvent]) -> list[dict[
 def _summarize_turn_events(events: list[AgentRuntimeEvent]) -> list[dict[str, Any]]:
     outline: list[dict[str, Any]] = []
     for event in events:
-        if event.event_type in {"llm_invocation_started", "llm_invocation_completed", "tool_event", "permission_requested"}:
+        payload = dict(event.payload or {})
+        data = dict(payload.get("data") or {})
+        if event.event_type in {"llm_invocation_started", "llm_invocation_completed", "tool_event", "permission_requested"} or (
+            event.event_type == "runtime_event"
+            and (
+                str(data.get("kind") or "").startswith("pending_user_input_after_next_tool_call")
+                or str(data.get("kind") or "").startswith("provider_retry")
+                or str(data.get("kind") or "") == "provider_error_terminal"
+            )
+        ):
             outline.append(
                 {
                     "event_type": event.event_type,
-                    "message": event.message,
+                    "message": str(data.get("kind") or event.message),
                 }
             )
     return outline[-12:]
@@ -1348,11 +2125,213 @@ def _run_instruction_snapshot(*, run: AgentRun, envelope: dict[str, Any]) -> dic
             world_snapshot.get("run_preferences"),
             envelope.get("run_preferences"),
         ),
+        "pending_input": _pending_input_from_envelope(envelope),
     }
 
 
 def _snapshot_instruction(snapshot: dict[str, Any], run: AgentRun) -> str:
-    return _first_text(snapshot.get("instruction"), run.run_type, "Autonomous execution") or "Autonomous execution"
+    instruction = _first_text(snapshot.get("instruction"), run.run_type, "Autonomous execution") or "Autonomous execution"
+    pending_input = [
+        item
+        for item in list(snapshot.get("pending_input") or [])
+        if isinstance(item, dict) and str(item.get("message") or "").strip()
+    ]
+    if not pending_input:
+        return instruction
+    pending_user_input_lines = [
+        f"- {str(item.get('message') or '').strip()}"
+        for item in pending_input
+    ]
+    return "\n\n".join(
+        [
+            instruction,
+            "## Queued user input after next turn",
+            "Process these operator instructions in this follow-up turn while preserving the original run boundaries and product policies.",
+            "\n".join(pending_user_input_lines),
+        ]
+    )
+
+
+def _pending_input_from_envelope(envelope: dict[str, Any]) -> list[dict[str, Any]]:
+    pending_input = envelope.get("pending_input")
+    if not isinstance(pending_input, list):
+        return []
+    items: list[dict[str, Any]] = []
+    for item in pending_input:
+        if isinstance(item, dict):
+            message = str(item.get("message") or "").strip()
+            if message:
+                items.append(
+                    {
+                        "input_id": str(item.get("input_id") or item.get("inputId") or "").strip() or None,
+                        "priority": str(item.get("priority") or "next").strip().lower() or "next",
+                        "queued_by": str(item.get("queued_by") or item.get("queuedBy") or "").strip() or None,
+                        "message": message,
+                    }
+                )
+        else:
+            message = str(item or "").strip()
+            if message:
+                items.append({"input_id": None, "priority": "next", "queued_by": None, "message": message})
+    return items
+
+
+def _primary_conversation_id_for_run(run: AgentRun) -> str:
+    for raw in (
+        (run.context_manifest or {}).get("conversation_id"),
+        (run.runtime_metadata or {}).get("conversation_id"),
+        (run.wakeup_state or {}).get("conversation_id"),
+    ):
+        normalized = str(raw or "").strip()
+        if normalized:
+            return normalized
+    return JD_SYNC_PRIMARY_CONVERSATION_ID if run.agent_kind == "jd_sync" else AUTONOMOUS_PRIMARY_CONVERSATION_ID
+
+
+def _pending_user_input_prompt_payload(pending_user_input: AgentPendingUserInput) -> dict[str, Any]:
+    return {
+        "input_id": pending_user_input.input_id,
+        "priority": pending_user_input.priority,
+        "queued_by": pending_user_input.queued_by,
+        "message": pending_user_input.message,
+    }
+
+
+def _pending_user_input_after_next_tool_call_message(records: list[AgentPendingUserInput]) -> LLMMessage:
+    payload = [_pending_user_input_prompt_payload(record) for record in records]
+    lines = [
+        "## Pending user input after next tool call",
+        "Process these operator instructions before the next model step. Keep the current run, product policy, and tool boundary intact.",
+    ]
+    lines.extend(f"- {item['message']}" for item in payload)
+    return LLMMessage(
+        role="user",
+        content="\n".join(lines),
+        metadata={
+            "kind": "pending_user_input_after_next_tool_call",
+            "pending_user_input_ids": [record.input_id for record in records],
+            "pending_input": payload,
+        },
+    )
+
+
+def _consume_pending_user_input_after_next_tool_call(
+    session: Session,
+    *,
+    run: AgentRun,
+    turn: AgentTurnRecord,
+    agent_kind: str,
+    conversation_id: str,
+    context: TurnContext,
+    tool_call: ToolCall,
+    tool_result: ToolResult,
+) -> list[LLMMessage]:
+    if _terminal_interrupt_status(run.status) is not None:
+        return []
+    pending_user_inputs = AgentPendingUserInputRepository(session).list_pending_prompts(
+        agent_kind=agent_kind,
+        conversation_id=conversation_id,
+        run_pk=run.id,
+        limit=20,
+    )
+    if not pending_user_inputs:
+        return []
+    AgentPendingUserInputRepository(session).mark_consumed(
+        pending_user_inputs,
+        claimed_by="pending_user_input_after_next_tool_call",
+        metadata={
+            "consumer": "pending_user_input_after_next_tool_call",
+            "run_pk": run.id,
+            "turn_id": turn.turn_id,
+            "runtime_turn_id": context.turn_id,
+            "tool_name": tool_call.name,
+            "tool_call_id": tool_call.id,
+            "tool_use_id": tool_call.tool_use_id,
+            "tool_result_error": bool(tool_result.is_error),
+        },
+    )
+    session.commit()
+    return [_pending_user_input_after_next_tool_call_message(pending_user_inputs)]
+
+
+def _queue_user_input_after_next_turn(
+    session: Session,
+    *,
+    run: AgentRun,
+    turn: AgentTurnRecord,
+    envelope: dict[str, Any],
+) -> bool:
+    if _terminal_interrupt_status(run.status) is not None:
+        return False
+    agent_kind = str(run.agent_kind or "autonomous").strip() or "autonomous"
+    conversation_id = _primary_conversation_id_for_run(run)
+    pending_user_inputs = AgentPendingUserInputRepository(session).list_pending_prompts(
+        agent_kind=agent_kind,
+        conversation_id=conversation_id,
+        run_pk=run.id,
+        limit=20,
+    )
+    if not pending_user_inputs:
+        return False
+
+    pending_user_input_payloads = [_pending_user_input_prompt_payload(pending_user_input) for pending_user_input in pending_user_inputs]
+    followup_envelope = dict(envelope or {})
+    followup_envelope["run_pk"] = run.id
+    followup_envelope["run_id"] = run.run_id
+    followup_envelope["trigger_type"] = "queued_user_input_after_next_turn"
+    followup_envelope["pending_input"] = pending_user_input_payloads
+    metadata = dict(followup_envelope.get("metadata") or {}) if isinstance(followup_envelope.get("metadata"), dict) else {}
+    metadata["agent_kind"] = agent_kind
+    metadata["conversation_id"] = conversation_id
+    metadata["queued_user_input_after_next_turn_ids"] = [pending_user_input.input_id for pending_user_input in pending_user_inputs]
+    followup_envelope["metadata"] = metadata
+    world_snapshot = dict(followup_envelope.get("world_snapshot") or {}) if isinstance(followup_envelope.get("world_snapshot"), dict) else {}
+    world_snapshot["pending_input"] = pending_user_input_payloads
+    followup_envelope["world_snapshot"] = world_snapshot
+
+    task = TaskQueueRepository(session).enqueue(
+        task_id=f"run-{run.id}-input-{pending_user_inputs[-1].input_id}-{uuid4().hex[:8]}",
+        task_type="autonomous_turn",
+        priority=int(run.priority or 100),
+        payload=followup_envelope,
+    )
+    run.queue_task_id = task.id
+    run.status = "queued"
+    run.finished_at = None
+    wakeup_state = dict(run.wakeup_state or {})
+    wakeup_state.update(
+        {
+            "conversation_id": conversation_id,
+            "queued_user_input_after_next_turn_ids": [pending_user_input.input_id for pending_user_input in pending_user_inputs],
+            "queued_user_input_after_next_turn_at": utcnow().isoformat(),
+            "source_turn_id": turn.turn_id,
+        }
+    )
+    run.wakeup_state = wakeup_state
+    AgentPendingUserInputRepository(session).mark_consumed(
+        pending_user_inputs,
+        claimed_by="queued_user_input_after_next_turn",
+        metadata={
+            "consumer": "queued_user_input_after_next_turn",
+            "run_pk": run.id,
+            "turn_id": turn.turn_id,
+            "task_id": task.id,
+        },
+    )
+    _append_runtime_event(
+        session,
+        run=run,
+        turn_id=turn.turn_id,
+        seq=int(turn.seq or 0) + 1,
+        event_type="queued_user_input_after_next_turn",
+        message="queued_user_input_after_next_turn",
+        payload={
+            "conversation_id": conversation_id,
+            "pending_user_input_ids": [pending_user_input.input_id for pending_user_input in pending_user_inputs],
+            "task_id": task.id,
+        },
+    )
+    return True
 
 
 def _snapshot_kind(snapshot: dict[str, Any], run: AgentRun) -> str:
@@ -1490,14 +2469,15 @@ def _interrupt_open_run(session: Session, *, run: AgentRun, reason: str) -> None
     run.wakeup_state = {}
 
 
-def _resolve_autonomous_run_for_control(session: Session, run_id: str) -> AgentRun:
+def _resolve_autonomous_run_for_control(session: Session, run_id: str, *, agent_kind: str | None = None) -> AgentRun:
     normalized = str(run_id or "").strip()
     if not normalized:
         raise KeyError("unknown run: ")
-    stmt = select(AgentRun).where(
-        AgentRun.agent_kind == "autonomous",
-        (AgentRun.run_id == normalized) | (AgentRun.id == normalized),
-    )
+    stmt = select(AgentRun).where((AgentRun.run_id == normalized) | (AgentRun.id == normalized))
+    if agent_kind:
+        stmt = stmt.where(AgentRun.agent_kind == agent_kind)
+    else:
+        stmt = stmt.where(AgentRun.agent_kind.in_(RUNTIME_AGENT_KINDS))
     run = session.scalars(stmt).first()
     if run is None:
         raise KeyError(f"unknown run: {normalized}")
@@ -1524,6 +2504,49 @@ def _cancel_open_run_for_control(
         approval_status="rejected",
         interaction_action=interaction_action,
     )
+
+
+def _pause_active_run_for_control(session: Session, *, run: AgentRun, reviewer: str, reason: str) -> None:
+    run.status = "paused"
+    run.finished_at = None
+    run.blocked_reason = reason or run.blocked_reason
+    _append_open_queue_task_audit_for_run(
+        session,
+        run=run,
+        reviewer=reviewer,
+        reason=reason,
+        kind="paused",
+    )
+
+
+def _append_open_queue_task_audit_for_run(
+    session: Session,
+    *,
+    run: AgentRun,
+    reviewer: str,
+    reason: str | None,
+    kind: str,
+) -> None:
+    stmt = select(TaskQueueItem).where(TaskQueueItem.status.in_(("pending", "running")))
+    for task in session.scalars(stmt).all():
+        payload = dict(task.payload or {})
+        if str(payload.get("run_pk") or "") != run.id and str(payload.get("run_id") or "") != str(run.run_id or ""):
+            continue
+        audit = dict((payload.get("queue_audit") or {})) if isinstance(payload.get("queue_audit"), dict) else {}
+        history = list(audit.get("history") or [])
+        history.append(
+            {
+                "kind": kind,
+                "at": utcnow().isoformat(),
+                "reviewer": reviewer,
+                "reason": reason,
+            }
+        )
+        audit["history"] = history[-20:]
+        audit["last_event"] = kind
+        audit["last_event_at"] = history[-1]["at"]
+        payload["queue_audit"] = audit
+        task.payload = payload
 
 
 def _cancel_open_queue_tasks_for_run(session: Session, *, run: AgentRun, reviewer: str, reason: str | None) -> None:
@@ -1829,12 +2852,12 @@ def _upsert_wait_human_approval(
             target_id=run.run_id or run.id,
             title=title,
             status="pending",
-            requested_by="autonomous",
+            requested_by=run.agent_kind or "autonomous",
             payload=payload,
             notes=summary,
             run_pk=run.id,
             turn_pk=turn.id,
-            source_kind="autonomous",
+            source_kind=run.agent_kind or "autonomous",
             tool_name=tool_name,
             args_digest=args_digest,
             idempotency_key=f"wait-human:{run.id}:{turn.id}",

@@ -2113,6 +2113,76 @@ def _align_candidate_application_lock_scope(connection: Connection) -> None:
     )
 
 
+def _create_agent_pending_user_inputs_table(connection: Connection) -> None:
+    connection.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS agent_pending_user_inputs (
+                id VARCHAR(32) PRIMARY KEY,
+                input_id VARCHAR(64) NOT NULL UNIQUE,
+                agent_kind VARCHAR(32) NOT NULL,
+                conversation_id VARCHAR(128) NOT NULL,
+                run_pk VARCHAR(32),
+                run_id VARCHAR(64),
+                mode VARCHAR(32) NOT NULL DEFAULT 'prompt',
+                priority VARCHAR(16) NOT NULL DEFAULT 'next',
+                delivery VARCHAR(32) NOT NULL DEFAULT 'after_next_tool_call',
+                status VARCHAR(32) NOT NULL DEFAULT 'pending',
+                message TEXT NOT NULL,
+                queued_by VARCHAR(255),
+                claimed_at INTEGER,
+                claimed_by VARCHAR(128),
+                completed_at INTEGER,
+                input_metadata JSON NOT NULL DEFAULT '{}',
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                FOREIGN KEY(run_pk) REFERENCES agent_runs (id) ON DELETE SET NULL
+            )
+            """
+        )
+    )
+    connection.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_agent_pending_user_inputs_input_id ON agent_pending_user_inputs (input_id)"))
+    connection.execute(text("CREATE INDEX IF NOT EXISTS ix_agent_pending_user_inputs_agent_kind ON agent_pending_user_inputs (agent_kind)"))
+    connection.execute(text("CREATE INDEX IF NOT EXISTS ix_agent_pending_user_inputs_conversation_id ON agent_pending_user_inputs (conversation_id)"))
+    connection.execute(text("CREATE INDEX IF NOT EXISTS ix_agent_pending_user_inputs_run_pk ON agent_pending_user_inputs (run_pk)"))
+    connection.execute(text("CREATE INDEX IF NOT EXISTS ix_agent_pending_user_inputs_run_id ON agent_pending_user_inputs (run_id)"))
+    connection.execute(text("CREATE INDEX IF NOT EXISTS ix_agent_pending_user_inputs_mode ON agent_pending_user_inputs (mode)"))
+    connection.execute(text("CREATE INDEX IF NOT EXISTS ix_agent_pending_user_inputs_priority ON agent_pending_user_inputs (priority)"))
+    connection.execute(text("CREATE INDEX IF NOT EXISTS ix_agent_pending_user_inputs_delivery ON agent_pending_user_inputs (delivery)"))
+    connection.execute(text("CREATE INDEX IF NOT EXISTS ix_agent_pending_user_inputs_status ON agent_pending_user_inputs (status)"))
+    connection.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_agent_pending_user_inputs_agent_status_priority "
+            "ON agent_pending_user_inputs (agent_kind, status, priority)"
+        )
+    )
+    connection.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_agent_pending_user_inputs_conversation_status "
+            "ON agent_pending_user_inputs (conversation_id, status)"
+        )
+    )
+    connection.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_agent_pending_user_inputs_run_status "
+            "ON agent_pending_user_inputs (run_pk, status)"
+        )
+    )
+
+
+def _ensure_agent_pending_user_inputs_after_next_tool_call(connection: Connection) -> None:
+    _create_agent_pending_user_inputs_table(connection)
+    connection.execute(
+        text(
+            """
+            UPDATE agent_pending_user_inputs
+            SET delivery = 'after_next_tool_call'
+            WHERE delivery = 'inject_before_next_model_step'
+            """
+        )
+    )
+
+
 MIGRATIONS: tuple[SchemaMigration, ...] = (
     SchemaMigration(
         version=1,
@@ -2253,6 +2323,16 @@ MIGRATIONS: tuple[SchemaMigration, ...] = (
         version=28,
         name="align_agent_runtime_subject_columns",
         apply=_align_agent_runtime_subject_columns,
+    ),
+    SchemaMigration(
+        version=29,
+        name="create_agent_pending_user_inputs_table",
+        apply=_create_agent_pending_user_inputs_table,
+    ),
+    SchemaMigration(
+        version=30,
+        name="align_pending_user_input_after_next_tool_call",
+        apply=_ensure_agent_pending_user_inputs_after_next_tool_call,
     ),
 )
 

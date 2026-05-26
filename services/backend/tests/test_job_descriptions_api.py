@@ -64,6 +64,47 @@ def test_job_description_crud_routes(tmp_path: Path) -> None:
         load_settings.cache_clear()
 
 
+def test_job_description_bulk_delete_route(tmp_path: Path) -> None:
+    os.environ["RECRUIT_STATION_DATA_DIR"] = str(tmp_path)
+    load_settings.cache_clear()
+    app = create_app()
+    client = TestClient(app)
+    client.__enter__()
+    try:
+        created_ids: list[str] = []
+        for index in range(3):
+            created = client.post(
+                "/api/job-descriptions",
+                json={
+                    "title": f"批量删除岗位 {index}",
+                    "location": "上海",
+                    "department": "销售工程部",
+                },
+            )
+            assert created.status_code == 201
+            created_ids.append(created.json()["jobDescriptionId"])
+
+        deleted = client.post(
+            "/api/job-descriptions/bulk-delete",
+            json={"jobDescriptionIds": [created_ids[0], created_ids[1], created_ids[1], "missing-jd"]},
+        )
+        assert deleted.status_code == 200
+        assert deleted.json()["deletedIds"] == created_ids[:2]
+        assert deleted.json()["missingIds"] == ["missing-jd"]
+
+        listed = client.get("/api/job-descriptions?limit=10&offset=0")
+        assert listed.status_code == 200
+        remaining_ids = [item["jobDescriptionId"] for item in listed.json()["items"]]
+        assert remaining_ids == [created_ids[2]]
+
+        empty = client.post("/api/job-descriptions/bulk-delete", json={"jobDescriptionIds": []})
+        assert empty.status_code == 400
+    finally:
+        client.__exit__(None, None, None)
+        os.environ.pop("RECRUIT_STATION_DATA_DIR", None)
+        load_settings.cache_clear()
+
+
 def test_job_description_list_pagination_metadata(tmp_path: Path) -> None:
     os.environ["RECRUIT_STATION_DATA_DIR"] = str(tmp_path)
     load_settings.cache_clear()

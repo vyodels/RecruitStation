@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlparse
@@ -9,6 +11,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from recruit_station.agent_runtime.engine import InteractionEngine, InteractionEngineConfig
 from recruit_station.agent_runtime.types import InteractionOutput
 from recruit_station.db.base import utcnow
+from recruit_station.models.domain import AgentGlobalState
 from recruit_station.plugins.host import PluginHost
 from recruit_station.repositories.domain import (
     EnvironmentSnapshotRepository,
@@ -24,7 +27,7 @@ from recruit_station.product_adapters.result_semantics import (
     normalize_result_payload,
 )
 from recruit_station.product_adapters.target_contracts import derive_browser_target
-from recruit_station.capabilities.tools import ToolRegistry
+from recruit_station.capabilities.tools import ToolDefinition, ToolRegistry, is_scene_context_tool
 
 
 _SCENE_BROWSER_READ_ONLY_TOOL_NAMES = {
@@ -45,6 +48,7 @@ _SCENE_BROWSER_TARGET_IDENTIFICATION_TOOL_NAMES = {
     "browser_get_active_tab",
 }
 _SCENE_BROWSER_PAGE_OBSERVATION_TOOL_NAMES = _SCENE_BROWSER_READ_ONLY_TOOL_NAMES - _SCENE_BROWSER_TARGET_IDENTIFICATION_TOOL_NAMES
+_SCENE_HID_BROWSER_SEQUENCE_PRIMITIVE_TYPES = {"click", "drag", "scroll", "type", "pasteText", "key"}
 
 
 @dataclass(slots=True)
@@ -55,9 +59,16 @@ class SceneContextService:
     plugin_host: PluginHost
     limits: SceneExecutionLimits = field(default_factory=SceneExecutionLimits)
     default_max_llm_invocations: int | None = None
+    anti_detection_policy: dict[str, Any] = field(default_factory=dict)
+    behavior_budget: dict[str, Any] = field(default_factory=dict)
 
     def delegate(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        request = _normalize_scene_request(arguments, default_max_llm_invocations=self.default_max_llm_invocations)
+        request = _normalize_scene_request(
+            arguments,
+            default_max_llm_invocations=self.default_max_llm_invocations,
+            default_anti_detection_policy=self.anti_detection_policy,
+            default_behavior_budget=self.behavior_budget,
+        )
         with self.session_factory() as session:
             task_repo = TaskSpecRepository(session)
             plan_repo = ExecutionPlanRepository(session)
@@ -83,6 +94,8 @@ class SceneContextService:
                         "environment_requirements": dict(request["environment_requirements"]),
                         "approval_policy": dict(request["approval_policy"]),
                         "output_contract": dict(request["output_contract"]),
+                        "anti_detection_policy": dict(request["anti_detection_policy"]),
+                        "behavior_budget": dict(request["behavior_budget"]),
                     },
                     "success_criteria": dict(request["success_criteria"]),
                     "approval_policy": dict(request["approval_policy"]),
@@ -112,6 +125,8 @@ class SceneContextService:
                     "runtime_metadata": {
                         "scene_context": True,
                         "approval_policy": dict(request["approval_policy"]),
+                        "anti_detection_policy": dict(request["anti_detection_policy"]),
+                        "behavior_budget": dict(request["behavior_budget"]),
                     },
                 }
             )
@@ -134,6 +149,8 @@ class SceneContextService:
                         "preferred_capabilities": list(request["preferred_capabilities"]),
                         "execution_contract": _scene_execution_contract(request),
                         "environment_context": _scene_environment_context(request, episode_id=None),
+                        "anti_detection_policy": dict(request["anti_detection_policy"]),
+                        "behavior_budget": dict(request["behavior_budget"]),
                     },
                 }
             )
@@ -171,6 +188,8 @@ class SceneContextService:
                         ),
                         "environment_requirements": _compact_value(request["environment_requirements"]),
                         "context": _compact_value(request["context"]),
+                        "anti_detection_policy": _compact_value(request["anti_detection_policy"]),
+                        "behavior_budget": _compact_value(request["behavior_budget"]),
                     },
                 }
             )
@@ -212,8 +231,10 @@ class SceneContextService:
             self.tool_registry,
             request=request,
             browser_semantics=browser_semantics,
+            workspace_pause_checker=lambda: _workspace_control_paused(self.session_factory),
         )
         max_llm_invocations = int(request["max_llm_invocations"] or self.limits.max_llm_invocations or 8)
+        scene_turn_timeout_seconds = int(self.limits.scene_turn_timeout_seconds or 0)
         engine_events: list[dict[str, Any]] = []
         adapter_context = build_scene_turn_context(
             request=request,
@@ -232,15 +253,95 @@ class SceneContextService:
                 tools=scene_tool_registry.to_agent_runtime_tools(),
                 initial_messages=adapter_context.initial_messages,
                 max_llm_invocations=max_llm_invocations,
+                max_context_chars=90000,
+                compaction_summary_max_chars=6000,
+                text_format=_scene_text_format(request),
             )
         )
-        last_outcome = _scene_outcome_from_engine(
+        last_outcome = _scene_outcome_from_engine_with_timeout(
             engine=engine,
             instruction=adapter_context.turn_input,
             engine_events=engine_events,
             browser_semantics=browser_semantics,
+            workspace_pause_checker=lambda: _workspace_control_paused(self.session_factory),
+            timeout_seconds=scene_turn_timeout_seconds,
         )
         blockers = _collect_blockers(last_outcome, engine_events)
+        if not _is_workspace_paused_outcome(last_outcome) and _should_retry_scene_for_missing_hid(
+            outcome=last_outcome,
+            blockers=blockers,
+            events=engine_events,
+            request=request,
+            available_tools=scene_tool_registry.tools.keys(),
+        ):
+            last_outcome = _scene_outcome_from_engine_with_timeout(
+                engine=engine,
+                instruction=_missing_hid_retry_instruction(),
+                engine_events=engine_events,
+                browser_semantics=browser_semantics,
+                workspace_pause_checker=lambda: _workspace_control_paused(self.session_factory),
+                timeout_seconds=scene_turn_timeout_seconds,
+            )
+            blockers = _collect_blockers(last_outcome, engine_events)
+        raw_blockers = _collect_blockers(last_outcome, engine_events, ignore_recovered=False)
+        if not _is_workspace_paused_outcome(last_outcome) and _should_retry_scene_for_recovered_tool_error(
+            outcome=last_outcome,
+            blockers=raw_blockers,
+            events=engine_events,
+        ):
+            last_outcome = _scene_outcome_from_engine_with_timeout(
+                engine=engine,
+                instruction=_recovered_tool_error_retry_instruction(raw_blockers),
+                engine_events=engine_events,
+                browser_semantics=browser_semantics,
+                workspace_pause_checker=lambda: _workspace_control_paused(self.session_factory),
+                timeout_seconds=scene_turn_timeout_seconds,
+            )
+            blockers = _collect_blockers(last_outcome, engine_events)
+        raw_blockers = _collect_blockers(last_outcome, engine_events, ignore_recovered=False)
+        if not _is_workspace_paused_outcome(last_outcome) and _should_retry_scene_for_browser_wait_timeout(
+            outcome=last_outcome,
+            blockers=raw_blockers,
+            events=engine_events,
+        ):
+            last_outcome = _scene_outcome_from_engine_with_timeout(
+                engine=engine,
+                instruction=_browser_wait_timeout_retry_instruction(raw_blockers),
+                engine_events=engine_events,
+                browser_semantics=browser_semantics,
+                workspace_pause_checker=lambda: _workspace_control_paused(self.session_factory),
+                timeout_seconds=scene_turn_timeout_seconds,
+            )
+            blockers = _collect_blockers(last_outcome, engine_events)
+        raw_blockers = _collect_blockers(last_outcome, engine_events, ignore_recovered=False)
+        if not _is_workspace_paused_outcome(last_outcome) and _should_retry_scene_for_transient_hid_error(
+            outcome=last_outcome,
+            blockers=raw_blockers,
+            events=engine_events,
+        ):
+            last_outcome = _scene_outcome_from_engine_with_timeout(
+                engine=engine,
+                instruction=_transient_hid_error_retry_instruction(raw_blockers),
+                engine_events=engine_events,
+                browser_semantics=browser_semantics,
+                workspace_pause_checker=lambda: _workspace_control_paused(self.session_factory),
+                timeout_seconds=scene_turn_timeout_seconds,
+            )
+            blockers = _collect_blockers(last_outcome, engine_events)
+        raw_blockers = _collect_blockers(last_outcome, engine_events, ignore_recovered=False)
+        if not _is_workspace_paused_outcome(last_outcome) and _should_retry_scene_for_incomplete_progress(
+            outcome=last_outcome,
+            blockers=raw_blockers,
+        ):
+            last_outcome = _scene_outcome_from_engine_with_timeout(
+                engine=engine,
+                instruction=_incomplete_progress_retry_instruction(),
+                engine_events=engine_events,
+                browser_semantics=browser_semantics,
+                workspace_pause_checker=lambda: _workspace_control_paused(self.session_factory),
+                timeout_seconds=scene_turn_timeout_seconds,
+            )
+            blockers = _collect_blockers(last_outcome, engine_events)
         snapshot_ids.extend(
             _append_environment_snapshots(
                 session=session,
@@ -266,6 +367,7 @@ class SceneContextService:
             task_spec=task_spec,
             plan=plan,
             episode=episode,
+            output_contract=dict(request["output_contract"]),
             outcome=last_outcome,
             blockers=blockers,
             snapshot_ids=snapshot_ids,
@@ -278,12 +380,29 @@ class SceneContextService:
         task_spec: Any,
         plan: Any,
         episode: Any,
+        output_contract: dict[str, Any],
         outcome: AgentTurnOutcome,
         blockers: list[dict[str, Any]],
         snapshot_ids: list[str],
     ) -> dict[str, Any]:
-        result_data = _scene_result_data(outcome)
-        public_status = _public_status(outcome, blockers)
+        blockers = list(blockers or [])
+        evidence_blocker = _missing_required_scene_browser_hid_evidence_blocker(episode)
+        if evidence_blocker:
+            blockers.append(evidence_blocker)
+        result_data = _scene_result_data(outcome, output_contract=output_contract)
+        result_data = _normalize_scene_result_contract_data(result_data, output_contract)
+        contract_blockers = _scene_result_contract_blockers(result_data, output_contract)
+        if contract_blockers:
+            blockers.extend(contract_blockers)
+            result_data = {
+                **result_data,
+                "contract_validation": {
+                    "status": "failed",
+                    "blockers": contract_blockers,
+                },
+            }
+        public_status = _public_status(outcome, blockers, result_data=result_data)
+        result_data = _align_result_data_status(result_data, public_status)
         stored_status = _stored_status(public_status)
         summary = _public_summary(outcome, blockers)
         metrics = {
@@ -381,18 +500,36 @@ def _normalize_optional_positive_int(value: Any, *, default: int | None = None) 
     return parsed
 
 
-def _normalize_scene_request(arguments: dict[str, Any], *, default_max_llm_invocations: int | None) -> dict[str, Any]:
+def _normalize_scene_request(
+    arguments: dict[str, Any],
+    *,
+    default_max_llm_invocations: int | None,
+    default_anti_detection_policy: dict[str, Any] | None = None,
+    default_behavior_budget: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     instruction = str(arguments.get("instruction") or "").strip()
     if not instruction:
         raise ValueError("delegate_scene_context requires instruction")
     title = str(arguments.get("title") or instruction[:80]).strip() or "Scene context task"
     success_criteria = _as_dict(arguments.get("success_criteria"))
     output_contract = _as_dict(arguments.get("output_contract"))
-    preferred_capabilities = _string_list(arguments.get("preferred_capabilities"))
+    preferred_capabilities = _normalize_preferred_scene_capabilities(arguments.get("preferred_capabilities"))
     environment_requirements = _as_dict(arguments.get("environment_requirements"))
     approval_policy = _as_dict(arguments.get("approval_policy"))
     context = _as_dict(arguments.get("context"))
     input_payload = _as_dict(arguments.get("input"))
+    anti_detection_policy = _merge_policy_dicts(
+        default_anti_detection_policy,
+        context.get("anti_detection_policy"),
+        environment_requirements.get("anti_detection_policy"),
+        arguments.get("anti_detection_policy"),
+    )
+    behavior_budget = _merge_policy_dicts(
+        default_behavior_budget,
+        context.get("behavior_budget"),
+        environment_requirements.get("behavior_budget"),
+        arguments.get("behavior_budget"),
+    )
     browser_target = _normalize_browser_target(
         derive_browser_target(
             existing=arguments.get("browser_target")
@@ -437,6 +574,12 @@ def _normalize_scene_request(arguments: dict[str, Any], *, default_max_llm_invoc
         context["artifact_expectations"] = artifact_expectations
         environment_requirements["artifact_expectations"] = artifact_expectations
         output_contract["artifact_expectations"] = artifact_expectations
+    if anti_detection_policy:
+        context["anti_detection_policy"] = anti_detection_policy
+        environment_requirements["anti_detection_policy"] = anti_detection_policy
+    if behavior_budget:
+        context["behavior_budget"] = behavior_budget
+        environment_requirements["behavior_budget"] = behavior_budget
     max_llm_invocations = _normalize_optional_positive_int(
         arguments.get("max_llm_invocations"),
         default=default_max_llm_invocations,
@@ -459,6 +602,8 @@ def _normalize_scene_request(arguments: dict[str, Any], *, default_max_llm_invoc
         "target_regions": target_regions,
         "action_plan": action_plan,
         "artifact_expectations": artifact_expectations,
+        "anti_detection_policy": anti_detection_policy,
+        "behavior_budget": behavior_budget,
         "max_llm_invocations": max_llm_invocations,
         "requested_by": requested_by,
     }
@@ -470,17 +615,67 @@ def _build_scene_instruction(request: dict[str, Any]) -> str:
         "只使用当前可用的 scene 工具完成任务。",
         "输出必须是业务级摘要，避免复述 DOM、页面按钮、tab 轨迹、资源定位符等环境细节，除非它们是阻塞判断所必需的证据。",
     ]
+    context = _as_dict(request.get("context"))
+    must_target = _dedupe_strings(
+        _string_list(
+            context.get("must_target_remaining")
+            or context.get("remaining_targets")
+            or context.get("remaining_jobs")
+            or context.get("target_jobs")
+            or context.get("known_jobs")
+            or context.get("remaining_job_titles")
+        )
+    )
+    must_ignore = _dedupe_strings(
+        _string_list(
+            context.get("must_ignore_already_synced")
+            or context.get("already_synced_or_verified")
+            or context.get("already_completed_jobs")
+            or context.get("already_verified")
+            or context.get("synced_job_titles")
+            or context.get("synced_job_external_ids")
+        )
+    )
+    if must_target:
+        parts.append(
+            "本 scene 的强制目标集合："
+            f"{_compact_value(must_target)}。必须优先完成这些目标；"
+            "如果 browser_snapshot 返回了目标对应的链接但 inViewport=false，不能点击其他相似职位替代，"
+            "必须先使用 hid_action 执行页面滚动/滚轮使该目标链接进入 viewport，随后重新 browser_snapshot/query 确认，"
+            "再基于新的 in-viewport clickPoint 执行 HID click。"
+            "若只完成目标集合的一部分，overall_status/status 不得为 completed。"
+        )
+    if must_ignore:
+        parts.append(
+            "本 scene 的已完成/禁止重复目标集合："
+            f"{_compact_value(must_ignore)}。除非任务明确要求复核这些目标，否则不要打开、读取、总结或写回这些目标；"
+            "如果当前页面落在已完成目标详情页，应通过页面内返回/列表导航/滚动恢复到列表，并继续强制目标集合。"
+        )
     if request["success_criteria"]:
         parts.append(f"成功标准：{request['success_criteria']}")
     if request["output_contract"]:
         parts.append(f"结果合同：{request['output_contract']}")
+        if request["output_contract"].get("result_data_required"):
+            parts.append(
+                "结果合同要求结构化 result_data：最终回答必须是单个有效 JSON object（json object），不要使用 Markdown 代码块或额外解释。"
+                "JSON/json 必须直接包含 output_contract.required_fields 中列出的字段；不要把这些字段藏在 summary、business_summary、"
+                "current_real_progress 或其他自由文本字段中。若任一必需字段缺失、为空或未被证据支持，status 不得为 completed。"
+            )
     if request["browser_target"]:
         parts.append(f"浏览器目标：{_compact_value(request['browser_target'])}")
         parts.append(
             "当 browser_target.url 存在时，必须以该 URL 的完整 origin（包含端口）作为目标边界。"
+            "browser_target.url 只是入口提示，不是要求当前活动页路径必须完全等于该 URL；同 origin 下的路径可随工作流跳转。"
             "不要把同 hostname 但不同端口、不同 origin 或旧测试 tab 当成当前任务目标；"
             "browser 侧只允许只读 snapshot/query/wait/target-identification；不得把 browser 工具当作点击、导航、下载、Cookie 或外壳维护执行器。"
-            "若当前只读目标识别无法确认允许的目标页，停止当前动作并返回结构化 blocker 或请求 human 处理。"
+            "如果 browser_get_active_tab 返回的活动页不是目标 origin，这只是当前活动页不匹配，不是终局阻塞；"
+            "必须继续用 browser_list_tabs 查找同 origin 页签，找到后基于该 tabId 观察目标页，或通过 VirtualHID 切换到同 origin 页签。"
+            "只有 browser_list_tabs 也找不到同 origin 页签，或同 origin 页签不可观察/不可切换时，才返回结构化 blocker 或请求 human 处理。"
+        )
+    if request["anti_detection_policy"] or request["behavior_budget"]:
+        parts.append(
+            "通用反检测与行为预算：必须遵守 anti_detection_policy 与 behavior_budget 中的通用节奏、停留、重试和 HID 动作上限；"
+            "这些字段只允许表达通用 human-paced 执行约束，不允许推导站点专用选择器、站点工作流分支、JS stealth 或 fingerprint 覆盖逻辑。"
         )
     if request["computer_target"] or "computer" in _scene_capabilities(request["preferred_capabilities"]):
         parts.append(
@@ -489,8 +684,39 @@ def _build_scene_instruction(request: dict[str, Any]) -> str:
             "browser 侧只提供页面语义与 viewport/document 坐标；不要让 browser 或 recruit-station 合成 viewportInScreen。"
             "HID 目标窗口、内容视口到屏幕的映射由 VirtualHID 根据 target/geometry 自行解析。"
             "不得只传 target/context 而空缺 primitives；若缺少可执行原语，继续观察或返回结构化 blocker。"
+            "网页 HID 动作必须把目标浏览器窗口置前：hid_action.target 应携带 browser 观察得到的 tabId/windowId/windowTitle/host，"
+            "如果 browser 观察返回窗口 bounds，也必须原样携带 browserWindowBounds 作为原生窗口消歧证据；"
+            "由 VirtualHID 在执行计划中 activateTarget；不要对当前前台窗口或当前活动页做模糊点击。"
             "Chrome 外壳遮挡 preflight 由 hid_action options.browserChromeOverlayPolicy 启用，证据来自 result.preflight.browserChromeOverlay；若 preflight 结果为 blocked 或 unknown，停止当前动作，改为重新观察、等待或进入 human handling。"
             "外部执行层负责激活、滚动和最终落点。"
+        )
+        parts.append(
+            "当 scene 可用工具包含 hid_action 时，只读 browser 工具不代表不能点击或导航；"
+            "browser 负责观察，hid_action 负责执行点击、滚动、输入、返回等页面动作。"
+            "如果任务需要进入详情页、翻页或返回列表，必须先基于 browser 观察到的 link/button/clickPoint 构造 hid_action 尝试执行，"
+            "如果目标 link/button 在 browser 观察中存在但 inViewport=false，必须先用 hid_action 进行页面滚动，"
+            "滚动后重新 browser 观察并使用新的 viewport 内 clickPoint；不得使用 offscreen clickPoint，也不得改点其他已完成目标。"
+            "随后再用 browser 观察确认结果。只有 hid_action 缺失、缺少可执行观察证据，或 hid_action 返回明确 blocked/error 后，"
+            "才可以把页面交互能力作为 blocker。不得在未尝试 hid_action 的情况下声称当前能力仅支持只读观察。"
+        )
+        parts.append(
+            "如果 hid_action 返回 E_CURSOR_INTERFERENCE 或等价的光标/人工输入干扰错误，"
+            "这属于可恢复的瞬时执行干扰：先用 hid_state 或 browser 观察确认环境，再重试同一业务动作；"
+            "至少完成一次重新观察后的重试，仍连续失败时才把它作为 human recovery blocker。"
+        )
+        parts.append(
+            "如果 hid_action 返回 E_NOT_FRONTMOST、E_TIMEOUT 或等价的焦点/导航恢复失败，"
+            "不要把这一次工具失败直接当作业务终局。应先重新观察目标 origin 的页签、确认当前 URL/标题/可点击入口，"
+            "释放异常修饰键状态并基于页面内可见入口、返回、滚动或其他同源页面导航控件重试同一业务动作。"
+            "禁止主动聚焦浏览器地址栏、输入 URL 或粘贴 URL 作为恢复路径；只有页面内连续恢复后目标仍不可操作，才返回 human recovery blocker。"
+        )
+        parts.append(
+            "如果同源站点内的点击、返回、滚动或单次 HID 注入超时失败，不要直接结束场景。"
+            "应先重新观察页面状态，释放异常按键状态，等待或滚动到稳定位置，尝试页面上其他同源链接/导航入口，"
+            "或回到页面内已观察到的列表/详情入口后继续原始业务目标。"
+            "浏览器地址栏、直接输入 URL、粘贴 URL 和浏览器外壳导航不属于招聘网站页面内业务动作，除非用户显式要求，否则不得作为恢复路径。"
+            "如果原始目标只完成一部分且仍存在 blockers、limitations 或未完成项，最终 status 不得写 completed；"
+            "应继续恢复执行，或返回 blocked 并写明恢复条件。"
         )
     if request["target_regions"]:
         parts.append(f"候选落地区域：{_compact_value(request['target_regions'])}")
@@ -511,6 +737,13 @@ def _build_scene_instruction(request: dict[str, Any]) -> str:
             "写回时的 attach_resume_artifact），但 scene 内不要绕过合同自行编造 artifact proof。"
         )
     return "\n".join(part for part in parts if part)
+
+
+def _scene_text_format(request: dict[str, Any]) -> dict[str, Any] | None:
+    output_contract = _as_dict(request.get("output_contract"))
+    if output_contract.get("result_data_required"):
+        return {"type": "json_object"}
+    return None
 
 
 def _build_checkpoints(request: dict[str, Any]) -> list[dict[str, Any]]:
@@ -546,9 +779,9 @@ def _append_episode_engine_events(
             "recorded_at": event.get("recorded_at"),
             "payload": payload,
         }
-        if event_type == "tool_event" and kind in {"tool_call_started", "tool_use_completed"}:
+        if event_type == "tool_event" and kind in {"tool_call_started", "tool_use_completed", "tool_result_ready"}:
             action_entries.append(entry)
-        else:
+        if not (event_type == "tool_event" and kind in {"tool_call_started", "tool_use_completed"}):
             observation_entries.append(entry)
     observation_entries = observation_entries[-200:]
     action_entries = action_entries[-200:]
@@ -560,6 +793,11 @@ def _append_episode_engine_events(
         "tool_call_count": len(action_entries),
         "tool_result_count": sum(
             1
+            for item in action_entries
+            if item.get("type") == "tool_event" and _as_dict(item.get("payload")).get("kind") == "tool_result_ready"
+        )
+        or sum(
+            1
             for item in observation_entries
             if item.get("type") == "tool_event" and _as_dict(item.get("payload")).get("kind") == "tool_result_ready"
         ),
@@ -568,6 +806,36 @@ def _append_episode_engine_events(
         "last_gate_signal": outcome.gate_signal,
     }
     session.commit()
+
+
+def _missing_required_scene_browser_hid_evidence_blocker(episode: Any) -> dict[str, Any] | None:
+    runtime_metadata = _as_dict(getattr(episode, "runtime_metadata", None))
+    execution_contract = _as_dict(runtime_metadata.get("execution_contract"))
+    browser_target = _as_dict(execution_contract.get("browser_target"))
+    if not browser_target:
+        return None
+    if _episode_has_successful_browser_or_hid_tool_result(episode):
+        return None
+    return {
+        "kind": "missing_browser_hid_evidence",
+        "message": (
+            "scene context has a browser target but produced no successful browser/HID tool result; "
+            "the scene cannot be marked completed without observed browser or computer execution evidence."
+        ),
+    }
+
+
+def _episode_has_successful_browser_or_hid_tool_result(episode: Any) -> bool:
+    for entry in list(getattr(episode, "actions", None) or []) + list(getattr(episode, "observations", None) or []):
+        if not isinstance(entry, dict) or str(entry.get("type") or "") != "tool_event":
+            continue
+        payload = _as_dict(entry.get("payload"))
+        tool_name = str(payload.get("tool_name") or "").strip()
+        if not (tool_name.startswith("browser_") or tool_name.startswith("hid_")):
+            continue
+        if _tool_event_result_succeeded(entry):
+            return True
+    return False
 
 
 def _append_environment_snapshots(
@@ -631,7 +899,11 @@ def _scene_outcome_from_engine(
     instruction: str,
     engine_events: list[dict[str, Any]],
     browser_semantics: dict[str, Any],
+    workspace_pause_checker: Any | None = None,
 ) -> AgentTurnOutcome:
+    if callable(workspace_pause_checker) and workspace_pause_checker():
+        engine.interrupt("workspace_paused")
+        return _workspace_paused_scene_outcome(engine_events, engine_output_count=0)
     final_output = ""
     status = "complete"
     gate_signal = "run_done"
@@ -661,6 +933,9 @@ def _scene_outcome_from_engine(
         elif output.type == "turn_interrupted":
             status = "cancelled"
             gate_signal = "paused"
+        if callable(workspace_pause_checker) and workspace_pause_checker():
+            engine.interrupt("workspace_paused")
+            return _workspace_paused_scene_outcome(engine_events, engine_output_count=engine_output_count)
     if status == "complete" and not str(final_output or "").strip() and not result_data:
         status = "escalate"
         gate_signal = "budget_exhausted"
@@ -671,6 +946,480 @@ def _scene_outcome_from_engine(
         result_data=result_data,
         metadata={"interaction_engine": True, "engine_output_count": engine_output_count},
     )
+
+
+def _scene_outcome_from_engine_with_timeout(
+    *,
+    engine: InteractionEngine,
+    instruction: str,
+    engine_events: list[dict[str, Any]],
+    browser_semantics: dict[str, Any],
+    workspace_pause_checker: Any | None = None,
+    timeout_seconds: int | None,
+) -> AgentTurnOutcome:
+    effective_timeout = int(timeout_seconds or 0)
+    if effective_timeout <= 0:
+        return _scene_outcome_from_engine(
+            engine=engine,
+            instruction=instruction,
+            engine_events=engine_events,
+            browser_semantics=browser_semantics,
+            workspace_pause_checker=workspace_pause_checker,
+        )
+
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="scene-context-turn")
+    future = executor.submit(
+        _scene_outcome_from_engine,
+        engine=engine,
+        instruction=instruction,
+        engine_events=engine_events,
+        browser_semantics=browser_semantics,
+        workspace_pause_checker=workspace_pause_checker,
+    )
+    try:
+        return future.result(timeout=effective_timeout)
+    except FutureTimeoutError:
+        engine.interrupt("scene_context_timeout")
+        future.cancel()
+        message = f"E_SCENE_TIMEOUT: scene_context turn exceeded timeoutSeconds={effective_timeout}"
+        engine_events.append(
+            {
+                "type": "runtime_event",
+                "engine_output_seq": len(engine_events) + 1,
+                "payload": {
+                    "kind": "scene_context_timeout",
+                    "status": "blocked",
+                    "message": message,
+                    "timeout_seconds": effective_timeout,
+                },
+                "recorded_at": utcnow().isoformat(),
+            }
+        )
+        return AgentTurnOutcome(
+            status="escalate",
+            gate_signal="escalate",
+            final_output=message,
+            result_data={
+                "status": "blocked",
+                "blockers": [{"kind": "scene_context_timeout", "message": message}],
+                "remaining_work": ["resume_scene_after_timeout"],
+            },
+            metadata={"interaction_engine": True, "engine_output_count": len(engine_events), "timeout_seconds": effective_timeout},
+        )
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+
+def _workspace_paused_scene_outcome(engine_events: list[dict[str, Any]], *, engine_output_count: int) -> AgentTurnOutcome:
+    message = "workspace is paused; scene execution stopped before issuing another action."
+    blocker = {"kind": "workspace_paused", "message": message}
+    engine_events.append(
+        {
+            "type": "runtime_event",
+            "engine_output_seq": len(engine_events) + 1,
+            "payload": {
+                "kind": "workspace_paused",
+                "status": "blocked",
+                "message": message,
+            },
+            "recorded_at": utcnow().isoformat(),
+        }
+    )
+    return AgentTurnOutcome(
+        status="escalate",
+        gate_signal="paused",
+        final_output=message,
+        result_data={
+            "status": "paused",
+            "blockers": [blocker],
+            "remaining_work": ["continue_workspace_to_resume_scene"],
+        },
+        metadata={"interaction_engine": True, "engine_output_count": engine_output_count},
+    )
+
+
+def _is_workspace_paused_outcome(outcome: AgentTurnOutcome) -> bool:
+    result_data = _as_dict(outcome.result_data)
+    if str(result_data.get("status") or "").strip().lower() == "paused" and any(
+        str(item.get("kind") or "") == "workspace_paused" for item in _list_of_dicts(result_data.get("blockers"))
+    ):
+        return True
+    return any(str(item.get("kind") or "") == "workspace_paused" for item in _list_of_dicts(result_data.get("blockers")))
+
+
+def _should_retry_scene_for_missing_hid(
+    *,
+    outcome: AgentTurnOutcome,
+    blockers: list[dict[str, Any]],
+    events: list[dict[str, Any]],
+    request: dict[str, Any],
+    available_tools: Any,
+) -> bool:
+    if _has_terminal_scene_result_data(outcome):
+        return False
+    if _is_scene_context_timeout(outcome, blockers):
+        return False
+    if "hid_action" not in set(available_tools):
+        return False
+    if "computer" not in _scene_capabilities(request.get("preferred_capabilities")):
+        return False
+    if _public_status(outcome, blockers) != "blocked":
+        return False
+    if _has_scene_hid_attempt(events):
+        return False
+    return _has_actionable_browser_signal(events)
+
+
+def _missing_hid_retry_instruction() -> str:
+    return (
+        "你的上一轮只使用 browser 观察后准备返回 blocked，但本 scene 可用 hid_action，"
+        "不能在未尝试 HID 的情况下把“需要页面点击、滚动、返回、进入详情或翻页”报告为能力不足。"
+        "请继续当前场景：基于最近 browser 观察到的 link/button/clickPoint 构造 hid_action。"
+        "如果目标元素 inViewport=false，先执行 HID scroll 或等价可恢复动作，再重新 browser 观察；"
+        "如果元素在 viewport 内，执行 HID click 后重新 browser 观察确认结果。"
+        "hid_action.target 必须携带 browser 观察得到的 tabId/windowId/windowTitle/host。"
+        "只有在至少一次 hid_action 返回明确 blocked/error，或确实没有任何可执行页面证据后，才可以报告 blocker。"
+    )
+
+
+def _should_retry_scene_for_recovered_tool_error(
+    *,
+    outcome: AgentTurnOutcome,
+    blockers: list[dict[str, Any]],
+    events: list[dict[str, Any]],
+) -> bool:
+    if _has_terminal_scene_result_data(outcome):
+        return False
+    if _is_scene_context_timeout(outcome, blockers):
+        return False
+    if not any(str(item.get("kind") or "") == "tool_error" for item in blockers):
+        return False
+    if _scene_result_status(outcome) in {"completed", "complete", "success", "succeeded"}:
+        return False
+    return _has_recovered_tool_error(events)
+
+
+def _recovered_tool_error_retry_instruction(blockers: list[dict[str, Any]]) -> str:
+    tool_names = _dedupe_strings(str(item.get("tool_name") or "") for item in blockers if item.get("tool_name"))
+    tool_label = ", ".join(tool_names) if tool_names else "某个工具"
+    return (
+        f"上一轮曾出现 {tool_label} 的临时错误，但后续工具调用已经恢复并取得新的页面观察结果。"
+        "不要把已经被后续成功动作恢复的历史错误作为最终 blocker。"
+        "请基于最新 browser 观察继续完成原始场景目标；如果已经进入详情页，继续读取详情并推进下一步。"
+        "只有当前最新动作仍失败、页面不可达、登录/权限阻断，或没有可执行证据时，才可以返回 blocked。"
+        "请返回结构化 JSON，总结当前真实进度、已恢复的错误、下一步执行结果和剩余 blocker。"
+    )
+
+
+def _should_retry_scene_for_browser_wait_timeout(
+    *,
+    outcome: AgentTurnOutcome,
+    blockers: list[dict[str, Any]],
+    events: list[dict[str, Any]],
+) -> bool:
+    if _has_terminal_scene_result_data(outcome):
+        return False
+    if _is_scene_context_timeout(outcome, blockers):
+        return False
+    if _public_status(outcome, blockers) != "blocked":
+        return False
+    if not _has_browser_wait_timeout_blocker(blockers):
+        return False
+    return _has_successful_tool_result(events, "hid_action") or _has_actionable_browser_signal(events)
+
+
+def _browser_wait_timeout_retry_instruction(blockers: list[dict[str, Any]]) -> str:
+    tool_names = _dedupe_strings(str(item.get("tool_name") or "") for item in blockers if item.get("tool_name"))
+    tool_label = ", ".join(tool_names) if tool_names else "browser wait"
+    return (
+        f"上一轮 {tool_label} 超时只能说明等待确认失败，不能直接作为当前 scene 的终局 blocker。"
+        "不要再次用同一个 wait 工具空等；请立即用 browser_snapshot 或 browser_list_tabs 重新确认当前 tab URL、标题和页面内容。"
+        "如果已经进入详情页，继续读取详情并完成原始目标；如果仍在列表页，基于最新 clickPoint/同源详情入口继续用 hid_action 重试。"
+        "只有 browser_snapshot/list_tabs 也失败、页面不可达、登录/权限阻断，或 HID 最新动作明确失败时，才可以返回 blocked。"
+        "请返回结构化 JSON，说明 wait 超时后的实际页面状态、恢复动作和剩余 blocker。"
+    )
+
+
+def _should_retry_scene_for_incomplete_progress(
+    *,
+    outcome: AgentTurnOutcome,
+    blockers: list[dict[str, Any]],
+) -> bool:
+    result_data = _as_dict(outcome.result_data)
+    status = str(result_data.get("status") or _scene_result_status(outcome)).strip().lower()
+    if status not in {"in_progress", "partial", "incomplete", "continuable", "continue", "pending"}:
+        return False
+    if _is_scene_context_timeout(outcome, blockers):
+        return False
+    if any(str(item.get("kind") or "") in {"login_required", "captcha", "permission_denied"} for item in blockers):
+        return False
+    text = _compact_value(result_data).lower()
+    return any(marker in text for marker in ("滚动", "scroll", "进入详情", "detail", "needs_retry"))
+
+
+def _incomplete_progress_retry_instruction() -> str:
+    return (
+        "你刚才返回的是未完成进度，不是本 scene 的终局。不要把 in_progress/partial 当作最终输出交回。"
+        "如果页面仍可访问、仍有详情入口未进入、或只是需要滚动/重新观察/重试点击，请现在继续执行："
+        "先 browser_snapshot/query 确认当前页面；对 inViewport=false 的目标用 hid_action 执行页面滚动，"
+        "重新观察后再用新的 clickPoint 点击详情入口；进入详情页后读取职责、要求等详情证据。"
+        "只有登录、验证码、权限、目标站点不可达或必要执行工具缺失才可返回 blocked。"
+        "最终只在 completed/partial/blocked 三者中选择 status；没有完成全部强制目标时不得 completed。"
+    )
+
+
+def _should_retry_scene_for_transient_hid_error(
+    *,
+    outcome: AgentTurnOutcome,
+    blockers: list[dict[str, Any]],
+    events: list[dict[str, Any]],
+) -> bool:
+    if _has_terminal_scene_result_data(outcome):
+        return False
+    if _is_scene_context_timeout(outcome, blockers):
+        return False
+    if _public_status(outcome, blockers) != "blocked":
+        return False
+    if not _has_transient_hid_blocker(blockers) and not _has_transient_hid_text(outcome.final_output):
+        return False
+    if _has_recovered_tool_error(events):
+        return False
+    return _has_actionable_browser_signal(events) or _has_any_successful_browser_observation(events)
+
+
+def _transient_hid_error_retry_instruction(blockers: list[dict[str, Any]]) -> str:
+    messages = _dedupe_strings(str(item.get("message") or "")[:160] for item in blockers if item.get("message"))
+    blocker_label = "；".join(messages[:2]) if messages else "HID 瞬时执行异常"
+    return (
+        f"上一轮遇到 {blocker_label}，这类 HID/前台/超时/光标状态问题不能直接作为当前 scene 的终局 blocker。"
+        "请继续当前场景而不是总结结束：先用 browser_snapshot 或 browser_list_tabs 重新确认同 origin 页签的 URL、标题、页面内容和可点击入口；"
+        "必要时调用 hid_state 或释放异常修饰键状态，然后基于最新 browser 证据重试同一业务动作。"
+        "禁止主动聚焦浏览器地址栏、输入 URL 或粘贴 URL 作为恢复路径；应只使用页面内可见链接、按钮、滚动、返回或导航控件恢复。"
+        "只有重试后仍连续失败、目标页面不可达、登录/权限阻断，或缺少任何页面内可执行证据，才可以返回 blocked。"
+    )
+
+
+def _is_scene_context_timeout(outcome: AgentTurnOutcome, blockers: list[dict[str, Any]]) -> bool:
+    if any(str(item.get("kind") or "") == "scene_context_timeout" for item in blockers):
+        return True
+    result_data = _as_dict(outcome.result_data)
+    if any(str(item.get("kind") or "") == "scene_context_timeout" for item in _list_of_dicts(result_data.get("blockers"))):
+        return True
+    return "e_scene_timeout" in str(outcome.final_output or "").lower()
+
+
+def _has_terminal_scene_result_data(outcome: AgentTurnOutcome) -> bool:
+    if not isinstance(outcome.result_data, dict) or not outcome.result_data:
+        return False
+    return _scene_result_status(outcome) in {
+        "blocked",
+        "wait_human",
+        "waiting_human",
+        "paused",
+        "error",
+        "failed",
+        "failure",
+        "fail",
+    }
+
+
+def _has_transient_hid_blocker(blockers: list[dict[str, Any]]) -> bool:
+    transient_markers = (
+        "e_timeout",
+        "timeout",
+        "timed out",
+        "超时",
+        "e_not_frontmost",
+        "not frontmost",
+        "frontmost",
+        "未置前",
+        "e_cursor_interference",
+        "cursor interference",
+        "光标",
+        "modifier",
+        "修饰键",
+        "daemon 无响应",
+        "daemon unreachable",
+        "native host unavailable",
+        "native-host",
+        "hid",
+        "virtualhid",
+    )
+    for blocker in blockers:
+        tool_name = str(blocker.get("tool_name") or "").lower()
+        message = str(blocker.get("message") or "").lower()
+        if tool_name != "hid_action" and "hid" not in message and "virtualhid" not in message:
+            continue
+        if any(marker in message for marker in transient_markers):
+            return True
+    return False
+
+
+def _has_transient_hid_text(value: Any) -> bool:
+    text = str(value or "").lower()
+    if not text:
+        return False
+    return any(
+        marker in text
+        for marker in (
+            "e_timeout",
+            "e_not_frontmost",
+            "e_cursor_interference",
+            "injector action exceeded",
+            "not frontmost",
+            "daemon 无响应",
+            "virtualhid",
+            "电脑执行链路",
+        )
+    )
+
+
+def _has_browser_wait_timeout_blocker(blockers: list[dict[str, Any]]) -> bool:
+    for blocker in blockers:
+        tool_name = str(blocker.get("tool_name") or "")
+        message = str(blocker.get("message") or "").lower()
+        if tool_name in {"browser_wait_for_url", "browser_wait_for_navigation"} and (
+            "timed out" in message or "timeout" in message or "超时" in message
+        ):
+            return True
+    return False
+
+
+def _has_successful_tool_result(events: list[dict[str, Any]], tool_name: str) -> bool:
+    for event in events:
+        if str(event.get("type") or "") != "tool_event":
+            continue
+        payload = _as_dict(event.get("payload"))
+        if payload.get("kind") != "tool_result_ready":
+            continue
+        if str(payload.get("tool_name") or "") != tool_name:
+            continue
+        if not bool(payload.get("is_error")) and _tool_result_content_succeeded(payload.get("content")):
+            return True
+    return False
+
+
+def _has_scene_hid_attempt(events: list[dict[str, Any]]) -> bool:
+    return any(
+        str(_as_dict(event.get("payload")).get("tool_name") or "") == "hid_action"
+        for event in events
+        if str(event.get("type") or "") == "tool_event"
+    )
+
+
+def _has_actionable_browser_signal(events: list[dict[str, Any]]) -> bool:
+    for event in reversed(events):
+        if str(event.get("type") or "") != "tool_event":
+            continue
+        payload = _as_dict(event.get("payload"))
+        if payload.get("kind") != "tool_result_ready":
+            continue
+        tool_name = str(payload.get("tool_name") or "")
+        if not tool_name.startswith("browser_"):
+            continue
+        if _browser_content_has_actionable_signal(payload.get("content")):
+            return True
+    return False
+
+
+def _has_any_successful_browser_observation(events: list[dict[str, Any]]) -> bool:
+    return any(
+        str(_as_dict(event.get("payload")).get("tool_name") or "").startswith("browser_")
+        and _tool_event_result_succeeded(event)
+        for event in events
+        if str(event.get("type") or "") == "tool_event"
+    )
+
+
+def _has_recovered_tool_error(events: list[dict[str, Any]]) -> bool:
+    failed_at: dict[str, int] = {}
+    recovered_at: dict[str, int] = {}
+    for event in events:
+        if str(event.get("type") or "") != "tool_event":
+            continue
+        payload = _as_dict(event.get("payload"))
+        if payload.get("kind") != "tool_result_ready":
+            continue
+        tool_name = str(payload.get("tool_name") or "")
+        if not tool_name:
+            continue
+        seq = _safe_int(event.get("engine_output_seq"))
+        if bool(payload.get("is_error")) or not _tool_result_content_succeeded(payload.get("content")):
+            failed_at[tool_name] = seq
+            continue
+        if tool_name in failed_at and seq > failed_at[tool_name] and _tool_result_content_succeeded(payload.get("content")):
+            recovered_at[tool_name] = seq
+    if not recovered_at:
+        return False
+    latest_recovery = max(recovered_at.values())
+    has_later_browser_observation = any(
+        str(_as_dict(event.get("payload")).get("tool_name") or "").startswith("browser_")
+        and _safe_int(event.get("engine_output_seq")) > latest_recovery
+        and _tool_event_result_succeeded(event)
+        for event in events
+        if str(event.get("type") or "") == "tool_event"
+    )
+    return has_later_browser_observation or bool(recovered_at)
+
+
+def _tool_event_result_succeeded(event: dict[str, Any]) -> bool:
+    payload = _as_dict(event.get("payload"))
+    return (
+        payload.get("kind") == "tool_result_ready"
+        and not bool(payload.get("is_error"))
+        and _tool_result_content_succeeded(payload.get("content"))
+    )
+
+
+def _tool_result_content_succeeded(content: Any) -> bool:
+    if isinstance(content, dict):
+        status = str(content.get("status") or "").strip().lower()
+        if status in {"error", "failed", "failure", "blocked", "timeout"} or status.startswith(("failed_", "blocked_")):
+            return False
+        if content.get("success") is False or content.get("ok") is False or content.get("isError") is True:
+            return False
+        error_text = str(content.get("error") or content.get("message") or "").lower()
+        if any(marker in error_text for marker in ("e_timeout", "e_not_frontmost", "e_cursor_interference")):
+            return False
+    return True
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _browser_content_has_actionable_signal(value: Any) -> bool:
+    if isinstance(value, dict):
+        for key in ("clickables", "matches", "elements", "action_hints", "affordances"):
+            items = value.get(key)
+            if isinstance(items, list) and any(_is_actionable_browser_item(item) for item in items):
+                return True
+        snapshot = value.get("snapshot")
+        if isinstance(snapshot, dict) and _browser_content_has_actionable_signal(snapshot):
+            return True
+    if isinstance(value, list):
+        return any(_browser_content_has_actionable_signal(item) for item in value)
+    return False
+
+
+def _is_actionable_browser_item(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    if value.get("disabled") is True:
+        return False
+    role = str(value.get("role") or "").strip().lower()
+    tag = str(value.get("tag") or "").strip().lower()
+    kind = str(value.get("kind") or "").strip().lower()
+    if role in {"button", "link", "menuitem", "tab", "combobox"}:
+        return True
+    if tag in {"a", "button", "select", "input"}:
+        return True
+    if kind in {"button", "link", "navigation", "action"}:
+        return True
+    return bool(value.get("href") or value.get("clickPoint") or value.get("selector") or value.get("ref"))
 
 
 def _runtime_output_event(output: InteractionOutput) -> dict[str, Any]:
@@ -687,10 +1436,19 @@ def _scene_tool_registry(
     *,
     request: dict[str, Any],
     browser_semantics: dict[str, Any],
+    workspace_pause_checker: Any | None = None,
 ) -> ToolRegistry:
     registry = ToolRegistry()
     for tool in tool_registry.tools.values():
+        if not _is_allowed_scene_tool(tool):
+            continue
         cloned = tool.clone()
+        cloned.external_target = False
+        cloned.metadata = {
+            **dict(cloned.metadata or {}),
+            "external_target": False,
+            "requires_confirmation": False,
+        }
         if cloned.name.startswith("browser_"):
             original_handler = cloned.handler
 
@@ -709,6 +1467,12 @@ def _scene_tool_registry(
                 if precheck is not None:
                     return precheck
                 result = _original_handler(arguments)
+                _record_scene_browser_observation(
+                    browser_semantics,
+                    tool_name=_tool_name,
+                    result=result,
+                    request=request,
+                )
                 return _mask_scene_browser_target_mismatch(
                     tool_name=_tool_name,
                     result=result,
@@ -720,6 +1484,12 @@ def _scene_tool_registry(
             original_handler = cloned.handler
 
             def _handler(arguments: dict[str, Any], *, _original_handler=original_handler) -> Any:
+                if callable(workspace_pause_checker) and workspace_pause_checker():
+                    return {
+                        "status": "blocked",
+                        "error": "workspace_paused",
+                        "message": "workspace is paused; new HID actions are blocked until the workspace is continued.",
+                    }
                 normalized = _normalize_scene_hid_action_arguments(
                     arguments,
                     request=request,
@@ -731,14 +1501,231 @@ def _scene_tool_registry(
                 )
                 if precheck is not None:
                     return precheck
+                precheck = _validate_scene_browser_hid_sequence(
+                    normalized,
+                    request=request,
+                    browser_semantics=browser_semantics,
+                )
+                if precheck is not None:
+                    return precheck
                 arguments.clear()
                 arguments.update(normalized)
                 result = _original_handler(arguments)
+                _record_scene_hid_action(
+                    browser_semantics,
+                    arguments=normalized,
+                    request=request,
+                    result=result,
+                )
                 return _mask_scene_hid_overlay_blocker(result)
 
             cloned.handler = _handler
         registry.register(cloned)
     return registry
+
+
+def _is_allowed_scene_tool(tool: ToolDefinition) -> bool:
+    if tool.name.startswith("browser_") or tool.name == "hid_action":
+        return True
+    return is_scene_context_tool(tool)
+
+
+def _workspace_control_paused(session_factory: sessionmaker[Session]) -> bool:
+    with session_factory() as session:
+        state = session.get(AgentGlobalState, "singleton")
+        if state is None:
+            return False
+        metadata = dict(state.state_metadata or {})
+        control = metadata.get("workspace_control")
+        control_state = str((control or {}).get("state") or "").strip().lower() if isinstance(control, dict) else ""
+        return bool(state.autonomous_paused) or control_state == "paused"
+
+
+def _validate_scene_browser_hid_sequence(
+    arguments: dict[str, Any],
+    *,
+    request: dict[str, Any],
+    browser_semantics: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not _scene_hid_action_targets_browser(arguments):
+        return None
+    scope_key = _scene_sequence_scope_key(arguments, request=request)
+    state = _scene_sequence_state(browser_semantics, scope_key)
+    if state.get("pending_browser_observation_after_hid"):
+        return _scene_sequence_blocker(
+            scope_key=scope_key,
+            reason="pending_browser_observation_after_hid",
+            message="hid_action is blocked because the previous browser-targeted hid_action has not been followed by a browser observation inside this scene_context.",
+        )
+    if not state.get("last_browser_observation"):
+        observed_state = _compatible_scene_observation_state(browser_semantics, scope_key)
+        if observed_state is not None:
+            state["last_browser_observation"] = observed_state.get("last_browser_observation")
+        else:
+            return _scene_sequence_blocker(
+                scope_key=scope_key,
+                reason="missing_prior_browser_observation",
+                message="hid_action is blocked because scene_context requires browser observe/wait/query before browser-targeted HID actions.",
+            )
+    if not state.get("last_browser_observation"):
+        return _scene_sequence_blocker(
+            scope_key=scope_key,
+            reason="missing_prior_browser_observation",
+            message="hid_action is blocked because scene_context requires browser observe/wait/query before browser-targeted HID actions.",
+        )
+    return None
+
+
+def _record_scene_browser_observation(
+    browser_semantics: dict[str, Any],
+    *,
+    tool_name: str,
+    result: Any,
+    request: dict[str, Any],
+) -> None:
+    if tool_name not in _SCENE_BROWSER_PAGE_OBSERVATION_TOOL_NAMES:
+        return
+    if not _scene_observation_result_is_valid(result):
+        return
+    scope_key = _scene_sequence_scope_key({}, request=request, result=result)
+    state = _scene_sequence_state(browser_semantics, scope_key)
+    state["last_browser_observation"] = tool_name
+    state["pending_browser_observation_after_hid"] = None
+    _append_scene_sequence_audit(state, event="browser_observed", tool_name=tool_name, scope_key=scope_key)
+    if isinstance(result, dict):
+        result.setdefault("sequence_audit", _scene_sequence_audit_summary(scope_key, state))
+
+
+def _record_scene_hid_action(
+    browser_semantics: dict[str, Any],
+    *,
+    arguments: dict[str, Any],
+    request: dict[str, Any],
+    result: Any,
+) -> None:
+    if not _scene_hid_action_targets_browser(arguments):
+        return
+    scope_key = _scene_sequence_scope_key(arguments, request=request)
+    state = _scene_sequence_state(browser_semantics, scope_key)
+    state["pending_browser_observation_after_hid"] = "hid_action"
+    _append_scene_sequence_audit(state, event="hid_action", tool_name="hid_action", scope_key=scope_key)
+    if isinstance(result, dict):
+        result.setdefault("sequence_audit", _scene_sequence_audit_summary(scope_key, state))
+
+
+def _scene_hid_action_targets_browser(arguments: dict[str, Any]) -> bool:
+    target = _as_dict(arguments.get("target"))
+    context = _as_dict(arguments.get("context"))
+    geometry = _as_dict(arguments.get("geometry"))
+    primitives = list(arguments.get("primitives") or []) if isinstance(arguments.get("primitives"), list) else []
+    if not any(isinstance(item, dict) and str(item.get("type") or "").strip() in _SCENE_HID_BROWSER_SEQUENCE_PRIMITIVE_TYPES for item in primitives):
+        return False
+    if str(target.get("host") or context.get("host") or "").strip():
+        return True
+    if str(target.get("url") or context.get("url") or "").strip():
+        return True
+    if target.get("tabId") is not None or target.get("tab_id") is not None:
+        return True
+    return str(geometry.get("coordSpace") or geometry.get("coord_space") or "").strip().lower() in {"viewport", "document"}
+
+
+def _scene_sequence_scope_key(arguments: dict[str, Any], *, request: dict[str, Any], result: Any | None = None) -> str:
+    target = _as_dict(arguments.get("target"))
+    context = _as_dict(arguments.get("context"))
+    request_context = _as_dict(request.get("context"))
+    browser_target = _as_dict(request.get("browser_target"))
+    run_id = _first_non_empty(request_context.get("run_id"), request_context.get("runId"), request.get("run_id"))
+    episode_id = _first_non_empty(request_context.get("episode_id"), request_context.get("episodeId"), request.get("episode_id"))
+    account = _first_non_empty(
+        request_context.get("account"),
+        request_context.get("site_account"),
+        _as_dict(request.get("environment_requirements")).get("account"),
+        _as_dict(request.get("environment_requirements")).get("site_account"),
+    )
+    host = _first_non_empty(
+        target.get("host"),
+        context.get("host"),
+        _host_from_url(target.get("url")),
+        _host_from_url(context.get("url")),
+        browser_target.get("host"),
+        _host_from_url(browser_target.get("url")),
+        _browser_result_url(result) if isinstance(result, dict) else None,
+    )
+    return "|".join(
+        (
+            f"run={run_id or 'scene'}",
+            f"episode={episode_id or 'scene'}",
+            f"account={account or 'unspecified'}",
+            f"host={_normalize_host_boundary(_host_from_url(host) or host) or 'unspecified'}",
+        )
+    )
+
+
+def _first_non_empty(*values: Any) -> str | None:
+    for value in values:
+        text = _optional_string(value)
+        if text:
+            return text
+    return None
+
+
+def _scene_sequence_state(browser_semantics: dict[str, Any], scope_key: str) -> dict[str, Any]:
+    states = browser_semantics.setdefault("sequence_state", {})
+    return states.setdefault(scope_key, {"last_browser_observation": None, "pending_browser_observation_after_hid": None, "audit": []})
+
+
+def _compatible_scene_observation_state(browser_semantics: dict[str, Any], scope_key: str) -> dict[str, Any] | None:
+    host_suffix = scope_key.rsplit("|host=", 1)[-1]
+    states = browser_semantics.get("sequence_state")
+    if not isinstance(states, dict) or not host_suffix:
+        return None
+    for key, state in states.items():
+        if not isinstance(state, dict):
+            continue
+        if not str(key).endswith(f"|host={host_suffix}"):
+            continue
+        if state.get("last_browser_observation") and not state.get("pending_browser_observation_after_hid"):
+            return state
+    return None
+
+
+def _append_scene_sequence_audit(state: dict[str, Any], *, event: str, tool_name: str, scope_key: str, reason: str | None = None) -> None:
+    audit = list(state.get("audit") or [])
+    audit.append({"event": event, "tool_name": tool_name, "scope": scope_key, "reason": reason, "at": utcnow().isoformat()})
+    state["audit"] = audit[-50:]
+
+
+def _scene_sequence_audit_summary(scope_key: str, state: dict[str, Any]) -> dict[str, Any]:
+    audit = list(state.get("audit") or [])
+    return {
+        "scope": scope_key,
+        "last_browser_observation": state.get("last_browser_observation"),
+        "pending_browser_observation_after_hid": state.get("pending_browser_observation_after_hid"),
+        "event_count": len(audit),
+        "last_events": audit[-5:],
+    }
+
+
+def _scene_sequence_blocker(*, scope_key: str, reason: str, message: str) -> dict[str, Any]:
+    return {
+        "success": False,
+        "error": "scene_browser_hid_sequence_blocked",
+        "message": message,
+        "sequence_audit": {
+            "scope": scope_key,
+            "reason": reason,
+        },
+    }
+
+
+def _scene_observation_result_is_valid(result: Any) -> bool:
+    if not isinstance(result, dict):
+        return True
+    if result.get("success") is False or result.get("ok") is False or bool(result.get("isError")):
+        return False
+    if _optional_string(result.get("error")):
+        return False
+    return str(result.get("status") or "").strip().lower() not in {"blocked", "error", "failed", "failure", "timeout"}
 
 
 def _validate_scene_hid_action_target(
@@ -901,6 +1888,19 @@ def _mask_scene_browser_target_mismatch(
     observed_url = _browser_result_url(result)
     if observed_url is None or _scene_url_matches_target_origin(observed_url, target_origin=target_origin):
         return result
+    if tool_name == "browser_get_active_tab":
+        return {
+            **result,
+            "success": True,
+            "targetMatch": False,
+            "sceneTarget": {"origin": target_origin},
+            "observedUrl": observed_url,
+            "message": (
+                "Current active tab is outside the scene browser_target origin. "
+                "This is not a terminal blocker; call browser_list_tabs to locate an allowlisted same-origin tab, "
+                "then observe that tab or use VirtualHID to switch to it."
+            ),
+        }
     return {
         "success": False,
         "error": "scene_browser_target_mismatch",
@@ -982,9 +1982,27 @@ def _normalize_scene_hid_action_arguments(
 
     if host:
         if target or tab_id is not None:
-            target.setdefault("host", host)
+            target["host"] = host
+            target.setdefault("bundleId", "com.google.Chrome")
+            tab_info = dict((browser_semantics.get("tabs") or {}).get(tab_id) or {}) if tab_id is not None else {}
+            window_id = _optional_int(target.get("windowId") or target.get("window_id") or tab_info.get("windowId") or tab_info.get("window_id"))
+            if window_id is not None:
+                target.setdefault("windowId", window_id)
+            window_bounds = _resolve_browser_window_bounds(target=target, context=context, tab_info=tab_info)
+            if window_bounds:
+                target.setdefault("browserWindowBounds", window_bounds)
+            window_title = _resolve_web_window_title(
+                context=context,
+                target=target,
+                request=request,
+                browser_semantics=browser_semantics,
+                tab_id=tab_id,
+                desired_host=host,
+            )
+            if window_title:
+                target.setdefault("windowTitle", window_title)
             normalized["target"] = target
-        context.setdefault("host", host)
+        context["host"] = host
         if url:
             context.setdefault("url", url)
         normalized["context"] = context
@@ -997,11 +2015,44 @@ def _normalize_scene_hid_action_arguments(
             normalized.pop("y", None)
             normalized.pop("button", None)
 
-    if geometry:
+    if geometry or (
+        _scene_hid_action_targets_browser(normalized)
+        and _browser_viewport_has_size(browser_semantics=browser_semantics, tab_id=tab_id)
+    ):
         _apply_browser_viewport_geometry(geometry, browser_semantics=browser_semantics, tab_id=tab_id)
         normalized["geometry"] = geometry
+    _strip_scene_hid_humanization_overrides(normalized)
+    _normalize_scene_hid_post_mode(normalized)
 
     return normalized
+
+
+def _strip_scene_hid_humanization_overrides(arguments: dict[str, Any]) -> None:
+    options = arguments.get("options")
+    if isinstance(options, dict):
+        options.pop("behaviorMode", None)
+        options.pop("behavior_mode", None)
+        options.pop("profile", None)
+        arguments["options"] = options
+    primitives = arguments.get("primitives")
+    if isinstance(primitives, list):
+        for primitive in primitives:
+            if isinstance(primitive, dict):
+                primitive.pop("profile", None)
+
+
+def _normalize_scene_hid_post_mode(arguments: dict[str, Any]) -> None:
+    if not _scene_hid_action_targets_browser(arguments):
+        return
+    primitives = [item for item in list(arguments.get("primitives") or []) if isinstance(item, dict)]
+    if not any(str(item.get("type") or "").strip() in {"click", "drag", "type", "pasteText", "key"} for item in primitives):
+        return
+    options = _as_dict(arguments.get("options"))
+    requested = str(options.get("postMode") or options.get("post_mode") or "").strip().lower()
+    if requested in {"", "global"}:
+        options.pop("post_mode", None)
+        options["postMode"] = "auto"
+        arguments["options"] = options
 
 
 def _initial_browser_semantics(request: dict[str, Any]) -> dict[str, Any]:
@@ -1058,12 +2109,24 @@ def _remember_browser_tab(browser_semantics: dict[str, Any], tab: dict[str, Any]
     url = _optional_string(tab.get("url"))
     host = _optional_string(tab.get("host")) or _host_from_url(url)
     viewport = _as_dict(tab.get("viewport"))
+    window = _as_dict(tab.get("window"))
+    window_bounds = _browser_window_bounds_from_window(window) or _browser_window_bounds_from_viewport(viewport)
     if host:
         browser_semantics["last_host"] = host
     if url:
         browser_semantics["last_url"] = url
+    title = _optional_string(tab.get("title"))
+    window_title = _optional_string(tab.get("windowTitle") or tab.get("window_title") or title)
+    if title:
+        browser_semantics["last_title"] = title
+        browser_semantics["last_title_host"] = host
+    if window_title:
+        browser_semantics["last_window_title"] = window_title
+        browser_semantics["last_window_title_host"] = host
     if viewport:
         browser_semantics["last_viewport"] = viewport
+    if window_bounds:
+        browser_semantics["last_window_bounds"] = window_bounds
     if tab_id is None:
         return
     tabs = browser_semantics.setdefault("tabs", {})
@@ -1075,8 +2138,11 @@ def _remember_browser_tab(browser_semantics: dict[str, Any], tab: dict[str, Any]
                 "tabId": tab_id,
                 "url": url,
                 "host": host,
-                "title": _optional_string(tab.get("title")),
+                "title": title,
+                "windowTitle": window_title,
                 "windowId": _optional_int(tab.get("windowId") or tab.get("window_id")),
+                "window": window or None,
+                "browserWindowBounds": window_bounds,
                 "active": bool(tab.get("active")),
                 "viewport": viewport or None,
             }.items()
@@ -1098,9 +2164,16 @@ def _resolve_web_host(
 ) -> str | None:
     browser_target = dict(request.get("browser_target") or {})
     tab_info = dict((browser_semantics.get("tabs") or {}).get(tab_id) or {}) if tab_id is not None else {}
+    allowed_host = _scene_target_host(request)
+    for candidate in (context.get("host"), target.get("host")):
+        host = _optional_string(candidate, max_length=255)
+        if not host:
+            continue
+        if _can_coerce_to_scene_host(host, allowed_host):
+            return allowed_host
+        return host
     candidates = [
-        context.get("host"),
-        target.get("host"),
+        allowed_host,
         browser_target.get("host"),
         tab_info.get("host"),
         _host_from_url(context.get("url")),
@@ -1114,6 +2187,105 @@ def _resolve_web_host(
         if host:
             return host
     return None
+
+
+def _resolve_browser_window_bounds(*, target: dict[str, Any], context: dict[str, Any], tab_info: dict[str, Any]) -> dict[str, Any] | None:
+    for candidate in (
+        target.get("browserWindowBounds"),
+        target.get("browser_window_bounds"),
+        target.get("windowBounds"),
+        target.get("window_bounds"),
+        context.get("browserWindowBounds"),
+        context.get("browser_window_bounds"),
+        tab_info.get("browserWindowBounds"),
+        tab_info.get("browser_window_bounds"),
+        tab_info.get("windowBounds"),
+        tab_info.get("window_bounds"),
+        _browser_window_bounds_from_window(_as_dict(tab_info.get("window"))),
+    ):
+        bounds = _normalize_browser_window_bounds(candidate)
+        if bounds:
+            return bounds
+    return None
+
+
+def _browser_window_bounds_from_window(window: dict[str, Any]) -> dict[str, Any] | None:
+    if not window:
+        return None
+    return _normalize_browser_window_bounds(
+        {
+            "x": window.get("left"),
+            "y": window.get("top"),
+            "width": window.get("width"),
+            "height": window.get("height"),
+        }
+    )
+
+
+def _browser_window_bounds_from_viewport(viewport: dict[str, Any]) -> dict[str, Any] | None:
+    if not viewport:
+        return None
+    return _normalize_browser_window_bounds(
+        {
+            "x": viewport.get("screenX"),
+            "y": viewport.get("screenY"),
+            "width": viewport.get("outerWidth"),
+            "height": viewport.get("outerHeight"),
+        }
+    )
+
+
+def _normalize_browser_window_bounds(value: Any) -> dict[str, Any] | None:
+    bounds = _as_dict(value)
+    if not bounds:
+        return None
+    x = _optional_number(bounds.get("x") if bounds.get("x") is not None else bounds.get("left"))
+    y = _optional_number(bounds.get("y") if bounds.get("y") is not None else bounds.get("top"))
+    width = _optional_number(bounds.get("width"))
+    height = _optional_number(bounds.get("height"))
+    if x is None or y is None or width is None or height is None or width <= 0 or height <= 0:
+        return None
+    return {"x": x, "y": y, "width": width, "height": height}
+
+
+def _can_coerce_to_scene_host(candidate: Any, allowed_host: str | None) -> bool:
+    normalized_candidate = _normalize_host_boundary(_host_from_url(candidate) or candidate)
+    normalized_allowed = _normalize_host_boundary(_host_from_url(allowed_host) or allowed_host)
+    if not normalized_candidate or not normalized_allowed:
+        return False
+    if normalized_candidate == normalized_allowed:
+        return True
+    candidate_name = _hostname_part(normalized_candidate)
+    allowed_name = _hostname_part(normalized_allowed)
+    return bool(
+        candidate_name
+        and allowed_name
+        and candidate_name == allowed_name
+        and not _host_has_explicit_port(normalized_candidate)
+        and _host_has_explicit_port(normalized_allowed)
+    )
+
+
+def _hostname_part(value: Any) -> str | None:
+    host = _normalize_host_boundary(_host_from_url(value) or value)
+    if not host:
+        return None
+    try:
+        parsed = urlparse(f"//{host}")
+        return parsed.hostname.lower() if parsed.hostname else None
+    except ValueError:
+        return host.split(":", 1)[0].lower() if ":" in host else host.lower()
+
+
+def _host_has_explicit_port(value: Any) -> bool:
+    host = _normalize_host_boundary(_host_from_url(value) or value)
+    if not host:
+        return False
+    try:
+        parsed = urlparse(f"//{host}")
+        return parsed.port is not None
+    except ValueError:
+        return False
 
 
 def _resolve_web_url(
@@ -1137,6 +2309,47 @@ def _resolve_web_url(
         if url:
             return url
     return None
+
+
+def _resolve_web_window_title(
+    *,
+    context: dict[str, Any],
+    target: dict[str, Any],
+    request: dict[str, Any],
+    browser_semantics: dict[str, Any],
+    tab_id: int | None,
+    desired_host: str | None,
+) -> str | None:
+    browser_target = dict(request.get("browser_target") or {})
+    tab_info = dict((browser_semantics.get("tabs") or {}).get(tab_id) or {}) if tab_id is not None else {}
+    candidates = (
+        (target.get("windowTitle"), target),
+        (target.get("window_title"), target),
+        (context.get("windowTitle"), context),
+        (context.get("window_title"), context),
+        (browser_target.get("windowTitle"), browser_target),
+        (browser_target.get("window_title"), browser_target),
+        (tab_info.get("windowTitle"), tab_info),
+        (tab_info.get("window_title"), tab_info),
+        (tab_info.get("title"), tab_info),
+        (browser_semantics.get("last_window_title"), {"host": browser_semantics.get("last_window_title_host")}),
+        (browser_semantics.get("last_title"), {"host": browser_semantics.get("last_title_host")}),
+    )
+    for candidate, source in candidates:
+        if not _browser_title_source_matches_host(source, desired_host=desired_host):
+            continue
+        title = _optional_string(candidate, max_length=255)
+        if title:
+            return title
+    return None
+
+
+def _browser_title_source_matches_host(source: dict[str, Any], *, desired_host: str | None) -> bool:
+    normalized_desired = _normalize_host_boundary(_host_from_url(desired_host) or desired_host)
+    if not normalized_desired:
+        return True
+    source_host = _normalize_host_boundary(_host_from_url(source.get("host")) or source.get("host") or _host_from_url(source.get("url")))
+    return not source_host or source_host == normalized_desired
 
 
 def _primitive_from_legacy_point(arguments: dict[str, Any]) -> dict[str, Any] | None:
@@ -1164,16 +2377,32 @@ def _apply_browser_viewport_geometry(
     coord_space = str(geometry.get("coordSpace") or geometry.get("coord_space") or "viewport").strip().lower()
     if coord_space == "screen" or geometry.get("viewportInScreen") or geometry.get("viewport_in_screen"):
         return
-    tab_info = dict((browser_semantics.get("tabs") or {}).get(tab_id) or {}) if tab_id is not None else {}
-    viewport = _as_dict(tab_info.get("viewport")) or _as_dict(browser_semantics.get("last_viewport"))
+    viewport = _browser_viewport_from_semantics(browser_semantics=browser_semantics, tab_id=tab_id)
     width = _optional_number(viewport.get("innerWidth"))
     height = _optional_number(viewport.get("innerHeight"))
     geometry.setdefault("scrollOffset", {"x": _optional_number(viewport.get("scrollX")) or 0, "y": _optional_number(viewport.get("scrollY")) or 0})
     if width is not None and height is not None:
-        geometry.setdefault("viewportSize", {"x": 0, "y": 0, "width": width, "height": height})
+        viewport_size = _as_dict(geometry.get("viewportSize") or geometry.get("viewport_size"))
+        geometry["viewportSize"] = {
+            "x": _optional_number(viewport_size.get("x")) or 0,
+            "y": _optional_number(viewport_size.get("y")) or 0,
+            "width": _optional_number(viewport_size.get("width")) or width,
+            "height": _optional_number(viewport_size.get("height")) or height,
+        }
+        geometry.pop("viewport_size", None)
     visual_viewport = _as_dict(viewport.get("visualViewport"))
     if "pageScale" not in geometry and "page_scale" not in geometry:
         geometry["pageScale"] = _optional_number(visual_viewport.get("scale")) or 1
+
+
+def _browser_viewport_from_semantics(*, browser_semantics: dict[str, Any], tab_id: int | None) -> dict[str, Any]:
+    tab_info = dict((browser_semantics.get("tabs") or {}).get(tab_id) or {}) if tab_id is not None else {}
+    return _as_dict(tab_info.get("viewport")) or _as_dict(browser_semantics.get("last_viewport"))
+
+
+def _browser_viewport_has_size(*, browser_semantics: dict[str, Any], tab_id: int | None) -> bool:
+    viewport = _browser_viewport_from_semantics(browser_semantics=browser_semantics, tab_id=tab_id)
+    return _optional_number(viewport.get("innerWidth")) is not None and _optional_number(viewport.get("innerHeight")) is not None
 
 
 def _snapshot_candidates(*, tool_name: str, output: Any) -> list[dict[str, Any]]:
@@ -1244,8 +2473,14 @@ def _snapshot_candidates(*, tool_name: str, output: Any) -> list[dict[str, Any]]
     ]
 
 
-def _collect_blockers(outcome: AgentTurnOutcome, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _collect_blockers(
+    outcome: AgentTurnOutcome,
+    events: list[dict[str, Any]],
+    *,
+    ignore_recovered: bool = True,
+) -> list[dict[str, Any]]:
     blockers: list[dict[str, Any]] = []
+    recovered_tools = _recovered_error_tools(events) if ignore_recovered else set()
     for event in events:
         event_type = str(event.get("type") or "")
         payload = _as_dict(event.get("payload"))
@@ -1258,7 +2493,12 @@ def _collect_blockers(outcome: AgentTurnOutcome, events: list[dict[str, Any]]) -
                     "severity": payload.get("severity"),
                 }
             )
-        if event_type == "tool_event" and payload.get("kind") == "tool_result_ready" and bool(payload.get("is_error")):
+        if event_type == "tool_event" and payload.get("kind") == "tool_result_ready" and (
+            bool(payload.get("is_error")) or not _tool_result_content_succeeded(payload.get("content"))
+        ):
+            tool_name = str(payload.get("tool_name") or "")
+            if tool_name in recovered_tools:
+                continue
             blockers.append(
                 {
                     "kind": "tool_error",
@@ -1273,23 +2513,58 @@ def _collect_blockers(outcome: AgentTurnOutcome, events: list[dict[str, Any]]) -
     return blockers
 
 
+def _recovered_error_tools(events: list[dict[str, Any]]) -> set[str]:
+    failed_at: dict[str, int] = {}
+    recovered: set[str] = set()
+    for event in events:
+        if str(event.get("type") or "") != "tool_event":
+            continue
+        payload = _as_dict(event.get("payload"))
+        if payload.get("kind") != "tool_result_ready":
+            continue
+        tool_name = str(payload.get("tool_name") or "")
+        if not tool_name:
+            continue
+        seq = _safe_int(event.get("engine_output_seq"))
+        if bool(payload.get("is_error")) or not _tool_result_content_succeeded(payload.get("content")):
+            failed_at[tool_name] = seq
+        elif tool_name in failed_at and seq > failed_at[tool_name] and _tool_result_content_succeeded(payload.get("content")):
+            recovered.add(tool_name)
+    return recovered
+
+
 def _should_continue(outcome: AgentTurnOutcome) -> bool:
     return outcome.status == "continue" and outcome.gate_signal == "continue"
 
 
-def _public_status(outcome: AgentTurnOutcome, blockers: list[dict[str, Any]]) -> str:
-    result_status = _scene_result_status(outcome)
+def _public_status(
+    outcome: AgentTurnOutcome,
+    blockers: list[dict[str, Any]],
+    *,
+    result_data: dict[str, Any] | None = None,
+) -> str:
+    result_status = str((_as_dict(result_data).get("status") or "")).strip().lower() or _scene_result_status(outcome)
     if result_status in {"completed", "complete", "success", "succeeded"}:
+        if blockers:
+            return "blocked"
         return "completed"
+    if result_status in {"partial", "incomplete", "continuable", "continue", "pending"}:
+        if blockers:
+            return "blocked"
+        return "incomplete"
     if result_status in {"blocked", "wait_human", "waiting_human", "paused"} or result_status.startswith("blocked_"):
         return "blocked"
     if result_status in {"error", "failed", "failure", "fail"} or result_status.startswith("failed_") or result_status.startswith("failure_"):
         return "error"
-    if outcome.status in {"error", "cancelled"}:
+    if blockers:
+        return "blocked"
+    if outcome.status == "error":
         return "error"
+    if outcome.status == "cancelled":
+        return "blocked"
     if outcome.status == "complete":
         return "completed"
-    if outcome.status in {"wait_human", "escalate"} or blockers:
+    if outcome.status in {"wait_human", "escalate"}:
         return "blocked"
     return "incomplete"
 
@@ -1298,6 +2573,9 @@ def _scene_result_status(outcome: AgentTurnOutcome) -> str:
     result_status = str((outcome.result_data or {}).get("status") or "").strip().lower()
     if result_status:
         return result_status
+    final_status = str((_scene_final_control_payload(outcome) or {}).get("status") or "").strip().lower()
+    if _is_scene_non_success_status(final_status):
+        return final_status
     return ""
 
 
@@ -1311,6 +2589,12 @@ def _stored_status(public_status: str) -> str:
 
 
 def _public_summary(outcome: AgentTurnOutcome, blockers: list[dict[str, Any]]) -> str:
+    final_payload = _scene_final_control_payload(outcome)
+    final_status = str((final_payload or {}).get("status") or "").strip().lower()
+    if _is_scene_non_success_status(final_status):
+        final_summary = str((final_payload or {}).get("summary") or (final_payload or {}).get("message") or "").strip()
+        if final_summary:
+            return final_summary
     final_output = str(outcome.final_output or "").strip()
     if final_output:
         return final_output
@@ -1324,10 +2608,217 @@ def _public_summary(outcome: AgentTurnOutcome, blockers: list[dict[str, Any]]) -
     return "scene context finished without a terminal summary"
 
 
-def _scene_result_data(outcome: AgentTurnOutcome) -> dict[str, Any]:
+def _scene_result_data(outcome: AgentTurnOutcome, *, output_contract: dict[str, Any] | None = None) -> dict[str, Any]:
     if isinstance(outcome.result_data, dict) and outcome.result_data:
         return dict(outcome.result_data)
+    contract = _as_dict(output_contract)
+    if contract.get("result_data_required"):
+        final_payload = _scene_final_control_payload(outcome)
+        if isinstance(final_payload, dict) and final_payload:
+            return dict(final_payload)
     return {}
+
+
+def _normalize_scene_result_contract_data(
+    result_data: dict[str, Any],
+    output_contract: dict[str, Any] | None,
+) -> dict[str, Any]:
+    contract = _as_dict(output_contract)
+    if not contract.get("result_data_required") or not result_data:
+        return result_data
+    required_fields = {
+        str(item).strip()
+        for item in contract.get("required_fields") or []
+        if str(item or "").strip()
+    }
+    if not required_fields:
+        return result_data
+
+    normalized = dict(result_data)
+    summary = _as_dict(normalized.get("summary"))
+    result = _as_dict(normalized.get("result"))
+    sources = [normalized, summary, result]
+    synthesized: list[str] = []
+
+    def first_list(*keys: str) -> list[Any]:
+        for source in sources:
+            for key in keys:
+                value = source.get(key)
+                if isinstance(value, list):
+                    return list(value)
+        return []
+
+    completed_details = first_list(
+        "completed_job_details",
+        "completedJobDetails",
+        "job_details",
+        "jobDetails",
+        "active_recruiting_jobs",
+        "activeRecruitingJobs",
+        "verified_jobs",
+        "verifiedJobs",
+        "details",
+    )
+    if "completed_job_details" in required_fields and not normalized.get("completed_job_details") and completed_details:
+        normalized["completed_job_details"] = completed_details
+        synthesized.append("completed_job_details")
+
+    observed_jobs = first_list(
+        "observed_jobs",
+        "observedJobs",
+        "discovered_jobs",
+        "discoveredJobs",
+        "jobs_reviewed",
+        "jobsReviewed",
+        "active_recruiting_jobs",
+        "activeRecruitingJobs",
+        "active_jobs",
+        "activeJobs",
+    )
+    if not observed_jobs and isinstance(normalized.get("completed_job_details"), list):
+        observed_jobs = [
+            {
+                key: item.get(key)
+                for key in ("title", "job_title", "external_id", "external_url", "status")
+                if isinstance(item, dict) and item.get(key) not in (None, "", [], {})
+            }
+            for item in normalized["completed_job_details"]
+            if isinstance(item, dict)
+        ]
+        observed_jobs = [item for item in observed_jobs if item]
+    if "observed_jobs" in required_fields and not normalized.get("observed_jobs") and observed_jobs:
+        normalized["observed_jobs"] = observed_jobs
+        synthesized.append("observed_jobs")
+
+    if "inactive_or_closed_jobs" in required_fields and "inactive_or_closed_jobs" not in normalized:
+        normalized["inactive_or_closed_jobs"] = first_list(
+            "inactive_or_closed_jobs",
+            "inactiveOrClosedJobs",
+            "closed_jobs",
+            "closedJobs",
+            "inactive_jobs",
+            "inactiveJobs",
+        )
+    if "blockers" in required_fields and "blockers" not in normalized:
+        normalized["blockers"] = first_list("blockers")
+    if "limitations" in required_fields and "limitations" not in normalized:
+        normalized["limitations"] = first_list("limitations")
+    if "activation_entry_observed" in required_fields and "activation_entry_observed" not in normalized:
+        activation = None
+        for source in sources:
+            if "activation_entry_observed" in source:
+                activation = source.get("activation_entry_observed")
+                break
+            if "activationEntryObserved" in source:
+                activation = source.get("activationEntryObserved")
+                break
+        normalized["activation_entry_observed"] = bool(activation)
+
+    evidence = first_list("evidence", "evidence_refs", "evidenceRefs", "observations", "notes")
+    if not evidence:
+        for source in sources:
+            value = source.get("evidence") or source.get("blocker") or source.get("limitation")
+            if str(value or "").strip():
+                evidence = [str(value).strip()]
+                break
+    if not evidence and normalized.get("completed_job_details"):
+        evidence = ["scene returned structured job detail data"]
+    if "evidence" in required_fields and not normalized.get("evidence") and evidence:
+        normalized["evidence"] = evidence
+        synthesized.append("evidence")
+
+    status = str(normalized.get("status") or "").strip().lower()
+    if synthesized and status in {"completed", "complete", "success", "succeeded"}:
+        normalized["reported_status"] = normalized.get("status")
+        normalized["status"] = "partial"
+        normalized["contract_normalization"] = {
+            "status": "applied",
+            "synthesized_fields": synthesized,
+            "reason": "scene returned recognizable business fields with non-canonical contract keys",
+        }
+    return normalized
+
+
+def _scene_result_contract_blockers(result_data: dict[str, Any], output_contract: dict[str, Any] | None) -> list[dict[str, Any]]:
+    contract = _as_dict(output_contract)
+    if not contract.get("result_data_required"):
+        return []
+    required_fields = [
+        str(item).strip()
+        for item in contract.get("required_fields") or []
+        if str(item or "").strip()
+    ]
+    missing_fields = [
+        field
+        for field in required_fields
+        if field not in result_data or result_data.get(field) in (None, "", {})
+    ]
+    blockers: list[dict[str, Any]] = []
+    if missing_fields:
+        blockers.append(
+            {
+                "kind": "output_contract_incomplete",
+                "message": "scene result_data is missing required output_contract fields",
+                "missing_fields": missing_fields,
+            }
+        )
+    status = str(result_data.get("status") or "").strip().lower()
+    completed_details = result_data.get("completed_job_details")
+    if "completed_job_details" in required_fields and status in {"completed", "complete", "success", "succeeded"}:
+        if not isinstance(completed_details, list) or not completed_details:
+            blockers.append(
+                {
+                    "kind": "output_contract_incomplete",
+                    "message": "scene cannot be completed without completed_job_details",
+                    "missing_fields": ["completed_job_details"],
+                }
+            )
+    return blockers
+
+
+def _align_result_data_status(result_data: dict[str, Any], public_status: str) -> dict[str, Any]:
+    if public_status == "completed" or not result_data:
+        return result_data
+    reported_status = str(result_data.get("status") or "").strip().lower()
+    if reported_status in {"completed", "complete", "success", "succeeded"}:
+        return {
+            **result_data,
+            "reported_status": result_data.get("status"),
+            "status": public_status,
+        }
+    return result_data
+
+
+def _scene_final_control_payload(outcome: AgentTurnOutcome) -> dict[str, Any] | None:
+    return _parse_scene_final_output_json(outcome.final_output)
+
+
+def _is_scene_non_success_status(value: str) -> bool:
+    terminal_values = {"blocked", "wait_human", "waiting_human", "paused", "error", "failed", "failure", "fail"}
+    return value in terminal_values or value.startswith(("blocked_", "failed_", "failure_"))
+
+
+def _parse_scene_final_output_json(value: Any) -> dict[str, Any] | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if len(lines) >= 3 and lines[0].startswith("```") and lines[-1].strip().startswith("```"):
+            text = "\n".join(lines[1:-1]).strip()
+    candidates = [text]
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        candidates.append(text[start : end + 1])
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
 
 
 def _scene_result_artifacts(result_data: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1425,6 +2916,14 @@ def _as_dict(value: Any) -> dict[str, Any]:
     return {}
 
 
+def _merge_policy_dicts(*values: Any) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for value in values:
+        if isinstance(value, dict):
+            merged.update({str(key): item for key, item in value.items() if str(key).strip()})
+    return merged
+
+
 def _string_list(value: Any) -> list[str]:
     items: list[str] = []
     raw_values = list(value or []) if isinstance(value, list) else ([value] if value not in (None, "") else [])
@@ -1485,6 +2984,22 @@ def _scene_capabilities(value: Any) -> set[str]:
     return capabilities
 
 
+def _normalize_preferred_scene_capabilities(value: Any) -> list[str]:
+    capabilities = _scene_capabilities(value)
+    ordered: list[str] = []
+    if "browser" in capabilities:
+        ordered.append("browser")
+    if "computer" in capabilities:
+        ordered.append("computer")
+    for item in _string_list(value):
+        normalized = item.strip().lower().replace("-", "_")
+        if normalized in {"browser", "browser_mcp", "browser_read", "document", "computer", "hid", "virtual_hid", "virtualhid", "computer_hid", "computer_write"}:
+            continue
+        if item not in ordered:
+            ordered.append(item)
+    return ordered
+
+
 def _scene_execution_contract(request: dict[str, Any]) -> dict[str, Any]:
     capabilities = _scene_capabilities(request["preferred_capabilities"])
     if "browser" in capabilities and "computer" in capabilities:
@@ -1515,6 +3030,10 @@ def _scene_execution_contract(request: dict[str, Any]) -> dict[str, Any]:
         contract["action_plan"] = [dict(item) for item in request["action_plan"]]
     if request["artifact_expectations"]:
         contract["artifact_expectations"] = dict(request["artifact_expectations"])
+    if request["anti_detection_policy"]:
+        contract["anti_detection_policy"] = dict(request["anti_detection_policy"])
+    if request["behavior_budget"]:
+        contract["behavior_budget"] = dict(request["behavior_budget"])
     return contract
 
 
@@ -1549,6 +3068,8 @@ def _scene_environment_context(request: dict[str, Any], *, episode_id: str | Non
         "target_regions": [dict(item) for item in request["target_regions"]],
         "action_plan": [dict(item) for item in request["action_plan"]],
         "artifact_expectations": dict(request["artifact_expectations"]) if request["artifact_expectations"] else {},
+        "anti_detection_policy": dict(request["anti_detection_policy"]) if request["anti_detection_policy"] else {},
+        "behavior_budget": dict(request["behavior_budget"]) if request["behavior_budget"] else {},
     }
 
 

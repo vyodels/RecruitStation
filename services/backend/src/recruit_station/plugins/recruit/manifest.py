@@ -147,14 +147,14 @@ class RecruitPluginManifest:
             _tool(
                 name="upsert_job_description",
                 description=(
-                    "Create or update a job description in the local recruiting workspace using generic recruiting fields. "
-                    "Use platform/external identity when syncing from an external site."
+                    "Create or update a JD in the local recruiting workspace only when the job detail has been fully read. "
+                    "For JD sync, do not save list-only discoveries, blocked observations, or partial detail results."
                 ),
                 parameters={
                     "type": "object",
                     "properties": {
-                        "job_description_id": {"type": "string"},
-                        "title": {"type": "string"},
+                        "job_description_id": {"type": "string", "description": "Existing local JD id when updating a known JD."},
+                        "title": {"type": "string", "description": "Job title shown by the recruiting site or local workspace."},
                         "company_name": {"type": "string"},
                         "department": {"type": "string"},
                         "location": {"type": "string"},
@@ -165,18 +165,61 @@ class RecruitPluginManifest:
                         "compensation_text": {"type": "string"},
                         "experience_requirement": {"type": "string"},
                         "education_requirement": {"type": "string"},
-                        "summary": {"type": "string"},
-                        "description": {"type": "string"},
-                        "requirements": {"type": "string"},
+                        "summary": {"type": "string", "description": "Short business summary; not a substitute for the full detail page."},
+                        "description": {
+                            "type": "string",
+                            "description": "Captured job responsibilities or full job detail text from the detail page.",
+                        },
+                        "requirements": {
+                            "type": "string",
+                            "description": "Captured qualifications, requirements, or must-have criteria from the detail page.",
+                        },
                         "benefit_tags": {"type": "array", "items": {"type": "string"}},
-                        "detail_metadata": {"type": "object"},
+                        "detail_metadata": {
+                            "type": "object",
+                            "description": "Structured detail-page facts that support local recruiting work, such as responsibilities, requirements, or raw detail text.",
+                        },
                         "status": {"type": "string"},
-                        "source": {"type": "string"},
+                        "source": {
+                            "type": "string",
+                            "description": "Use jd_sync when the JD comes from the configured recruiting website sync flow.",
+                        },
                         "platform": {"type": "string"},
                         "external_id": {"type": "string"},
                         "external_url": {"type": "string"},
-                        "sync_status": {"type": "string"},
-                        "sync_metadata": {"type": "object"},
+                        "sync_status": {
+                            "type": "string",
+                            "description": "Use synced only after the detail page is complete; use a blocked or partial status when the JD cannot be safely saved.",
+                        },
+                        "sync_metadata": {
+                            "type": "object",
+                            "description": (
+                                "For JD sync writes, pass detail_complete=true only after the detail page has been fully read. "
+                                "Also pass observed_detail_url plus empty blockers and missing_fields. "
+                                "When detail_complete is false, blockers is non-empty, or missing_fields is non-empty, do not call this write tool."
+                            ),
+                            "properties": {
+                                "detail_complete": {
+                                    "type": "boolean",
+                                    "description": "Must be true for JD sync writes saved into the local JD library.",
+                                },
+                                "observed_detail_url": {
+                                    "type": "string",
+                                    "description": "The actual job detail page URL that was read before saving.",
+                                },
+                                "blockers": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "Empty when saving; otherwise explain why the JD must not be saved yet.",
+                                },
+                                "missing_fields": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "Empty when saving; otherwise list missing job-detail fields and do not save.",
+                                },
+                            },
+                            "additionalProperties": True,
+                        },
                     },
                     "required": ["title"],
                     "additionalProperties": False,

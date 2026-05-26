@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from http.client import HTTPException
 from dataclasses import dataclass, field
 from ipaddress import ip_address
 from typing import Any, Callable, Iterable
@@ -23,7 +24,20 @@ from .types import (
 
 
 class ProviderError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        error_kind: str = "provider_error",
+        retryable: bool = False,
+        retry_after_seconds: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.error_kind = error_kind
+        self.retryable = retryable
+        self.retry_after_seconds = retry_after_seconds
 
 
 Transport = Callable[..., Any]
@@ -109,10 +123,13 @@ class OpenAIProvider:
         }
         if _signal_aborted(request.abort_signal):
             return _aborted_invocation_result(request)
-        raw = (
-            self.transport(url, payload, headers, self.config.resolved_timeout_seconds())
-            if self.transport is not None
-            else self._post(url, payload, headers, request.abort_signal)
+        raw = _invoke_transport(
+            url,
+            lambda: (
+                self.transport(url, payload, headers, self.config.resolved_timeout_seconds())
+                if self.transport is not None
+                else self._post(url, payload, headers, request.abort_signal)
+            ),
         )
         if _signal_aborted(request.abort_signal):
             return _aborted_invocation_result(request)
@@ -143,6 +160,7 @@ class OpenAIProvider:
             payload["reasoning"] = dict(request.reasoning)
         if request.text_format is not None:
             payload["text"] = {"format": dict(request.text_format)}
+            _ensure_openai_json_object_input_hint(payload, request.text_format)
         if request.parallel_tool_calls is not None:
             payload["parallel_tool_calls"] = request.parallel_tool_calls
         if request.max_tool_calls is not None:
@@ -199,10 +217,13 @@ class AnthropicProvider:
         }
         if _signal_aborted(request.abort_signal):
             return _aborted_invocation_result(request)
-        raw = (
-            self.transport(url, payload, headers, self.config.resolved_timeout_seconds())
-            if self.transport is not None
-            else self._post(url, payload, headers, request.abort_signal)
+        raw = _invoke_transport(
+            url,
+            lambda: (
+                self.transport(url, payload, headers, self.config.resolved_timeout_seconds())
+                if self.transport is not None
+                else self._post(url, payload, headers, request.abort_signal)
+            ),
         )
         if _signal_aborted(request.abort_signal):
             return _aborted_invocation_result(request)
@@ -278,9 +299,69 @@ def _post_json(
     except HTTPError as exc:
         error_body = exc.read().decode("utf-8", errors="replace")
         message = error_body.strip() or exc.reason or f"HTTP {exc.code}"
-        raise ProviderError(f"HTTP {exc.code} calling {url}: {message}") from exc
+        raise ProviderError(
+            f"HTTP {exc.code} calling {url}: {message}",
+            status_code=int(exc.code),
+            error_kind="provider_http_error",
+            retryable=_is_retryable_provider_http_status(int(exc.code)),
+            retry_after_seconds=_retry_after_seconds(exc.headers.get("Retry-After") if exc.headers else None),
+        ) from exc
     except URLError as exc:
-        raise ProviderError(f"Transport error calling {url}: {exc.reason}") from exc
+        raise ProviderError(
+            f"Transport error calling {url}: {exc.reason}",
+            error_kind="provider_transport_error",
+            retryable=True,
+        ) from exc
+    except (HTTPException, TimeoutError, OSError) as exc:
+        raise _transport_error(url, exc) from exc
+    except RuntimeError as exc:
+        if _is_transient_transport_message(str(exc)):
+            raise _transport_error(url, exc) from exc
+        raise
+
+
+def _invoke_transport(url: str, invoke: Callable[[], Any]) -> Any:
+    try:
+        return invoke()
+    except ProviderError:
+        raise
+    except (HTTPException, TimeoutError, OSError) as exc:
+        raise _transport_error(url, exc) from exc
+    except RuntimeError as exc:
+        if _is_transient_transport_message(str(exc)):
+            raise _transport_error(url, exc) from exc
+        raise
+
+
+def _transport_error(url: str, exc: BaseException) -> ProviderError:
+    return ProviderError(
+        f"Transport error calling {url}: {exc}",
+        error_kind="provider_transport_error",
+        retryable=True,
+    )
+
+
+def _is_transient_transport_message(message: str) -> bool:
+    lowered = message.strip().lower()
+    if not lowered:
+        return False
+    return any(
+        marker in lowered
+        for marker in (
+            "unexpected eof",
+            " eof",
+            "end of file",
+            "connection reset",
+            "connection aborted",
+            "connection closed",
+            "remote end closed",
+            "server disconnected",
+            "incompleteread",
+            "incomplete read",
+            "broken pipe",
+            "timed out",
+        )
+    )
 
 
 def _open_url(request: Request, *, url: str, timeout_seconds: int) -> Any:
@@ -288,6 +369,20 @@ def _open_url(request: Request, *, url: str, timeout_seconds: int) -> Any:
         opener = build_opener(ProxyHandler({}))
         return opener.open(request, timeout=timeout_seconds)
     return urlopen(request, timeout=timeout_seconds)
+
+
+def _is_retryable_provider_http_status(status_code: int) -> bool:
+    return status_code in {408, 409, 425, 429} or status_code >= 500
+
+
+def _retry_after_seconds(value: str | None) -> float | None:
+    if not value:
+        return None
+    try:
+        parsed = float(value.strip())
+    except ValueError:
+        return None
+    return max(parsed, 0.0)
 
 
 def _should_bypass_proxies(url: str) -> bool:
@@ -369,7 +464,11 @@ def _decode_sse_event(event_name: str, data: str) -> dict[str, Any]:
     try:
         payload = json.loads(data)
     except json.JSONDecodeError as exc:
-        raise ProviderError("Invalid JSON event in provider stream response") from exc
+        raise ProviderError(
+            "Invalid JSON event in provider stream response",
+            error_kind="provider_stream_error",
+            retryable=True,
+        ) from exc
     if not isinstance(payload, dict):
         raise ProviderError("Provider stream event must be a JSON object")
     payload.setdefault("type", event_name)
@@ -397,7 +496,7 @@ def _parse_openai_result(raw: Any, request: LLMRequest) -> LLMInvocationResult:
             continue
         error_payload = event.get("error")
         if event_type in {"error", "response.failed"} or isinstance(error_payload, dict):
-            raise ProviderError(_provider_error_message(event))
+            raise _provider_stream_error(event)
         if event_type == "response.output_text.delta":
             delta = str(event.get("delta") or "")
             text_parts.append(delta)
@@ -509,7 +608,7 @@ def _parse_anthropic_result(raw: Any, request: LLMRequest) -> LLMInvocationResul
         event = _coerce_event(raw_event)
         event_type = str(event.get("type") or "")
         if event_type == "error":
-            raise ProviderError(_provider_error_message(event))
+            raise _provider_stream_error(event)
         if event_type == "message_start":
             message = event.get("message") if isinstance(event.get("message"), dict) else {}
             response_id = str(message.get("id") or "")
@@ -697,6 +796,32 @@ def _openai_message_payload(message: LLMMessage) -> dict[str, Any]:
     return {"role": message.role, "content": message.content}
 
 
+def _ensure_openai_json_object_input_hint(payload: dict[str, Any], text_format: dict[str, Any]) -> None:
+    if str(text_format.get("type") or "").strip().lower() != "json_object":
+        return
+    input_payload = payload.get("input")
+    if not isinstance(input_payload, list):
+        return
+    if _openai_user_input_contains_json_keyword(input_payload):
+        return
+    input_payload.insert(
+        0,
+        {
+            "role": "user",
+            "content": "Provider formatting requirement: final response must be a valid json object.",
+        },
+    )
+
+
+def _openai_user_input_contains_json_keyword(input_payload: list[dict[str, Any]]) -> bool:
+    for item in input_payload:
+        if str(item.get("role") or "").lower() != "user":
+            continue
+        if "json" in json.dumps(item.get("content"), ensure_ascii=False, default=str).lower():
+            return True
+    return False
+
+
 def _openai_input_payload(messages: list[LLMMessage]) -> list[dict[str, Any]]:
     payload: list[dict[str, Any]] = []
     for message in messages:
@@ -799,6 +924,15 @@ def _provider_error_message(event: dict[str, Any]) -> str:
     if isinstance(error, dict):
         return str(error.get("message") or error.get("type") or "Unknown provider stream error")
     return str(event.get("message") or event.get("type") or "Unknown provider stream error")
+
+
+def _provider_stream_error(event: dict[str, Any]) -> ProviderError:
+    message = _provider_error_message(event)
+    return ProviderError(
+        message,
+        error_kind="provider_stream_error",
+        retryable=_is_transient_transport_message(message),
+    )
 
 
 def _json_object(text: str) -> dict[str, Any]:

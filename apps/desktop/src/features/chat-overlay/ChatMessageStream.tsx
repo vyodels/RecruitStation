@@ -393,6 +393,15 @@ function messageKindLabel(message: AgentConversationMessage, copy: ReturnType<ty
 }
 
 type TimelineEventKind = "thinking" | "tool_call" | "execution_result" | "human" | "confirmation";
+type TimelineResultTone = "success" | "error" | "warning" | "neutral";
+
+interface TimelineRenderItem {
+  id: string;
+  messages: AgentConversationMessage[];
+  primary: AgentConversationMessage;
+  kind: TimelineEventKind;
+  toolGroup: boolean;
+}
 
 function metadataString(message: AgentConversationMessage, keys: string[]): string | null {
   const metadata = message.metadata ?? {};
@@ -403,6 +412,215 @@ function metadataString(message: AgentConversationMessage, keys: string[]): stri
     }
   }
   return null;
+}
+
+function metadataObject(message: AgentConversationMessage, keys: string[]): Record<string, unknown> | null {
+  const metadata = message.metadata ?? {};
+  for (const key of keys) {
+    const value = metadata[key];
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      return value as Record<string, unknown>;
+    }
+  }
+  return null;
+}
+
+function timelinePayloadData(message: AgentConversationMessage): Record<string, unknown> | null {
+  const payload = metadataObject(message, ["payload"]);
+  const data = payload?.data;
+  return data && typeof data === "object" && !Array.isArray(data) ? data as Record<string, unknown> : null;
+}
+
+function isToolRelatedTimelineMessage(message: AgentConversationMessage): boolean {
+  if (message.kind === "tool_use" || message.kind === "tool_result" || message.role === "tool") {
+    return true;
+  }
+  const semanticHints = [
+    metadataString(message, ["traceKind", "itemType", "eventType", "eventKind", "payloadKind"]),
+    metadataString(message, ["toolName", "tool_name", "name"]),
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  if (/tool|mcp|command_execution|web_search/.test(semanticHints)) {
+    return true;
+  }
+  const data = timelinePayloadData(message);
+  const dataKind = String(data?.kind ?? "").toLowerCase();
+  const dataToolName = String(data?.tool_name ?? data?.name ?? "").trim();
+  return Boolean(dataToolName || /tool|mcp|command_execution|web_search/.test(dataKind));
+}
+
+function timelineToolGroupKey(message: AgentConversationMessage): string | null {
+  if (!isToolRelatedTimelineMessage(message)) {
+    return null;
+  }
+  const explicitId = metadataString(message, ["toolUseId", "toolCallId", "tool_use_id", "tool_call_id"]);
+  const data = timelinePayloadData(message);
+  const dataId = typeof data?.id === "string" && data.id.trim()
+    ? data.id.trim()
+    : typeof data?.tool_use_id === "string" && data.tool_use_id.trim()
+      ? data.tool_use_id.trim()
+      : typeof data?.tool_call_id === "string" && data.tool_call_id.trim()
+        ? data.tool_call_id.trim()
+        : null;
+  const runId = metadataString(message, ["run_id", "latest_run_id", "runId"]) ?? "run";
+  const turnId = metadataString(message, ["turn_id", "turnId"]) ?? "turn";
+  const toolName = metadataString(message, ["toolName", "tool_name", "name"])
+    ?? (typeof data?.tool_name === "string" && data.tool_name.trim() ? data.tool_name.trim() : null)
+    ?? (typeof data?.name === "string" && data.name.trim() ? data.name.trim() : null);
+  const stableId = explicitId ?? dataId;
+  if (stableId) {
+    return `${runId}:${turnId}:${stableId}`;
+  }
+  if (toolName) {
+    return `${runId}:${turnId}:${toolName}`;
+  }
+  return null;
+}
+
+function timelinePayloadKind(message: AgentConversationMessage): string {
+  return metadataString(message, ["payloadKind", "traceKind", "eventKind", "eventType", "itemType"])
+    ?? String(timelinePayloadData(message)?.kind ?? "");
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableJson(item)).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function parseMaybeJson(value: unknown): unknown {
+  if (typeof value !== "string") {
+    return value;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return trimmed;
+  }
+}
+
+function toolInputGroupKey(message: AgentConversationMessage): string | null {
+  const data = timelinePayloadData(message);
+  const rawInput = data?.input ?? data?.content ?? data?.delta;
+  const parsedInput = parseMaybeJson(rawInput);
+  if (parsedInput == null || parsedInput === "") {
+    return null;
+  }
+  const runId = metadataString(message, ["run_id", "latest_run_id", "runId"]) ?? "run";
+  const turnId = metadataString(message, ["turn_id", "turnId"]) ?? "turn";
+  const invocationId =
+    typeof data?.invocation_id === "string" && data.invocation_id.trim()
+      ? data.invocation_id.trim()
+      : "invocation";
+  return `${runId}:${turnId}:${invocationId}:input:${stableJson(parsedInput).slice(0, 700)}`;
+}
+
+function buildTimelineRenderItems(messages: AgentConversationMessage[]): TimelineRenderItem[] {
+  const items: TimelineRenderItem[] = [];
+  const toolGroups = new Map<string, TimelineRenderItem>();
+  const toolInputGroups = new Map<string, TimelineRenderItem>();
+
+  messages.forEach((message) => {
+    const inputGroupKey = toolInputGroupKey(message);
+    const toolGroupKey = timelineToolGroupKey(message) ?? inputGroupKey;
+    if (!toolGroupKey) {
+      items.push({
+        id: message.id,
+        messages: [message],
+        primary: message,
+        kind: resolveTimelineEventKind(message),
+        toolGroup: false,
+      });
+      return;
+    }
+
+    const existing = toolGroups.get(toolGroupKey) ?? (inputGroupKey ? toolInputGroups.get(inputGroupKey) : undefined);
+    if (existing) {
+      existing.messages.push(message);
+      existing.primary = message;
+      existing.kind = resolveToolGroupEventKind(existing.messages);
+      toolGroups.set(toolGroupKey, existing);
+      if (inputGroupKey) {
+        toolInputGroups.set(inputGroupKey, existing);
+      }
+      return;
+    }
+
+    const item: TimelineRenderItem = {
+      id: `tool:${toolGroupKey}`,
+      messages: [message],
+      primary: message,
+      kind: resolveToolGroupEventKind([message]),
+      toolGroup: true,
+    };
+    toolGroups.set(toolGroupKey, item);
+    if (inputGroupKey) {
+      toolInputGroups.set(inputGroupKey, item);
+    }
+    items.push(item);
+  });
+
+  return items;
+}
+
+function resolveToolGroupEventKind(messages: AgentConversationMessage[]): TimelineEventKind {
+  if (messages.some((message) => {
+    const kind = timelinePayloadKind(message).toLowerCase();
+    return kind.includes("error") || metadataString(message, ["isError"]) === "true";
+  })) {
+    return "execution_result";
+  }
+  if (messages.some((message) => {
+    const kind = timelinePayloadKind(message).toLowerCase();
+    return kind.includes("result") || kind.includes("completed");
+  })) {
+    return "execution_result";
+  }
+  return "tool_call";
+}
+
+function resolveTimelineResultTone(message: AgentConversationMessage): TimelineResultTone {
+  const data = timelinePayloadData(message);
+  const statusHints = [
+    message.status,
+    metadataString(message, ["status", "runStatus", "run_status", "turnStatus", "turn_status", "state", "outcome_kind"]),
+    metadataString(message, ["traceKind", "payloadKind", "itemType", "eventType", "eventKind"]),
+    String(data?.kind ?? ""),
+    String(data?.status ?? ""),
+    String(data?.error_kind ?? ""),
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  if (
+    message.status === "failed"
+    || metadataString(message, ["isError"]) === "true"
+    || data?.is_error === true
+    || data?.retryable === false
+    || /failed|failure|cancelled|interrupted|timed_out|timeout|error|turn_failed|tool_error|provider_error_terminal|provider_retry_exhausted/.test(statusHints)
+  ) {
+    return "error";
+  }
+  if (/provider_retry_scheduled|blocked|waiting_human|wait_human|permission|confirm/.test(statusHints)) {
+    return "warning";
+  }
+  if (resolveTimelineEventKind(message) === "execution_result") {
+    return "success";
+  }
+  return "neutral";
 }
 
 function compactValue(value: unknown): string | null {
@@ -454,6 +672,12 @@ function timelineMetadataPairs(message: AgentConversationMessage): Array<{ key: 
     "content",
     "message",
     "delta",
+    "toolName",
+    "tool_name",
+    "toolUseId",
+    "toolCallId",
+    "payloadKind",
+    "isError",
   ]);
 
   return Object.entries(metadata)
@@ -472,7 +696,7 @@ function timelineKindFromLifecycle(message: AgentConversationMessage): TimelineE
     .join(" ")
     .toLowerCase();
 
-  if (/approval|confirm|permission|waiting_human|blocked|timeout/.test(lifecycle)) {
+  if (/approval|confirm|permission|blocked|timeout/.test(lifecycle)) {
     return "confirmation";
   }
   if (/completed|failed|cancelled|interrupted|sent/.test(lifecycle)) {
@@ -488,10 +712,14 @@ function resolveTimelineEventKind(message: AgentConversationMessage): TimelineEv
    * adapters. The management timeline intentionally does not infer execution
    * semantics from the older card-view `message.kind` field.
    */
+  const messageType = metadataString(message, ["message_type", "messageType"]);
+  if (message.role === "user" || messageType === "run_input") {
+    return "human";
+  }
   const explicitKind = metadataString(message, ["uiKind", "presentationKind", "eventKind", "eventType", "itemType"]);
   if (explicitKind) {
     const normalizedKind = explicitKind.toLowerCase();
-    if (/approval|confirm|permission|human/.test(normalizedKind)) {
+    if (/approval|confirm|permission|waiting[_\s-]?human|human[_\s-]?in[_\s-]?the[_\s-]?loop/.test(normalizedKind)) {
       return "confirmation";
     }
     if (/tool[_\s-]?use|tool[_\s-]?call|mcp_tool_call|command_execution|web_search/.test(normalizedKind)) {
@@ -511,7 +739,7 @@ function resolveTimelineEventKind(message: AgentConversationMessage): TimelineEv
   const traceKind = metadataString(message, ["traceKind"]);
   if (traceKind) {
     const normalizedTraceKind = traceKind.toLowerCase();
-    if (/approval|confirm|permission|human/.test(normalizedTraceKind)) {
+    if (/approval|confirm|permission|waiting[_\s-]?human|human[_\s-]?in[_\s-]?the[_\s-]?loop/.test(normalizedTraceKind)) {
       return "confirmation";
     }
     if (/tool[_\s-]?use|tool[_\s-]?call|mcp_tool_call|command_execution|web_search/.test(normalizedTraceKind)) {
@@ -537,15 +765,21 @@ function timelineLabel(message: AgentConversationMessage, copy: ReturnType<typeo
   }
   switch (resolveTimelineEventKind(message)) {
     case "tool_call":
-      return copy("Tool Call", "Tool Call");
+      return copy("Tool Call", "工具调用");
     case "execution_result":
-      return copy("Tool Result", "Tool Result");
+      if (resolveTimelineResultTone(message) === "error") {
+        return isToolRelatedTimelineMessage(message) ? copy("Tool Error", "工具异常") : copy("Run Failed", "运行失败");
+      }
+      if (resolveTimelineResultTone(message) === "warning") {
+        return copy("Run Status", "运行状态");
+      }
+      return isToolRelatedTimelineMessage(message) ? copy("Tool Result", "工具结果") : copy("Run Result", "运行结果");
     case "confirmation":
       return copy("Needs Confirmation", "需要确认");
     case "human":
       return copy("Human Instruction", "人工指令");
     case "thinking":
-      return copy("Thinking", "Thinking");
+      return copy("Thinking", "思考中");
   }
 }
 
@@ -558,7 +792,17 @@ function timelineSummary(message: AgentConversationMessage, copy: ReturnType<typ
     case "tool_call":
       return copy("Calling connected tool", "调用已连接工具");
     case "execution_result":
-      return copy("Tool or runtime returned result", "工具或 runtime 返回结果");
+      if (resolveTimelineResultTone(message) === "error") {
+        return isToolRelatedTimelineMessage(message)
+          ? copy("Connected tool returned an error", "已连接工具返回异常")
+          : copy("Agent stopped with an error", "Agent 因错误停止");
+      }
+      if (resolveTimelineResultTone(message) === "warning") {
+        return copy("Agent is retrying a transient issue", "Agent 正在重试暂时性异常");
+      }
+      return isToolRelatedTimelineMessage(message)
+        ? copy("Connected tool returned result", "已连接工具返回结果")
+        : copy("Agent returned business output", "Agent 返回业务产出");
     case "confirmation":
       return copy("Waiting for human decision", "等待人工决策");
     default:
@@ -577,35 +821,67 @@ function normalizedText(value: string): string {
   return value.replace(/\s+/g, " ").trim();
 }
 
-function formatTimelineTime(value: string): string {
-  const numericValue = /^\d+$/.test(value.trim()) ? Number(value.trim()) : null;
-  const date = numericValue == null
-    ? new Date(value)
-    : new Date(numericValue > 1_000_000_000_000 ? numericValue : numericValue * 1000);
-  if (Number.isNaN(date.getTime())) {
-    return formatDateTime(value);
+function compactRunResultLines(content: string, title: string | null): string[] {
+  const titleText = title ? normalizedText(title) : "";
+  const lines = content
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  if (titleText && lines.length && normalizedText(lines[0]) === titleText) {
+    return lines.slice(1);
   }
-  return date.toLocaleTimeString([], {
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  });
+  return lines;
+}
+
+function priorityRunResultPreviewLines(lines: string[], maxLines = 10): string[] {
+  const priorityHeaderIndex = lines.findIndex((line) =>
+    /^(已阻塞|阻塞|受阻|失败原因|错误原因|blocked|blockers?|failure reason|error reason)(\b|[:：\s]*$)/i.test(line),
+  );
+  if (priorityHeaderIndex < 0) {
+    return lines.slice(0, maxLines);
+  }
+
+  const preview: string[] = [];
+  for (let index = priorityHeaderIndex; index < lines.length && preview.length < maxLines; index += 1) {
+    const line = lines[index];
+    const isNewSection = index > priorityHeaderIndex
+      && !/^[-*•\d]+[.)、]?\s*/.test(line)
+      && !/^(原因|因为|由于|目标|无法|不能|未能|blocked|reason)(\b|[:：\s])/i.test(line);
+    if (isNewSection) {
+      break;
+    }
+    preview.push(line);
+  }
+  return preview.length ? preview : lines.slice(0, maxLines);
+}
+
+function formatTimelineTime(value: string): string {
+  return formatDateTime(value);
 }
 
 function renderTimelinePayload(message: AgentConversationMessage, blocks: Block[], copy: ReturnType<typeof useI18n>["copy"]): React.ReactNode {
   const eventKind = resolveTimelineEventKind(message);
+  const resultTone = resolveTimelineResultTone(message);
+  const isToolRelated = isToolRelatedTimelineMessage(message);
+  const isRunResult = eventKind === "execution_result" && !isToolRelated;
   const metadataPairs = timelineMetadataPairs(message);
   const toolName = metadataString(message, ["toolName", "tool_name", "name"]);
   const contentLine = firstContentLine(message.content);
-  const payloadTitle = eventKind === "execution_result"
+  const payloadTitle = eventKind === "execution_result" && !isRunResult
     ? contentLine || toolName || message.title || timelineSummary(message, copy)
-    : message.title || toolName || timelineSummary(message, copy);
+    : message.title || toolName || contentLine || timelineSummary(message, copy);
   const shouldRenderBody = Boolean(
     message.content && !(eventKind === "execution_result" && contentLine && normalizedText(message.content) === normalizedText(contentLine)),
   );
   const payloadHint =
     eventKind === "tool_call"
       ? copy("Parameters", "参数")
+      : isRunResult
+        ? resultTone === "error"
+          ? copy("Error result", "错误结果")
+          : resultTone === "warning"
+            ? copy("Retrying", "重试中")
+            : copy("Business output", "业务产出")
       : eventKind === "confirmation"
         ? copy("Human-in-the-loop", "Human-in-the-loop")
         : null;
@@ -618,6 +894,14 @@ function renderTimelinePayload(message: AgentConversationMessage, blocks: Block[
           : message.status === "streaming"
             ? copy("Assistant is responding…", "Assistant 正在输出…")
             : timelineSummary(message, copy)}
+        {message.metadata?.payload ? (
+          <details className="agent-execution-payload__details">
+            <summary>{copy("Show event details", "查看事件细节")}</summary>
+            <div className="agent-execution-payload__details-body">
+              <pre className="agent-execution-payload__raw">{JSON.stringify(message.metadata.payload, null, 2)}</pre>
+            </div>
+          </details>
+        ) : null}
       </div>
     );
   }
@@ -640,16 +924,226 @@ function renderTimelinePayload(message: AgentConversationMessage, blocks: Block[
           ))}
         </div>
       ) : null}
-      {shouldRenderBody ? (
+      {shouldRenderBody && isRunResult ? (
+        <div className="agent-execution-payload__body agent-execution-payload__body--compact">
+          {priorityRunResultPreviewLines(compactRunResultLines(message.content, payloadTitle)).map((line, index) => (
+            <p className="agent-execution-payload__summary-line" key={`${message.id}-summary-${index}`}>{line}</p>
+          ))}
+          {compactRunResultLines(message.content, payloadTitle).length > priorityRunResultPreviewLines(compactRunResultLines(message.content, payloadTitle)).length ? (
+            <details className="agent-execution-payload__details">
+              <summary>{copy("Show full output", "查看完整输出")}</summary>
+              <div className="agent-execution-payload__details-body">
+                {blocks.map((block, index) => renderBlock(block, `${message.id}-timeline-full-${index}`))}
+              </div>
+            </details>
+          ) : null}
+          {message.metadata?.payload ? (
+            <details className="agent-execution-payload__details">
+              <summary>{copy("Show event details", "查看事件细节")}</summary>
+              <div className="agent-execution-payload__details-body">
+                <pre className="agent-execution-payload__raw">{JSON.stringify(message.metadata.payload, null, 2)}</pre>
+              </div>
+            </details>
+          ) : null}
+        </div>
+      ) : shouldRenderBody ? (
         <div className="agent-execution-payload__body">
           {blocks.map((block, index) => renderBlock(block, `${message.id}-timeline-${index}`))}
+          {message.metadata?.payload ? (
+            <details className="agent-execution-payload__details">
+              <summary>{copy("Show event details", "查看事件细节")}</summary>
+              <div className="agent-execution-payload__details-body">
+                <pre className="agent-execution-payload__raw">{JSON.stringify(message.metadata.payload, null, 2)}</pre>
+              </div>
+            </details>
+          ) : null}
         </div>
       ) : null}
     </div>
   );
 }
 
-function TimelineNodeIcon({ kind }: { kind: TimelineEventKind }): JSX.Element {
+function toolGroupName(messages: AgentConversationMessage[]): string {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    const data = timelinePayloadData(message);
+    const name = metadataString(message, ["toolName", "tool_name", "name"])
+      ?? (typeof data?.tool_name === "string" && data.tool_name.trim() ? data.tool_name.trim() : null)
+      ?? (typeof data?.name === "string" && data.name.trim() ? data.name.trim() : null);
+    if (name) {
+      return name;
+    }
+  }
+  return "准备工具调用";
+}
+
+function isUnsupportedMcpResourceListMessage(message: AgentConversationMessage): boolean {
+  const data = timelinePayloadData(message);
+  const toolName = (
+    metadataString(message, ["toolName", "tool_name", "name"])
+    ?? (typeof data?.tool_name === "string" ? data.tool_name : "")
+    ?? (typeof data?.name === "string" ? data.name : "")
+  ).trim();
+  if (toolName !== "list_mcp_resources") {
+    return false;
+  }
+  const detail = `${message.content || ""} ${typeof data?.content === "string" ? data.content : ""}`.toLowerCase();
+  return detail.includes("resources/list") && (detail.includes("method not found") || detail.includes("unknown method"));
+}
+
+function toolGroupStatus(messages: AgentConversationMessage[], copy: ReturnType<typeof useI18n>["copy"]): { label: string; tone: "running" | "success" | "error" } {
+  const hasError = messages.some((message) => {
+    const data = timelinePayloadData(message);
+    const kind = timelinePayloadKind(message).toLowerCase();
+    return !isUnsupportedMcpResourceListMessage(message)
+      && (kind.includes("error") || data?.is_error === true || metadataString(message, ["isError"]) === "true");
+  });
+  if (hasError) {
+    return { label: copy("Failed", "失败"), tone: "error" };
+  }
+  if (messages.some(isUnsupportedMcpResourceListMessage)) {
+    return { label: copy("Resources unsupported", "资源接口不支持"), tone: "running" };
+  }
+  const hasResult = messages.some((message) => {
+    const kind = timelinePayloadKind(message).toLowerCase();
+    return kind.includes("result");
+  });
+  if (hasResult) {
+    return { label: copy("Completed", "已完成"), tone: "success" };
+  }
+  const hasStarted = messages.some((message) => timelinePayloadKind(message).toLowerCase().includes("started"));
+  return { label: hasStarted ? copy("Running", "调用中") : copy("Preparing", "准备中"), tone: "running" };
+}
+
+function compactToolText(value: string, maxLength = 220): string {
+  const normalized = value
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join(" ");
+  return normalized.length > maxLength ? `${normalized.slice(0, maxLength)}...` : normalized;
+}
+
+function toolStageSummary(message: AgentConversationMessage): string | null {
+  const data = timelinePayloadData(message);
+  const payloadContent = compactValue(data?.content);
+  const payloadInput = compactValue(data?.input);
+  const payloadDelta = compactValue(data?.delta);
+  const body = compactToolText(message.content || payloadContent || payloadInput || payloadDelta || "");
+  if (!body) {
+    return null;
+  }
+  return body;
+}
+
+function toolGroupInputSummary(messages: AgentConversationMessage[]): string | null {
+  const completed = [...messages].reverse().find((message) => {
+    const kind = timelinePayloadKind(message).toLowerCase();
+    return kind.includes("use_completed") || kind.includes("started");
+  });
+  const completedData = completed ? timelinePayloadData(completed) : null;
+  if (completedData?.input && typeof completedData.input === "object") {
+    return compactToolText(JSON.stringify(completedData.input), 260);
+  }
+  const deltas = messages
+    .map((message) => timelinePayloadData(message))
+    .map((data) => typeof data?.delta === "string" ? data.delta : "")
+    .filter(Boolean)
+    .join("")
+    .trim();
+  return deltas ? compactToolText(deltas, 260) : null;
+}
+
+function toolGroupStages(messages: AgentConversationMessage[], copy: ReturnType<typeof useI18n>["copy"]): Array<{ key: string; label: string; detail: string }> {
+  const stages: Array<{ key: string; label: string; detail: string }> = [];
+  const status = toolGroupStatus(messages, copy);
+  const appendStage = (key: string, label: string, message: AgentConversationMessage | undefined, fallback: string) => {
+    if (!message) {
+      return;
+    }
+    stages.push({
+      key,
+      label,
+      detail: key === "prepare" ? fallback : toolStageSummary(message) ?? fallback,
+    });
+  };
+
+  appendStage(
+    "prepare",
+    copy("Prepared input", "准备参数"),
+    messages.find((message) => {
+      const kind = timelinePayloadKind(message).toLowerCase();
+      return kind.includes("input_streamed") || kind.includes("use_completed");
+    }),
+    toolGroupInputSummary(messages) ?? copy("Tool input prepared.", "工具参数已准备。"),
+  );
+  appendStage(
+    "started",
+    copy("Called tool", "执行调用"),
+    messages.find((message) => timelinePayloadKind(message).toLowerCase().includes("started")),
+    copy("Tool call has started.", "工具调用已发起。"),
+  );
+  appendStage(
+    "result",
+    status.label === copy("Resources unsupported", "资源接口不支持")
+      ? copy("Resources unsupported", "资源接口不支持")
+      : status.tone === "error" ? copy("Returned error", "返回异常") : copy("Returned result", "返回结果"),
+    [...messages].reverse().find((message) => {
+      const kind = timelinePayloadKind(message).toLowerCase();
+      return kind.includes("result") || kind.includes("error");
+    }),
+    copy("Tool returned.", "工具已返回。"),
+  );
+
+  return stages.length ? stages : [{ key: "event", label: copy("Tool activity", "工具活动"), detail: copy("Tool event recorded.", "已记录工具事件。") }];
+}
+
+function renderToolGroupPayload(item: TimelineRenderItem, copy: ReturnType<typeof useI18n>["copy"]): React.ReactNode {
+  const status = toolGroupStatus(item.messages, copy);
+  const name = toolGroupName(item.messages);
+  const rawRecordCount = item.messages.length;
+  return (
+    <div className="agent-tool-call" data-tool-status={status.tone}>
+      <div className="agent-tool-call__head">
+        <span className="agent-tool-call__icon" aria-hidden="true" />
+        <div>
+          <strong>{name}</strong>
+          <span>{status.label}</span>
+        </div>
+      </div>
+      <div className="agent-tool-call__stages">
+        {toolGroupStages(item.messages, copy).map((stage) => (
+          <div key={`${item.id}-${stage.key}`} className="agent-tool-call__stage">
+            <span>{stage.label}</span>
+            <p>{stage.detail}</p>
+          </div>
+        ))}
+      </div>
+      <details className="agent-tool-call__raw">
+        <summary>{copy("Show raw tool events", "查看原始工具事件")} · {rawRecordCount}</summary>
+        <div className="agent-tool-call__raw-body">
+          {item.messages.map((message) => (
+            <section key={`${item.id}-${message.id}`}>
+              <strong>{message.title || timelinePayloadKind(message) || timelineLabel(message, copy)}</strong>
+              {message.content ? <pre>{message.content}</pre> : null}
+              <pre>{JSON.stringify(message.metadata?.payload ?? message.metadata ?? {}, null, 2)}</pre>
+            </section>
+          ))}
+        </div>
+      </details>
+    </div>
+  );
+}
+
+function TimelineNodeIcon({ kind, tone = "neutral" }: { kind: TimelineEventKind; tone?: TimelineResultTone }): JSX.Element {
+  if (kind === "execution_result" && tone === "error") {
+    return (
+      <svg viewBox="0 0 18 18" aria-hidden="true">
+        <path d="M9 3.2 15 14H3L9 3.2Z" />
+        <path d="M9 7v3.2M9 12.3h.01" />
+      </svg>
+    );
+  }
   switch (kind) {
     case "tool_call":
       return (
@@ -713,31 +1207,38 @@ export function ChatMessageStream({ loading, messages, renderTimelineAttachment,
   }
 
   if (variant === "timeline") {
+    const timelineItems = buildTimelineRenderItems(messages);
     return (
       <div className="agent-execution-timeline">
-        {messages.map((message) => {
+        {timelineItems.map((item) => {
+          const message = item.primary;
           const blocks = contentToBlocks(message.content);
-          const eventKind = resolveTimelineEventKind(message);
+          const eventKind = item.kind;
+          const resultTone = resolveTimelineResultTone(message);
+          const suppressSummary = item.toolGroup || (eventKind === "execution_result" && !isToolRelatedTimelineMessage(message));
           return (
             <article
-              key={message.id}
+              key={item.id}
               className="agent-execution-event"
               data-role={message.role}
               data-event-kind={eventKind}
+              data-result-tone={eventKind === "execution_result" ? resultTone : undefined}
+              data-status={message.status}
+              data-tool-group={item.toolGroup ? "true" : undefined}
             >
-              <div className="agent-execution-event__time">{formatTimelineTime(message.createdAt)}</div>
               <div className="agent-execution-event__node">
-                <TimelineNodeIcon kind={eventKind} />
+                <TimelineNodeIcon kind={eventKind} tone={resultTone} />
               </div>
               <div className="agent-execution-event__body">
                 <div className="agent-execution-event__head">
                   <div>
-                    <strong>{timelineLabel(message, copy)}</strong>
-                    {eventKind === "execution_result" ? null : <span>{timelineSummary(message, copy)}</span>}
+                    <strong>{item.toolGroup ? copy("Tool Call", "工具调用") : timelineLabel(message, copy)}</strong>
+                    {suppressSummary ? null : <span>{timelineSummary(message, copy)}</span>}
                   </div>
+                  <time>{formatTimelineTime(message.createdAt)}</time>
                 </div>
-                {renderTimelinePayload(message, blocks, copy)}
-                {renderTimelineAttachment?.(message) ?? null}
+                {item.toolGroup ? renderToolGroupPayload(item, copy) : renderTimelinePayload(message, blocks, copy)}
+                {item.messages.map((itemMessage) => renderTimelineAttachment?.(itemMessage) ?? null)}
               </div>
             </article>
           );

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -42,6 +43,7 @@ from recruit_station.services.recruit_station import (
     normalize_prompt_config,
     resolve_context_policy,
     resolve_memory_policy,
+    _refresh_builtin_product_prompt_config,
 )
 from recruit_station.services.dashboard import DashboardService
 from recruit_station.services.download_attribution import LocalDownloadAttributionService
@@ -108,11 +110,14 @@ class AppContainer:
         )
 
         learning_writer = LearningWriter(session_factory)
+        runtime_settings = resolved_settings.provider_runtime_settings()
         scene_context_service = SceneContextService(
             session_factory=session_factory,
             provider=provider,
             tool_registry=scene_context_tool_registry,
             plugin_host=plugin_host,
+            anti_detection_policy=dict(runtime_settings.anti_detection_policy),
+            behavior_budget=dict(runtime_settings.behavior_budget),
         )
         _register_delegate_scene_context_tool(tool_registry, scene_context_service=scene_context_service)
         autonomous_adapter = AutonomousAdapter(
@@ -123,6 +128,10 @@ class AppContainer:
             learning_writer=learning_writer,
             mcp_registry=mcp_registry,
             memory_file_store=memory_file_store,
+            anti_detection_policy=dict(runtime_settings.anti_detection_policy),
+            behavior_budget=dict(runtime_settings.behavior_budget),
+            max_context_chars=resolved_settings.autonomous_max_context_chars,
+            compaction_summary_max_chars=resolved_settings.autonomous_compaction_summary_max_chars,
         )
         heartbeat = Heartbeat(session_factory=session_factory, autonomous_adapter=autonomous_adapter)
 
@@ -182,6 +191,7 @@ class AppContainer:
     def reload_settings(self, settings: AppSettings) -> None:
         self.settings = settings
         self.providers, self.provider = _build_provider_bundle(settings)
+        runtime_settings = settings.provider_runtime_settings()
         self.tool_registry, self.scene_context_tool_registry = _build_runtime_tool_registries(
             settings=settings,
             session_factory=self.session_factory,
@@ -194,10 +204,14 @@ class AppContainer:
             provider=self.provider,
             tool_registry=self.scene_context_tool_registry,
             plugin_host=self.plugin_host,
+            anti_detection_policy=dict(runtime_settings.anti_detection_policy),
+            behavior_budget=dict(runtime_settings.behavior_budget),
         )
         _register_delegate_scene_context_tool(self.tool_registry, scene_context_service=self.scene_context_service)
         self.autonomous_adapter.provider = self.provider
         self.autonomous_adapter.tool_registry = self.tool_registry
+        self.autonomous_adapter.anti_detection_policy = dict(runtime_settings.anti_detection_policy)
+        self.autonomous_adapter.behavior_budget = dict(runtime_settings.behavior_budget)
         self.memory_file_store = _build_memory_file_store(settings)
         self.autonomous_adapter.memory_file_store = self.memory_file_store
         self.assistant_adapter.provider = self.provider
@@ -457,12 +471,11 @@ def _build_runtime_tool_registries(
     )
 
     for tool in plugin_host.tool_registry.tools.values():
-        if is_approval_tool(tool):
-            parent_registry.register(tool.clone())
-            scene_registry.register(tool.clone())
-            continue
         if is_scene_context_tool(tool):
             scene_registry.register(tool.clone())
+            continue
+        if is_approval_tool(tool):
+            parent_registry.register(tool.clone())
             continue
         parent_registry.register(tool.clone())
 
@@ -572,8 +585,12 @@ def _seed_builtin_agent_definitions(session_factory: sessionmaker[Session]) -> N
             updates["memory_policy"] = resolved_memory_policy
         default_definition = _default_agent_definition()
         for key in ("product_bindings", "product_config", "product_projections"):
-            if dict(getattr(definition, key) or {}) != dict(default_definition[key]):
-                updates[key] = default_definition[key]
+            existing_value = dict(getattr(definition, key) or {})
+            merged_value = _merge_missing_default_config(existing_value, dict(default_definition[key]))
+            if key == "product_config":
+                merged_value = _refresh_builtin_product_prompt_config(merged_value)
+            if merged_value != existing_value:
+                updates[key] = merged_value
         metadata = dict(definition.agent_metadata or {})
         metadata.update({"supports_builtin_agents": True, "current_primary_definition": "recruit-station"})
         if metadata != dict(definition.agent_metadata or {}):
@@ -584,3 +601,14 @@ def _seed_builtin_agent_definitions(session_factory: sessionmaker[Session]) -> N
 
 def _default_agent_definition() -> dict[str, Any]:
     return default_agent_definition()
+
+
+def _merge_missing_default_config(existing: dict[str, Any], defaults: dict[str, Any]) -> dict[str, Any]:
+    merged = deepcopy(existing)
+    for key, value in defaults.items():
+        if key not in merged:
+            merged[key] = deepcopy(value)
+            continue
+        if isinstance(merged.get(key), dict) and isinstance(value, dict):
+            merged[key] = _merge_missing_default_config(dict(merged[key]), value)
+    return merged

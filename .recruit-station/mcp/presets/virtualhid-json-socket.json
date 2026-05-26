@@ -9,8 +9,8 @@
     "VIRTUALHID_SOCKET": "${endpoint}"
   },
   "runtime_tool_capabilities": {
-    "default": ["scene", "computer"],
-    "read_only": ["computer_read"],
+    "default": ["mcp", "hid", "computer"],
+    "read_only": ["computer_read", "read_only"],
     "mutating": ["computer_write"]
   },
   "runtime_tool_read_only_names": [

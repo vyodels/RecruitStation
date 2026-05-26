@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Generic, TypeVar
 
 from pydantic import BaseModel
-from sqlalchemy import func, or_, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -21,6 +21,7 @@ from recruit_station.models import (
     ApplicationSyncRecord,
     ExecutionGraphProjection,
     ExecutionTrace,
+    AgentPendingUserInput,
     AgentRun,
     AgentRunCheckpoint,
     AgentRuntimeEvent,
@@ -1604,6 +1605,32 @@ class TaskQueueRepository:
         self.session.refresh(record)
         return record
 
+    def claim_next_for_agent_kind(self, agent_kind: str, *, locked_by: str = "scheduler") -> TaskQueueItem | None:
+        normalized_agent_kind = str(agent_kind or "").strip()
+        if not normalized_agent_kind:
+            return None
+        now = utcnow()
+        stmt = (
+            select(TaskQueueItem)
+            .join(AgentRun, AgentRun.queue_task_id == TaskQueueItem.id)
+            .where(
+                TaskQueueItem.status == "pending",
+                AgentRun.agent_kind == normalized_agent_kind,
+                or_(TaskQueueItem.scheduled_for.is_(None), TaskQueueItem.scheduled_for <= now),
+            )
+            .order_by(TaskQueueItem.priority.desc(), TaskQueueItem.created_at.asc(), TaskQueueItem.id.asc())
+        )
+        record = self.session.scalars(stmt).first()
+        if record is None:
+            return None
+        record.status = "running"
+        record.locked_at = utcnow()
+        record.locked_by = locked_by
+        self._append_audit_event(record, "claimed", locked_by=locked_by, attempts=record.attempts)
+        self.session.commit()
+        self.session.refresh(record)
+        return record
+
     def mark_pending(self, task_id: str, *, attempts: int | None = None, error: str | None = None) -> TaskQueueItem | None:
         record = self.session.get(TaskQueueItem, task_id)
         if record is None:
@@ -1663,6 +1690,88 @@ class TaskQueueRepository:
         if recovered:
             self.session.commit()
         return recovered
+
+
+class AgentPendingUserInputRepository:
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def enqueue_prompt(
+        self,
+        *,
+        agent_kind: str,
+        conversation_id: str,
+        message: str,
+        run: AgentRun | None = None,
+        priority: str = "next",
+        queued_by: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> AgentPendingUserInput:
+        normalized_priority = str(priority or "next").strip().lower()
+        if normalized_priority not in {"now", "next", "later"}:
+            normalized_priority = "next"
+        record = AgentPendingUserInput(
+            agent_kind=str(agent_kind or "").strip(),
+            conversation_id=str(conversation_id or "").strip(),
+            run_pk=None if run is None else run.id,
+            run_id=None if run is None else run.run_id,
+            mode="prompt",
+            priority=normalized_priority,
+            delivery="after_next_tool_call",
+            status="pending",
+            message=str(message or ""),
+            queued_by=queued_by,
+            input_metadata=dict(metadata or {}),
+        )
+        self.session.add(record)
+        self.session.flush()
+        return record
+
+    def list_pending_prompts(
+        self,
+        *,
+        agent_kind: str,
+        conversation_id: str | None = None,
+        run_pk: str | None = None,
+        limit: int = 20,
+    ) -> list[AgentPendingUserInput]:
+        stmt = select(AgentPendingUserInput).where(
+            AgentPendingUserInput.agent_kind == str(agent_kind or "").strip(),
+            AgentPendingUserInput.status == "pending",
+            AgentPendingUserInput.mode == "prompt",
+            AgentPendingUserInput.delivery == "after_next_tool_call",
+        )
+        if conversation_id:
+            stmt = stmt.where(AgentPendingUserInput.conversation_id == conversation_id)
+        if run_pk:
+            stmt = stmt.where(AgentPendingUserInput.run_pk == run_pk)
+        stmt = stmt.order_by(
+            case(
+                (AgentPendingUserInput.priority == "now", 0),
+                (AgentPendingUserInput.priority == "next", 1),
+                else_=2,
+            ),
+            AgentPendingUserInput.created_at.asc(),
+            AgentPendingUserInput.id.asc(),
+        ).limit(limit)
+        return list(self.session.scalars(stmt).all())
+
+    def mark_consumed(
+        self,
+        records: list[AgentPendingUserInput],
+        *,
+        claimed_by: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        now = utcnow()
+        for record in records:
+            record.status = "consumed"
+            record.claimed_at = record.claimed_at or now
+            record.claimed_by = claimed_by
+            record.completed_at = now
+            input_metadata = dict(record.input_metadata or {})
+            input_metadata.update(dict(metadata or {}))
+            record.input_metadata = input_metadata
 
 
 class SettingsRepository:

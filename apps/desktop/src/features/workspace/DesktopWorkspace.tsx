@@ -430,7 +430,7 @@ export function DesktopWorkspace(): JSX.Element {
     setTab("home");
   };
 
-  const openAgents = (panel: "conversation" | "config", agent: "assistant" | "autonomous") => {
+  const openAgents = (panel: "conversation" | "config", agent: "assistant" | "autonomous" | "jd_sync") => {
     focusAgent(agent, panel);
     setTab("agents");
   };

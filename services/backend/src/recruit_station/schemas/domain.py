@@ -152,6 +152,15 @@ class JobDescriptionUpdate(BaseModel):
     source: str | None = None
 
 
+class JobDescriptionBulkDeleteRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    job_description_ids: list[str] = Field(
+        validation_alias=AliasChoices("job_description_ids", "jobDescriptionIds"),
+        serialization_alias="jobDescriptionIds",
+    )
+
+
 class JobDescriptionRead(JobDescriptionBase):
     model_config = ConfigDict(from_attributes=True)
 
@@ -169,6 +178,13 @@ class JobDescriptionPageRead(BaseModel):
     limit: int
     offset: int
     has_next: bool = Field(serialization_alias="hasNext")
+
+
+class JobDescriptionBulkDeleteRead(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    deleted_ids: list[str] = Field(default_factory=list, serialization_alias="deletedIds")
+    missing_ids: list[str] = Field(default_factory=list, serialization_alias="missingIds")
 
 
 class JobDescriptionFunnelStepRead(BaseModel):
@@ -1860,6 +1876,8 @@ class PlatformSettingsRead(BaseModel):
     allowOutboundMessaging: bool
     maxConcurrentRuns: int = 1
     minFunnelCandidates: int = 0
+    behaviorBudget: dict[str, Any] = Field(default_factory=dict)
+    antiDetectionPolicy: dict[str, Any] = Field(default_factory=dict)
 
 
 class PlatformSettingsUpdate(BaseModel):
@@ -1869,6 +1887,8 @@ class PlatformSettingsUpdate(BaseModel):
     allowOutboundMessaging: bool | None = None
     maxConcurrentRuns: int | None = None
     minFunnelCandidates: int | None = None
+    behaviorBudget: dict[str, Any] | None = None
+    antiDetectionPolicy: dict[str, Any] | None = None
 
 
 class UserProfileSettingsRead(BaseModel):
@@ -1981,6 +2001,11 @@ class McpServerRead(McpServerBase):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
+    standard_config: dict[str, Any] = Field(
+        default_factory=dict,
+        validation_alias=AliasChoices("standard_config", "standardConfig"),
+        serialization_alias="standardConfig",
+    )
     health_status: str
     health_error: str | None = None
     last_health_at: int | None = None

@@ -45,7 +45,7 @@ export type ApiTransport = "http" | "offline";
 export type HealthStatus = "healthy" | "warning" | "critical";
 export type ApprovalStatus = "pending" | "approved" | "rejected";
 export type ApplicationStatus = string;
-export type AgentKind = "assistant" | "autonomous";
+export type AgentKind = "assistant" | "autonomous" | "jd_sync";
 export type AgentWorkspaceControlState = "stopped" | "running" | "paused" | "terminating";
 export type ChatOverlayPanelKey =
   | "conversation"
@@ -472,7 +472,9 @@ export interface OperatorInteractionRecord {
 }
 
 export type AgentDefinitionConfig = SharedAgentDefinitionConfig;
-export type AgentDefinitionRecord = SharedAgentDefinition;
+export type AgentDefinitionRecord = SharedAgentDefinition & {
+  productConfig?: Record<string, unknown>;
+};
 export type AgentProductBindingRecord = SharedAgentProductBinding;
 
 export interface ApplicationConversationEntry {
@@ -661,6 +663,7 @@ export interface AgentWorkspaceRecord {
   memories: AgentMemorySummary[];
   skills: SkillRecord[];
   tools: AgentToolSummary[];
+  mcps: McpServerRecord[];
   workspaceControl?: AgentWorkspaceControl | null;
   agentDefinition: AgentDefinitionRecord;
   productBinding: AgentProductBindingRecord;
@@ -693,6 +696,10 @@ export interface AgentWorkspaceControl {
   updatedAt?: string | null;
   autonomousPaused: boolean;
   terminatedRunIds?: string[];
+  runStartBlocked?: {
+    reason: string;
+    missingFields?: string[];
+  } | null;
 }
 
 export interface RecruitingPolicyConfig {
@@ -737,6 +744,7 @@ export interface AssistantTurnStreamEvent {
 export interface AssistantMessageRequest {
   conversationId: string;
   message: string;
+  priority?: "now" | "next" | "later";
 }
 
 export interface AssistantMessageRequestResult {
@@ -745,9 +753,20 @@ export interface AssistantMessageRequestResult {
   status: string;
 }
 
+export interface AgentPendingUserInputAfterNextToolCallRequest extends AssistantMessageRequest {
+  userId?: string | null;
+  title?: string | null;
+}
+
+export interface AgentPendingUserInputAfterNextToolCallRequestResult extends AssistantMessageRequestResult {
+  inputId?: string | null;
+  runId?: string | null;
+}
+
 export interface AutonomousRunStartRequest {
   title: string;
   instruction: string;
+  requestMessage?: string | null;
   kind?: string | null;
   jdId?: string | null;
   candidateCountTarget?: number | null;
@@ -846,6 +865,7 @@ export interface McpServerRecord {
   presetKey?: string | null;
   authConfig: Record<string, unknown>;
   serverMetadata: Record<string, unknown>;
+  standardConfig: Record<string, unknown>;
   healthStatus: string;
   healthError?: string | null;
   lastHealthAt?: string | null;
@@ -895,6 +915,8 @@ export interface SettingsSnapshot {
     allowOutboundMessaging: boolean;
     maxConcurrentRuns: number;
     minFunnelCandidates: number;
+    behaviorBudget?: Record<string, unknown>;
+    antiDetectionPolicy?: Record<string, unknown>;
   };
   userProfile: {
     nickname: string;

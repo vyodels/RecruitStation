@@ -12,6 +12,7 @@ def test_product_limits_split_between_scene_execution_and_turn() -> None:
 
     assert scene_limits.token_budget is None
     assert scene_limits.max_llm_invocations > 0
+    assert scene_limits.scene_turn_timeout_seconds > scene_limits.tool_timeout_seconds
     assert scene_limits.max_wakeup_delay_seconds >= scene_limits.min_wakeup_delay_seconds
     assert turn_limits.max_llm_invocations is None
     assert turn_limits.turn_timeout_seconds is None

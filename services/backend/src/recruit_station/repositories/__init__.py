@@ -10,6 +10,7 @@ from .domain import (
     ApplicationSyncRecordRepository,
     ExecutionGraphProjectionRepository,
     ExecutionTraceRepository,
+    AgentPendingUserInputRepository,
     AgentRunCheckpointRepository,
     AgentRunRepository,
     AgentRuntimeEventRepository,

@@ -6,6 +6,8 @@ from sqlalchemy.orm import Session
 from recruit_station.api.deps import get_session
 from recruit_station.repositories import JobDescriptionRepository
 from recruit_station.schemas import (
+    JobDescriptionBulkDeleteRead,
+    JobDescriptionBulkDeleteRequest,
     JobDescriptionCreate,
     JobDescriptionFunnelStatsRead,
     JobDescriptionPageRead,
@@ -64,6 +66,29 @@ def list_job_descriptions(
 def create_job_description(payload: JobDescriptionCreate, session: Session = Depends(get_session)) -> JobDescriptionRead:
     item = JobDescriptionRepository(session).create(payload)
     return JobDescriptionRead.model_validate(item)
+
+
+@router.post("/bulk-delete", response_model=JobDescriptionBulkDeleteRead)
+def bulk_delete_job_descriptions(
+    payload: JobDescriptionBulkDeleteRequest,
+    session: Session = Depends(get_session),
+) -> JobDescriptionBulkDeleteRead:
+    repo = JobDescriptionRepository(session)
+    requested_ids = list(dict.fromkeys(item.strip() for item in payload.job_description_ids if item.strip()))
+    if not requested_ids:
+        raise HTTPException(status_code=400, detail="jobDescriptionIds is required")
+
+    deleted_ids: list[str] = []
+    missing_ids: list[str] = []
+    for job_description_id in requested_ids:
+        item = repo.get(job_description_id)
+        if item is None:
+            missing_ids.append(job_description_id)
+            continue
+        deleted_ids.append(job_description_id)
+        session.delete(item)
+    session.commit()
+    return JobDescriptionBulkDeleteRead(deleted_ids=deleted_ids, missing_ids=missing_ids)
 
 
 @router.get("/{job_description_id}/funnel-stats", response_model=JobDescriptionFunnelStatsRead)

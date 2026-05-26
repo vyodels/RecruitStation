@@ -13,6 +13,7 @@ __pycache__
 .npm-cache
 recruit-station.db
 services/backend/recruit-station.db
+services/backend/agent.db
 services/backend/.mypy_cache
 services/backend/.ruff_cache
 services/backend/data
@@ -24,3 +25,4 @@ data
 apps/desktop/dist-electron
 apps/desktop/dist-renderer
 .release
+tmp/

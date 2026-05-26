@@ -643,11 +643,55 @@ def default_agent_definition() -> dict[str, Any]:
                 "definition_role": "interactive_projection",
                 "memory_scope": "agent_definition",
             },
+            "jd_sync": {
+                "enabled": True,
+                "session_key": "jd_sync",
+                "definition_role": "job_description_sync",
+                "memory_scope": "agent_definition",
+            },
         },
         "product_config": {
             "autonomous": {
                 "context_policy": default_context_policy(),
                 "memory_policy": default_memory_policy(),
+            },
+            "jd_sync": {
+                "prompt_config": {
+                    "system_prompt": (
+                        "你是 JD 同步 Agent。你只负责从人工已登录的招聘网站同步职位信息到本地 JD 库，不筛选候选人、不评分、不外联、不推进投递。"
+                        "读取招聘网站时，从用户配置的目标网页出发，根据页面可见导航和内容自行找到职位列表与职位详情；不得要求人工提前打开特定列表页或详情页。"
+                        "职位列表只用于发现待同步职位；必须继续进入或打开职位详情，完整读取岗位职责、任职要求、地点、部门等详情后，才能认为该职位可同步。"
+                        "如果当前只确认了列表或职位数量，不得把本轮标记为完成；应继续读取详情。只有遇到登录、验证码、权限、必要执行工具未注册或页面不可达等明确硬阻塞时才标记为阻塞。"
+                        "进入详情页、翻页、返回列表等网页动作必须按共享执行契约通过 browser-mcp 观察和 VirtualHID 执行链路完成；不得因为 browser 工具只读就放弃页面动作。"
+                        "遇到点击、返回、滚动、窗口未置前、短暂执行服务无响应、临时确认状态或光标/按键状态干扰等可恢复执行异常时，不得在第一次失败后结束；应重新观察、等待稳定、释放异常按键状态、选择页面上的其他同源入口或页面内导航控件，然后继续完成全量同步。"
+                        "恢复执行不是重复同一失败动作；每次恢复都要基于最新观察证据切换页面内路径，例如从当前详情返回职位列表、滚动到目标职位入口、或选择已观察到的下一个同源详情入口。"
+                        "不得主动聚焦浏览器地址栏、输入 URL 或粘贴 URL 作为恢复路径；如果缺少页面内可执行证据，应结构化说明 blocker。"
+                        "可恢复异常只能作为下一步恢复策略的输入，不能作为任务总结；只要目标站点仍可访问且还有职位未完整读取，本轮就应继续推进，不得主动结束。"
+                        "如果已经从列表发现多个职位，但本地写回数量少于发现数量或仍有任一职位缺少详情页证据，应继续打开剩余职位详情，不能输出最终总结。"
+                        "可以把已经完整读取详情的职位写入本地 JD 库作为进度；但在没有完成全量职位发现、全量详情读取、更新/下架识别和生效 JD 选择前，不得以“已完成部分同步”作为成功终局。"
+                        "只能基于已登录浏览器会话中的页面可见信息进行观察和整理；不得处理登录、验证码、账号切换或规避风控。"
+                        "如果浏览器会话无法连接、目标站点不可访问或页面证据不足，必须标记为阻塞，并说明需要人工恢复的条件。"
+                    ),
+                    "context_policy": {
+                        "memory_scope": "agent_definition",
+                        "share_global_context": True,
+                    },
+                    "response_policy": {
+                        "prefer_structured_output": True,
+                        "require_evidence_refs": True,
+                        "separate_fact_from_inference": True,
+                    },
+                },
+                "memory_policy": default_memory_policy(),
+                "jd_sync_config": {
+                    "executionSop": {
+                        "siteEntryUrl": "",
+                        "siteAccessRulesText": "复用人工提前登录好的浏览器会话\n目标网页可以是招聘网站任意可访问页面，由 Agent 根据页面可见导航和内容找到职位列表与职位详情\n不处理登录、验证码、账号切换或绕过风控\n只处理职位信息，不处理候选人",
+                    },
+                    "syncPolicy": {
+                        "jdSyncText": "从配置的招聘网站目标网页出发，根据页面可见导航和内容自行找到职位列表与职位详情，识别新增、更新和下架职位，并同步到本地 JD 库；同步过程只处理职位信息，不处理候选人。可以先记录已经完整读取详情的职位作为进度，但不能以部分同步作为成功终局，必须继续恢复并完成全量同步或明确说明还需要恢复的条件。",
+                    },
+                },
             },
             "assistant": {
                 "prompt_config": {
@@ -681,6 +725,37 @@ def default_agent_definition() -> dict[str, Any]:
                 "dashboard_config": {"layout": ["chat_sessions", "recent_activity"]},
                 "channel_config": {"chat": {"enabled": True, "requires_confirmation": True}},
             },
+            "jd_sync": {
+                "name": "JD Sync",
+                "description": "手动运行的 JD 同步 Agent，负责从招聘网站目标网页出发同步职位信息到本地 JD 库。",
+                "role_definition": {
+                    "identity": "JD 同步 Agent",
+                    "positioning": "在人工已登录招聘网站的前提下，从配置的目标网页出发同步职位信息到本地 JD 库的受限 Agent。",
+                    "duties": [
+                        "从配置的招聘网站目标网页出发，根据页面可见导航和内容找到职位列表与职位详情。",
+                        "根据职位标题、团队、地点和页面可见来源信息识别新增、更新和下架职位。",
+                        "将确认后的职位信息同步到本地 JD 库，并记录同步结果和异常。",
+                    ],
+                    "tone": "professional, concise, evidence-driven",
+                    "boundaries": [
+                        "不处理登录、验证码、账号切换或绕过风控。",
+                        "不筛选候选人、不评分、不外联、不推进投递流程。",
+                        "只处理招聘站点中的职位信息，不读取或操作候选人数据。",
+                    ],
+                    "success_criteria": [
+                        "本地 JD 库与招聘网站可见职位保持一致。",
+                        "新增、更新、下架结果可追踪。",
+                        "无法同步的职位有明确原因和证据。",
+                    ],
+                    "forbidden_actions": [
+                        "擅自处理账号登录或安全校验。",
+                        "擅自联系候选人或修改候选人状态。",
+                        "将 JD 同步任务扩展为候选人筛选或招聘执行任务。",
+                    ],
+                },
+                "dashboard_config": {"layout": ["job_description_sync", "agent_activity"]},
+                "channel_config": {"job_description_sync": {"enabled": True, "requires_confirmation": False}},
+            },
         },
         "agent_metadata": {
             "product_mode": "recruit_station",
@@ -698,6 +773,7 @@ def ensure_primary_agent_definition(session: Session) -> AgentDefinition:
         prompt_config = normalize_prompt_config(original_prompt_config)
         resolved_context_policy = resolve_context_policy(prompt_config)
         resolved_memory_policy = resolve_memory_policy(existing.memory_policy)
+        refreshed_product_config = _refresh_builtin_product_prompt_config(dict(existing.product_config or {}))
         patch: dict[str, Any] = {}
         if prompt_config != original_prompt_config:
             patch["prompt_config"] = prompt_config
@@ -706,6 +782,8 @@ def ensure_primary_agent_definition(session: Session) -> AgentDefinition:
             patch["prompt_config"] = prompt_config
         if existing.memory_policy != resolved_memory_policy:
             patch["memory_policy"] = resolved_memory_policy
+        if dict(existing.product_config or {}) != refreshed_product_config:
+            patch["product_config"] = refreshed_product_config
         if patch:
             existing = repo.update(existing, patch)
         return existing
@@ -720,6 +798,7 @@ def ensure_primary_agent_definition(session: Session) -> AgentDefinition:
         prompt_config = normalize_prompt_config(original_prompt_config)
         resolved_context_policy = resolve_context_policy(prompt_config)
         resolved_memory_policy = resolve_memory_policy(existing.memory_policy)
+        refreshed_product_config = _refresh_builtin_product_prompt_config(dict(existing.product_config or {}))
         patch: dict[str, Any] = {}
         if prompt_config != original_prompt_config:
             patch["prompt_config"] = prompt_config
@@ -728,9 +807,28 @@ def ensure_primary_agent_definition(session: Session) -> AgentDefinition:
             patch["prompt_config"] = prompt_config
         if existing.memory_policy != resolved_memory_policy:
             patch["memory_policy"] = resolved_memory_policy
+        if dict(existing.product_config or {}) != refreshed_product_config:
+            patch["product_config"] = refreshed_product_config
         if patch:
             existing = repo.update(existing, patch)
         return existing
+
+
+def _refresh_builtin_product_prompt_config(product_config: dict[str, Any]) -> dict[str, Any]:
+    default_product_config = dict(default_agent_definition().get("product_config") or {})
+    for agent_kind in ("jd_sync",):
+        default_kind_config = dict(default_product_config.get(agent_kind) or {})
+        default_prompt_config = dict(default_kind_config.get("prompt_config") or {})
+        if not default_prompt_config:
+            continue
+        kind_config = dict(product_config.get(agent_kind) or {})
+        prompt_config = dict(kind_config.get("prompt_config") or {})
+        for key in ("system_prompt", "context_policy", "response_policy"):
+            if key in default_prompt_config:
+                prompt_config[key] = default_prompt_config[key]
+        kind_config["prompt_config"] = prompt_config
+        product_config[agent_kind] = kind_config
+    return product_config
 
 
 def _default_recruit_station_system_prompt() -> str:
@@ -741,6 +839,8 @@ def _default_recruit_station_system_prompt() -> str:
             "默认覆盖 JD 同步、候选人发现、在线资料或在线简历读取、AI 评分、合规外联草拟、简历或补充材料索取、系统事实写回和后续交接。",
             "执行时优先利用当前会话、共享工作区、已有 JD、投递记录和可访问外部场景来拆解子任务。",
             "涉及外部站点时，优先复用普通浏览器里已经打开且可继续任务的页签；工具能力不足以确认时，应标记为工具能力阻塞。",
+            "自动化招聘网站操作必须遵守统一链路：先用 browser-mcp 的 browser_* 工具只读观察页面与元素，再基于 JD 策略和 SOP 做业务判断，写入/点击/输入等网页动作只能通过 VirtualHID 的 hid_action 执行，随后必须再次用 browser-mcp 观察确认页面结果，最后用 RecruitStation 业务工具写回 JD、候选人、沟通、评分或运行记录。",
+            "如果 browser-mcp 或 VirtualHID 未注册、不可用、schema 不符合标准 MCP、或实际 probe 失败，不得绕过为站点专用硬编码，也不得替代为直接 HTTP 抓取；必须输出明确的工具能力错误、缺失项和恢复建议。",
             "除非出现登录、验证码、权限、设备绑定、人工审批或其它明确 human-only blocker，否则不要只完成某一步就结束。",
             "若本轮只能完成一部分，在结果中明确区分已完成、待继续、已阻塞，以及每一项对应的系统内状态更新。",
         ]

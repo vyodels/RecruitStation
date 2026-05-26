@@ -6,6 +6,7 @@ _BLOCKED_STATUSES = {"blocked", "waiting_human", "escalate", "error"}
 _ACTIVE_STATUSES = {"queued", "running", "active", "pending"}
 _COMPLETED_STATUSES = {"completed", "approved", "resolved"}
 _FAILED_STATUSES = {"failed", "cancelled", "rejected", "interrupted", "error"}
+_IDLE_STATUSES = {"idle"}
 _HUMAN_ONLY_BLOCKER_MARKERS = ("登录", "captcha", "验证码", "权限", "授权", "扫码", "浏览器能力", "设备绑定")
 
 
@@ -154,6 +155,8 @@ def _build_business_summary(
         if status in {"cancelled", "interrupted", "rejected"}:
             return f"{action_label}：已停止。", "stopped"
         return f"{action_label}：执行失败。", "failed"
+    if status in _IDLE_STATUSES:
+        return f"{action_label}：已结束。", None
     if status == "draft":
         return f"{action_label}：待启动。", None
     return f"{action_label}：状态待确认。", None

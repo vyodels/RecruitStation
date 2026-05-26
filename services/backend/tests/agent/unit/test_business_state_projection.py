@@ -9,7 +9,7 @@ def test_sync_jd_blocked_summary_uses_run_fields() -> None:
         run_title="同步 JD（增量）",
         content={
             "status": "blocked",
-            "next_step": "请先在浏览器中打开并切换到招聘平台的职位列表或职位详情页面，然后继续同步。",
+            "next_step": "请先在浏览器中打开并切换到招聘网站任意可访问页面，Agent 会根据页面导航继续同步。",
         },
     )
 
@@ -45,3 +45,14 @@ def test_sync_jd_success_summary_uses_structured_counts() -> None:
     )
 
     assert projected["summary"] == "同步 JD（增量）：新增 2，更新 1，跳过 3。"
+
+
+def test_idle_run_summary_does_not_read_as_confirmation() -> None:
+    projected = project_runtime_business_state(
+        run_title="同步招聘站点 JD",
+        run_status="idle",
+        content={},
+    )
+
+    assert projected["status"] == "idle"
+    assert projected["summary"] == "同步招聘站点 JD：已结束。"
