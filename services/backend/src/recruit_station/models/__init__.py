@@ -40,6 +40,7 @@ from .domain import (
     EvolutionArtifact,
     ExecutionEpisode,
     ExecutionPlan,
+    ExternalObservationRawPayload,
     JobAssembly,
     JobDescription,
     JobDescriptionPlatformIdx,

@@ -291,7 +291,7 @@ def test_delegate_scene_context_tool_inherits_runtime_browser_target() -> None:
         llm_invocation_id="llm-1",
         tool_use_id="use-1",
         name="delegate_scene_context",
-        input={"instruction": "读取招聘站点职位列表与详情。"},
+        input={"instruction": "读取招聘站点职位列表与详情。", "max_llm_invocations": 2},
     )
 
     result = runtime_tool.handler.handle(call, context)
@@ -399,6 +399,13 @@ def test_jd_sync_delegate_scene_context_defaults_to_browser_and_computer_capabil
         "url": "http://127.0.0.1:50149/",
         "host": "127.0.0.1:50149",
     }
+    assert captured["max_llm_invocations"] == 20
+    assert "雇主端可编辑岗位表单、岗位管理详情或等价详情区域" in str(captured["instruction"])
+    assert "候选人列表、沟通/消息页或投递推进页" in str(captured["instruction"])
+    assert "web/chat/job/edit" not in str(captured["instruction"])
+    field_contract = captured["output_contract"]["field_contract"]  # type: ignore[index]
+    assert "employer-side editable job form" in field_contract["completed_job_details"]
+    assert "communication/message pages" in field_contract["evidence"]
 
 
 def test_recruit_plugin_tools_are_marked_as_business_tools(tmp_path: Path) -> None:

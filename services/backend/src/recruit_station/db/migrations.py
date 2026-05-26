@@ -2069,6 +2069,67 @@ def _align_environment_snapshot_schema(connection: Connection) -> None:
     )
 
 
+def _create_external_observation_raw_payloads_table(connection: Connection) -> None:
+    tables = {
+        row[0]
+        for row in connection.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()
+    }
+    if "external_observation_raw_payloads" not in tables:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE external_observation_raw_payloads (
+                    id TEXT PRIMARY KEY,
+                    raw_ref TEXT NOT NULL UNIQUE,
+                    task_spec_id TEXT REFERENCES task_specs(id) ON DELETE SET NULL,
+                    execution_plan_id TEXT REFERENCES execution_plans(id) ON DELETE SET NULL,
+                    execution_episode_id TEXT REFERENCES execution_episodes(id) ON DELETE SET NULL,
+                    environment_snapshot_id TEXT REFERENCES environment_snapshots(id) ON DELETE SET NULL,
+                    source TEXT NOT NULL DEFAULT 'scene_context',
+                    tool_name TEXT NOT NULL,
+                    payload_sha256 TEXT NOT NULL,
+                    payload_size_bytes INTEGER NOT NULL,
+                    storage_kind TEXT NOT NULL DEFAULT 'db_json',
+                    payload TEXT NOT NULL DEFAULT '{}',
+                    raw_metadata TEXT NOT NULL DEFAULT '{}',
+                    created_at BIGINT NOT NULL,
+                    updated_at BIGINT NOT NULL
+                )
+                """
+            )
+        )
+
+    indexed_tables = {
+        row[0]
+        for row in connection.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()
+    }
+    if "external_observation_raw_payloads" in indexed_tables:
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_external_observation_raw_payloads_raw_ref "
+                "ON external_observation_raw_payloads (raw_ref)"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_external_observation_raw_payloads_payload_sha256 "
+                "ON external_observation_raw_payloads (payload_sha256)"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_external_observation_raw_payloads_episode_tool "
+                "ON external_observation_raw_payloads (execution_episode_id, tool_name)"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_external_observation_raw_payloads_snapshot "
+                "ON external_observation_raw_payloads (environment_snapshot_id)"
+            )
+        )
+
+
 def _align_candidate_application_lock_scope(connection: Connection) -> None:
     tables = {
         row[0]
@@ -2333,6 +2394,11 @@ MIGRATIONS: tuple[SchemaMigration, ...] = (
         version=30,
         name="align_pending_user_input_after_next_tool_call",
         apply=_ensure_agent_pending_user_inputs_after_next_tool_call,
+    ),
+    SchemaMigration(
+        version=31,
+        name="create_external_observation_raw_payloads_table",
+        apply=_create_external_observation_raw_payloads_table,
     ),
 )
 

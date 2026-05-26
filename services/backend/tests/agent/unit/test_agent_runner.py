@@ -414,6 +414,23 @@ def test_jd_sync_continuation_ignores_negated_unreachable_boundary() -> None:
     assert "继续同一个 turn" in continuation
 
 
+def test_jd_sync_continuation_treats_authenticated_browser_channel_blocker_as_recoverable() -> None:
+    resolver = _final_output_continuation_resolver(agent_kind="jd_sync")
+    assert resolver is not None
+
+    continuation = resolver(
+        "当前任务仍处于阻塞状态：我无法直接观察或操作已登录的 zhipin.com 浏览器会话来继续同步 JD。"
+        "需要先恢复浏览器观察/执行通道，或提供可用的同源页面证据后，我才能继续进入职位管理并读取职位详情。",
+        [{"tool_name": "list_memory_files"}, {"tool_name": "get_jd_progress"}],
+        [{"tool_name": "list_memory_files"}, {"tool_name": "get_jd_progress"}],
+        0,
+        {},
+    )
+
+    assert continuation is not None
+    assert "delegate_scene_context" in continuation
+
+
 def test_jd_sync_continuation_allows_terminal_login_scene_boundary() -> None:
     resolver = _final_output_continuation_resolver(agent_kind="jd_sync")
     assert resolver is not None

@@ -86,6 +86,38 @@ def test_run_migrations_on_existing_database_with_empty_registry(tmp_path):
         assert current_schema_version(connection) == CURRENT_SCHEMA_VERSION
 
 
+def test_run_migrations_creates_raw_observation_timestamps_as_bigint(tmp_path):
+    engine = _build_engine(tmp_path)
+
+    with engine.begin() as connection:
+        ensure_schema_migrations_table(connection)
+        for version in range(1, 31):
+            connection.execute(
+                text(
+                    f"""
+                    INSERT INTO {SCHEMA_MIGRATIONS_TABLE} (version, name, applied_at)
+                    VALUES (:version, :name, :applied_at)
+                    """
+                ),
+                {
+                    "version": version,
+                    "name": f"migration-{version}",
+                    "applied_at": "2026-05-26T00:00:00+00:00",
+                },
+            )
+
+    run_migrations(engine)
+
+    with engine.connect() as connection:
+        columns = {
+            row[1]: row[2]
+            for row in connection.execute(text("PRAGMA table_info(external_observation_raw_payloads)")).fetchall()
+        }
+        assert current_schema_version(connection) == CURRENT_SCHEMA_VERSION
+        assert columns["created_at"].upper() == "BIGINT"
+        assert columns["updated_at"].upper() == "BIGINT"
+
+
 def test_run_migrations_creates_supporting_indexes(tmp_path):
     engine = _build_engine(tmp_path)
 

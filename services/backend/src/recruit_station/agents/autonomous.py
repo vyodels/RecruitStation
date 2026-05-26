@@ -68,6 +68,9 @@ AUTONOMOUS_PRIMARY_CONVERSATION_ID = "autonomous-primary"
 JD_SYNC_PRIMARY_CONVERSATION_ID = "jd-sync-primary"
 TRANSIENT_PROVIDER_RETRY_MAX_ATTEMPTS = 3
 JD_SYNC_RECOVERABLE_SCENE_RETRY_MAX_ATTEMPTS = 16
+JD_SYNC_REQUIRED_TOOL_RETRY_MAX_ATTEMPTS = 3
+JD_SYNC_REQUIRED_TOOL_NAMES: frozenset[str] = frozenset({"delegate_scene_context", "upsert_job_description"})
+JD_SYNC_REQUIRED_TOOL_PREFIXES: tuple[str, ...] = ("browser_", "hid_", "virtualhid", "computer_")
 
 
 @dataclass(slots=True)
@@ -500,6 +503,18 @@ class AutonomousAdapter:
                 run.finished_at = utcnow()
             if not preserve_interrupted_status:
                 run.last_error = None
+            retry_outcome = _queue_jd_sync_required_tool_retry(
+                session,
+                run=run,
+                turn=turn,
+                envelope=envelope,
+                outcome=last_outcome,
+                engine_output_count=engine_output_count,
+                next_seq=runtime_event_seq + 1,
+            )
+            if retry_outcome is not None:
+                session.commit()
+                return retry_outcome
             retry_outcome = _queue_jd_sync_recoverable_scene_retry(
                 session,
                 run=run,
@@ -512,6 +527,24 @@ class AutonomousAdapter:
             if retry_outcome is not None:
                 session.commit()
                 return retry_outcome
+            if _jd_sync_missing_required_tool_activity(run=run, outcome=last_outcome):
+                _block_jd_sync_missing_required_tool_activity(
+                    session,
+                    run=run,
+                    turn=turn,
+                    outcome=last_outcome,
+                    engine_output_count=engine_output_count,
+                    next_seq=runtime_event_seq + 1,
+                )
+                last_outcome = AgentTurnOutcome(
+                    status="escalate",
+                    gate_signal="escalate",
+                    final_output=last_outcome.final_output,
+                    metadata={
+                        **dict(last_outcome.metadata or {}),
+                        "jd_sync_missing_required_tool_activity": True,
+                    },
+                )
             if _is_waiting_human(last_outcome):
                 _materialize_wait_human_records(
                     session,
@@ -1126,6 +1159,168 @@ def _queue_jd_sync_recoverable_scene_retry(
     )
 
 
+def _queue_jd_sync_required_tool_retry(
+    session: Session,
+    *,
+    run: AgentRun,
+    turn: AgentTurnRecord,
+    envelope: dict[str, Any],
+    outcome: AgentTurnOutcome,
+    engine_output_count: int,
+    next_seq: int,
+) -> AgentTurnOutcome | None:
+    if not _jd_sync_missing_required_tool_activity(run=run, outcome=outcome):
+        return None
+    metadata = dict(envelope.get("metadata") or {}) if isinstance(envelope.get("metadata"), dict) else {}
+    retry_count = _safe_int(metadata.get("jd_sync_required_tool_retry_count")) or 0
+    if retry_count >= JD_SYNC_REQUIRED_TOOL_RETRY_MAX_ATTEMPTS:
+        return None
+
+    next_retry_count = retry_count + 1
+    retry_envelope = dict(envelope or {})
+    retry_envelope["run_pk"] = run.id
+    retry_envelope["run_id"] = run.run_id
+    retry_envelope["trigger_type"] = "required_tool_retry"
+    retry_metadata = dict(metadata)
+    context_hints = dict(retry_metadata.get("context_hints") or {})
+    context_hints["jd_sync_required_tool_recovery"] = {
+        "reason": "missing_scene_or_business_tool_activity",
+        "retry_count": next_retry_count,
+        "last_output": str(outcome.final_output or "")[:1200],
+        "directive": (
+            "继续同一个 JD 同步任务；上一轮没有任何 scene/browser/HID 或 upsert_job_description 工具事件，"
+            "不能作为成功终局。必须先调用 delegate_scene_context 进入内部场景执行链路；"
+            "只有真实工具事件证明必要执行工具缺失、登录/验证码/权限阻塞或目标站点不可达时，才允许 blocked。"
+        ),
+    }
+    retry_metadata.update(
+        {
+            "jd_sync_required_tool_retry_count": next_retry_count,
+            "jd_sync_required_tool_previous_turn_id": turn.turn_id,
+            "context_hints": context_hints,
+        }
+    )
+    retry_envelope["metadata"] = retry_metadata
+    task = TaskQueueRepository(session).enqueue(
+        task_id=f"run-{run.id}-jd-sync-required-tool-{uuid4().hex[:8]}",
+        task_type="autonomous_turn",
+        priority=int(run.priority or 100),
+        payload=retry_envelope,
+        scheduled_for=utcnow() + timedelta(seconds=min(6, 2 * next_retry_count)),
+    )
+
+    turn.status = "retrying"
+    turn.phase = "evaluate"
+    turn.outcome_kind = "required_tool_retry"
+    turn.turn_metadata = {
+        "final_output": outcome.final_output,
+        "gate_signal": outcome.gate_signal,
+        "engine_output_count": engine_output_count,
+        "required_tool_retry_count": next_retry_count,
+        "retry_task_id": task.id,
+    }
+    run.status = "queued"
+    run.finished_at = None
+    run.blocked_reason = None
+    run.last_error = None
+    run.queue_task_id = task.id
+    wakeup_state = dict(run.wakeup_state or {})
+    wakeup_state.update(
+        {
+            "jd_sync_required_tool_retry_count": next_retry_count,
+            "jd_sync_required_tool_retry_task_id": task.id,
+            "jd_sync_required_tool_retry_scheduled_at": utcnow().isoformat(),
+        }
+    )
+    run.wakeup_state = wakeup_state
+    _append_runtime_event(
+        session,
+        run=run,
+        turn_id=turn.turn_id,
+        seq=next_seq,
+        event_type="runtime_event",
+        message="jd_sync_required_tool_retry_scheduled",
+        payload={
+            "data": {
+                "kind": "jd_sync_required_tool_retry_scheduled",
+                "status": "retrying",
+                "retry_count": next_retry_count,
+                "task_id": task.id,
+            }
+        },
+    )
+    return AgentTurnOutcome(
+        status="continue",
+        gate_signal="continue",
+        metadata={
+            "jd_sync_required_tool_retry_scheduled": True,
+            "jd_sync_required_tool_retry_count": next_retry_count,
+            "retry_task_id": task.id,
+        },
+    )
+
+
+def _block_jd_sync_missing_required_tool_activity(
+    session: Session,
+    *,
+    run: AgentRun,
+    turn: AgentTurnRecord,
+    outcome: AgentTurnOutcome,
+    engine_output_count: int,
+    next_seq: int,
+) -> None:
+    reason = (
+        "JD sync finished without any scene/browser/HID or upsert_job_description tool activity; "
+        "this cannot be treated as a successful sync."
+    )
+    turn.status = "blocked"
+    turn.phase = "evaluate"
+    turn.outcome_kind = "missing_required_tool_activity"
+    turn.turn_metadata = {
+        "final_output": outcome.final_output,
+        "gate_signal": outcome.gate_signal,
+        "engine_output_count": engine_output_count,
+        "jd_sync_missing_required_tool_activity": True,
+        "blocked_reason": reason,
+    }
+    run.status = "blocked"
+    run.finished_at = utcnow()
+    run.blocked_reason = reason
+    run.last_error = reason
+    _append_runtime_event(
+        session,
+        run=run,
+        turn_id=turn.turn_id,
+        seq=next_seq,
+        event_type="adapter_blocked",
+        message=reason,
+        payload={"status": "blocked", "reason": reason},
+    )
+
+
+def _jd_sync_missing_required_tool_activity(*, run: AgentRun, outcome: AgentTurnOutcome) -> bool:
+    if str(run.agent_kind or "").strip().lower() != "jd_sync":
+        return False
+    if not _is_completed_outcome(outcome):
+        return False
+    metadata = dict(outcome.metadata or {})
+    tool_events = [
+        item
+        for key in ("tool_calls", "tool_results", "pending_tool_calls")
+        for item in list(metadata.get(key) or [])
+        if isinstance(item, dict)
+    ]
+    return not any(_is_jd_sync_required_tool_event(item) for item in tool_events)
+
+
+def _is_jd_sync_required_tool_event(value: dict[str, Any]) -> bool:
+    name = str(value.get("tool_name") or value.get("name") or "").strip()
+    if not name:
+        return False
+    normalized = name.lower()
+    return normalized in JD_SYNC_REQUIRED_TOOL_NAMES or normalized.startswith(JD_SYNC_REQUIRED_TOOL_PREFIXES)
+
+
 def _jd_sync_recoverable_scene_retry_needed(
     *,
     final_output: str,
@@ -1171,7 +1366,7 @@ def _final_output_continuation_resolver(
             and not _jd_sync_tool_results_need_continuation(tool_results)
         ):
             return None
-        if tool_calls or tool_results:
+        if _jd_sync_has_scene_or_write_tool_interaction(tool_calls, tool_results):
             return (
                 "上一条回复仍不能作为 JD 同步终局：即使本轮已经调用过 scene 或业务工具，"
                 "只要仍未完成全量职位发现、全量详情读取、更新/下架识别或生效 JD 选择，就必须继续同一个 turn 的恢复执行，"
@@ -1194,6 +1389,24 @@ def _final_output_continuation_resolver(
         )
 
     return _resolver
+
+
+def _jd_sync_has_scene_or_write_tool_interaction(
+    tool_calls: list[dict[str, Any]],
+    tool_results: list[dict[str, Any]],
+) -> bool:
+    progress_tools = {
+        "delegate_scene_context",
+        "upsert_job_description",
+        "list_job_descriptions",
+    }
+    for item in [*tool_calls, *tool_results]:
+        if not isinstance(item, dict):
+            continue
+        tool_name = str(item.get("tool_name") or item.get("name") or "").strip()
+        if tool_name in progress_tools:
+            return True
+    return False
 
 
 def _jd_sync_result_data_needs_tool_continuation(value: Any) -> bool:
@@ -1272,9 +1485,10 @@ def _jd_sync_text_has_terminal_scene_boundary(text: str) -> bool:
         return False
     if _jd_sync_text_has_negated_terminal_scene_boundary(normalized):
         return False
-    if re.search(r"(要求|需要|必须|重新|无法|不能|不可|阻塞|blocked|blocker)[^。\n]{0,24}(登录|验证码|账号切换|绕过风控|权限不足)", normalized):
+    normalized_for_auth = re.sub(r"(已|已处于|已经|人工已|提前已|当前已|复用已)\s*登录", "authenticated", normalized)
+    if re.search(r"(要求|需要|必须|重新|无法|不能|不可|阻塞|blocked|blocker)[^。\n]{0,24}(登录|验证码|账号切换|绕过风控|权限不足)", normalized_for_auth):
         return True
-    if re.search(r"(登录|验证码|账号切换|绕过风控|权限不足)[^。\n]{0,24}(要求|需要|必须|重新|无法|不能|不可|阻塞|blocked|blocker)", normalized):
+    if re.search(r"(登录|验证码|账号切换|绕过风控|权限不足)[^。\n]{0,24}(要求|需要|必须|重新|无法|不能|不可|阻塞|blocked|blocker)", normalized_for_auth):
         return True
     return any(
         marker in normalized
@@ -1377,6 +1591,10 @@ def _jd_sync_final_output_needs_tool_continuation(value: str) -> bool:
         "执行环境",
         "执行链路",
         "电脑执行链路",
+        "浏览器观察",
+        "观察通道",
+        "执行通道",
+        "同源页面",
     )
     if any(marker in text or marker in normalized for marker in recoverable_execution_markers):
         return True
@@ -1641,6 +1859,8 @@ def _append_jd_sync_runtime_invariants(prompt: str) -> str:
     invariants = (
         "JD 同步运行约束：如果只完成部分职位详情读取，可以写入已完整确认的 JD 作为进度，但不得把本轮作为成功终局。"
         "在完成全量职位发现、全量详情读取、更新/下架识别和生效 JD 选择前，必须继续执行或返回明确的恢复条件。"
+        "雇主端可编辑岗位表单、岗位管理详情或等价详情区域，只要真实展示该岗位的标题、地点、薪酬、经验、学历、描述、职责、要求等字段，就是有效 JD 详情来源；读取后可使用页面可见的关闭、返回或岗位管理导航回到职位列表。"
+        "候选人列表、沟通/消息页或投递推进页说明已进入非 JD 同步业务域，不能作为 JD 详情读取进度或完成证据。"
         "遇到点击、返回、滚动、光标干扰、按键状态异常或单次注入超时等可恢复执行异常时，不得在第一次失败后结束；"
         "应重新观察、等待稳定、释放异常按键状态、改用页面上的其他同源入口、滚动、返回或页面内导航控件后继续。"
         "恢复执行不是重复同一失败动作；每次恢复都应基于最新观察证据切换页面内路径，例如从当前详情返回职位列表、"

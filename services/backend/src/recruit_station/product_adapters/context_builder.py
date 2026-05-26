@@ -244,18 +244,31 @@ def _find_key_recursive(value: Any, keys: set[str]) -> Any:
     return None
 
 
-def _compact_value(value: Any, *, depth: int = 0) -> Any:
+_LOSSLESS_BROWSER_OBSERVATION_LIST_KEYS = {
+    "clickables",
+    "matches",
+    "elements",
+    "action_hints",
+    "affordances",
+}
+
+
+def _compact_value(value: Any, *, depth: int = 0, key_hint: str | None = None) -> Any:
     if depth >= 3:
         return str(value)[:500]
     if isinstance(value, list):
-        items = [_compact_value(item, depth=depth + 1) for item in value[:4]]
+        preserve_all = str(key_hint or "") in _LOSSLESS_BROWSER_OBSERVATION_LIST_KEYS
+        source = value if preserve_all else value[:4]
+        items = [_compact_value(item, depth=depth + 1) for item in source]
         if len(value) > 4:
+            if preserve_all:
+                return items
             items.append({"_truncated": len(value) - 4})
         return items
     if isinstance(value, dict):
         compact: dict[str, Any] = {}
         for key in list(value.keys())[:12]:
-            compact[str(key)] = _compact_value(value[key], depth=depth + 1)
+            compact[str(key)] = _compact_value(value[key], depth=depth + 1, key_hint=str(key))
         if len(value) > 12:
             compact["_truncated_keys"] = len(value) - 12
         return compact

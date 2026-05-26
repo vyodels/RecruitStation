@@ -14,6 +14,7 @@ from recruit_station.repositories import (
     ExecutionPlanRepository,
     EnvironmentSnapshotRepository,
     AgentRunCheckpointRepository,
+    AgentRunRepository,
     AgentRuntimeEventRepository,
     AgentSessionRepository,
     OperatorInteractionRepository,

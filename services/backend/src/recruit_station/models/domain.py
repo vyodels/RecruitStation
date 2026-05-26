@@ -1148,6 +1148,32 @@ class EnvironmentSnapshot(Base, TimestampMixin):
         }
 
 
+class ExternalObservationRawPayload(Base, TimestampMixin):
+    __tablename__ = "external_observation_raw_payloads"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=generate_id)
+    raw_ref: Mapped[str] = mapped_column(String(96), nullable=False, unique=True, index=True)
+    task_spec_id: Mapped[str | None] = mapped_column(
+        ForeignKey("task_specs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    execution_plan_id: Mapped[str | None] = mapped_column(
+        ForeignKey("execution_plans.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    execution_episode_id: Mapped[str | None] = mapped_column(
+        ForeignKey("execution_episodes.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    environment_snapshot_id: Mapped[str | None] = mapped_column(
+        ForeignKey("environment_snapshots.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    source: Mapped[str] = mapped_column(String(64), nullable=False, default="scene_context", index=True)
+    tool_name: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    payload_sha256: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    payload_size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    storage_kind: Mapped[str] = mapped_column(String(32), nullable=False, default="db_json", index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    raw_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+
+
 class TaskQueueItem(Base, TimestampMixin):
     __tablename__ = "task_queue"
 

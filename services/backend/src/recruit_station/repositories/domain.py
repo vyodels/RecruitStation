@@ -45,6 +45,7 @@ from recruit_station.models import (
     EvolutionArtifact,
     ExecutionEpisode,
     ExecutionPlan,
+    ExternalObservationRawPayload,
     JobDescription,
     JobDescriptionPlatformIdx,
     McpServer,
@@ -1304,6 +1305,13 @@ class ExecutionEpisodeRepository(BaseRepository[ExecutionEpisode]):
 class EnvironmentSnapshotRepository(BaseRepository[EnvironmentSnapshot]):
     model = EnvironmentSnapshot
 
+    def add_pending(self, data: BaseModel | dict[str, Any]) -> EnvironmentSnapshot:
+        payload = data.model_dump(exclude_unset=True) if isinstance(data, BaseModel) else dict(data)
+        instance = self.model(**payload)
+        self.session.add(instance)
+        self.session.flush()
+        return instance
+
     def for_episode(self, execution_episode_id: str, limit: int = 100, offset: int = 0) -> list[EnvironmentSnapshot]:
         stmt = (
             select(EnvironmentSnapshot)
@@ -1321,6 +1329,29 @@ class EnvironmentSnapshotRepository(BaseRepository[EnvironmentSnapshot]):
             .order_by(EnvironmentSnapshot.created_at.desc(), EnvironmentSnapshot.id.desc())
         )
         return self.session.scalars(stmt).first()
+
+
+class ExternalObservationRawPayloadRepository(BaseRepository[ExternalObservationRawPayload]):
+    model = ExternalObservationRawPayload
+
+    def add_pending(self, data: BaseModel | dict[str, Any]) -> ExternalObservationRawPayload:
+        payload = data.model_dump(exclude_unset=True) if isinstance(data, BaseModel) else dict(data)
+        instance = self.model(**payload)
+        self.session.add(instance)
+        self.session.flush()
+        return instance
+
+    def get_by_raw_ref(self, raw_ref: str) -> ExternalObservationRawPayload | None:
+        stmt = select(ExternalObservationRawPayload).where(ExternalObservationRawPayload.raw_ref == raw_ref)
+        return self.session.scalars(stmt).first()
+
+    def get_by_hash(self, payload_sha256: str) -> list[ExternalObservationRawPayload]:
+        stmt = (
+            select(ExternalObservationRawPayload)
+            .where(ExternalObservationRawPayload.payload_sha256 == payload_sha256)
+            .order_by(ExternalObservationRawPayload.created_at.asc(), ExternalObservationRawPayload.id.asc())
+        )
+        return list(self.session.scalars(stmt).all())
 
 
 class PlaybookPatchRepository(BaseRepository[PlaybookPatch]):

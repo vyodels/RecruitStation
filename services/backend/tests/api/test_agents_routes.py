@@ -214,6 +214,10 @@ def test_jd_sync_run_requires_only_saved_entry_url(tmp_path, monkeypatch) -> Non
     assert "任务范围：" in runtime_metadata["instruction"]
     assert "- 从配置的招聘网站目标网页出发，目标网页可以是该网站任意可访问页面。" in runtime_metadata["instruction"]
     assert "- 根据页面可见导航和内容自行找到职位列表与职位详情。" in runtime_metadata["instruction"]
+    assert "雇主端可编辑岗位表单、岗位管理详情或等价详情区域" in runtime_metadata["instruction"]
+    assert "真实展示该岗位的标题、地点、薪酬、经验、学历、描述、职责、要求" in runtime_metadata["instruction"]
+    assert "页面可见的关闭、返回或岗位管理导航回到职位列表" in runtime_metadata["instruction"]
+    assert "候选人列表、沟通/消息页或投递推进页说明已进入非 JD 同步业务域" in runtime_metadata["instruction"]
     assert "- 如果页面动作失败但仍处于同源站点，应先恢复后继续：" in runtime_metadata["instruction"]
     assert "单次点击、返回、滚动或注入超时不是任务终局" in runtime_metadata["instruction"]
     assert "不得主动聚焦浏览器地址栏、输入 URL 或粘贴 URL" in runtime_metadata["instruction"]
@@ -228,8 +232,11 @@ def test_jd_sync_run_requires_only_saved_entry_url(tmp_path, monkeypatch) -> Non
     assert "- 不处理登录、验证码、账号切换或绕过风控" in runtime_metadata["instruction"]
     assert "- 只处理职位信息，不处理候选人" in runtime_metadata["instruction"]
     assert "JD 同步策略：" in runtime_metadata["instruction"]
-    assert "- 从配置的招聘网站目标网页出发，根据页面可见导航和内容自行找到职位列表与职位详情，识别新增、更新和下架职位；只有确认职位详情已完整采集且没有阻塞时，才同步到本地 JD 库，列表页摘要只能作为发现线索。同步过程只处理职位信息，不处理候选人；如果只完成部分职位详情读取，可以记录已确认的职位作为进度，但不能把本轮视为完成，必须继续恢复并完成全量同步，或明确说明还需要恢复的条件。" in runtime_metadata["instruction"]
+    assert "列表页摘要只能作为发现线索" in runtime_metadata["instruction"]
+    assert "候选人列表、沟通/消息页或投递推进页不能作为 JD 同步进度或完成证据" in runtime_metadata["instruction"]
     assert "提前打开特定列表页" not in runtime_metadata["instruction"]
+    assert "/web/chat/job/edit" not in runtime_metadata["instruction"]
+    assert "web/chat/job/edit" not in runtime_metadata["instruction"]
     assert "upsert_job_description" not in runtime_metadata["instruction"]
     assert "platform/external_id" not in runtime_metadata["instruction"]
     assert "external_id" not in runtime_metadata["instruction"]
@@ -252,8 +259,11 @@ def test_jd_sync_run_requires_only_saved_entry_url(tmp_path, monkeypatch) -> Non
     assert "JD 同步策略：" in run_input["content"]
     assert "复用人工提前登录好的浏览器会话" in run_input["content"]
     assert "目标网页可以是招聘网站任意可访问页面" in run_input["content"]
+    assert "雇主端可编辑岗位表单、岗位管理详情或等价详情区域" in run_input["content"]
+    assert "候选人列表、沟通/消息页或投递推进页" in run_input["content"]
     assert "不处理登录、验证码、账号切换或绕过风控" in run_input["content"]
     assert "只处理职位信息，不处理候选人" in run_input["content"]
+    assert "web/chat/job/edit" not in run_input["content"]
     assert "upsert_job_description" not in run_input["content"]
     assert "platform/external_id" not in run_input["content"]
     assert "external_id" not in run_input["content"]
@@ -310,8 +320,49 @@ def test_jd_sync_process_next_task_when_autonomous_workspace_is_stopped(tmp_path
     client = _client(tmp_path, monkeypatch, "jd-sync-process-next-stopped")
     _script_autonomous_provider(
         client,
+        LLMResponse(
+            tool_calls=[
+                ToolCall(
+                    id="scene-1",
+                    name="delegate_scene_context",
+                    arguments={"instruction": "同步招聘站点 JD"},
+                )
+            ],
+            finish_reason="tool_calls",
+        ),
         LLMResponse(content="JD sync completed.", result_data={"execution_status": "completed"}),
     )
+    client.app.state.container.tool_registry.tools["delegate_scene_context"].handler = lambda arguments: {
+        "status": "completed",
+        "result_data": {
+            "status": "completed",
+            "observed_jobs": [
+                {
+                    "title": "测试岗位",
+                    "location": "上海",
+                    "status": "open",
+                    "external_url": "https://mock-recruiting.local/jobs/1",
+                }
+            ],
+            "completed_job_details": [
+                {
+                    "title": "测试岗位",
+                    "department": "销售",
+                    "location": "上海",
+                    "status": "open",
+                    "external_url": "https://mock-recruiting.local/jobs/1",
+                    "summary": "负责客户拓展。",
+                    "requirements": "3 年以上相关经验。",
+                    "evidence": ["detail page opened"],
+                }
+            ],
+            "inactive_or_closed_jobs": [],
+            "activation_entry_observed": False,
+            "blockers": [],
+            "limitations": [],
+            "evidence": [],
+        },
+    }
     patched = client.patch(
         "/api/agents/jd_sync",
         json={
@@ -342,6 +393,58 @@ def test_jd_sync_process_next_task_when_autonomous_workspace_is_stopped(tmp_path
     run_detail = client.get(f"/api/agents/jd_sync/runs/{run_id}")
     assert run_detail.status_code == 200
     assert run_detail.json()["turns"][0]["turn_metadata"]["final_output"] == "JD sync completed."
+
+
+def test_jd_sync_process_next_retries_when_model_finishes_without_scene_or_business_tool(tmp_path, monkeypatch) -> None:
+    client = _client(tmp_path, monkeypatch, "jd-sync-no-tool-retry")
+    _script_autonomous_provider(
+        client,
+        LLMResponse(content="我无法观察或操作浏览器页面，因此无法同步 JD。", result_data={"execution_status": "completed"}),
+    )
+    patched = client.patch(
+        "/api/agents/jd_sync",
+        json={
+            "product_config": {
+                "jd_sync": {
+                    "jd_sync_config": {
+                        "executionSop": {
+                            "siteEntryUrl": "https://mock-recruiting.local/jobs",
+                            "siteAccessRulesText": "复用已登录浏览器会话",
+                        },
+                    }
+                }
+            }
+        },
+    )
+    assert patched.status_code == 200, patched.text
+    created = client.post(
+        "/api/agents/jd_sync/runs",
+        json={"title": "Sync JD", "instruction": "sync jobs"},
+    )
+    assert created.status_code == 201, created.text
+
+    processed = client.post("/api/agents/task-queue/process-next")
+
+    assert processed.status_code == 200
+    assert processed.json()["status"] == "processed"
+    run_id = created.json()["runId"]
+    run_detail = client.get(f"/api/agents/jd_sync/runs/{run_id}")
+    assert run_detail.status_code == 200
+    run_payload = run_detail.json()["run"]
+    assert run_payload["status"] == "queued"
+    first_turn = run_detail.json()["turns"][0]
+    assert first_turn["status"] == "retrying"
+    assert first_turn["outcome_kind"] == "required_tool_retry"
+
+    with client.app.state.session_factory() as session:
+        run = session.scalars(select(AgentRun).where(AgentRun.run_id == run_id)).one()
+        retry_task = session.get(TaskQueueItem, run.queue_task_id)
+        assert retry_task is not None
+        assert retry_task.status == "pending"
+        assert retry_task.payload["trigger_type"] == "required_tool_retry"
+        recovery = retry_task.payload["metadata"]["context_hints"]["jd_sync_required_tool_recovery"]
+        assert recovery["reason"] == "missing_scene_or_business_tool_activity"
+        assert "delegate_scene_context" in recovery["directive"]
 
 
 def test_jd_sync_resume_with_message_reuses_failed_run_and_injects_pending_input(tmp_path, monkeypatch) -> None:

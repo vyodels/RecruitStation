@@ -93,6 +93,7 @@ class ApiAppTests(unittest.TestCase):
             "/api/mcp/servers": self.client.get("/api/mcp/servers"),
             "/api/recruit-station/agent-definition": self.client.get("/api/recruit-station/agent-definition"),
             "/api/recruit-station/runtime/traces": self.client.get("/api/recruit-station/runtime/traces"),
+            "/api/recruit-station/runtime/runs": self.client.get("/api/recruit-station/runtime/runs"),
             "/api/recruit-station/runtime/graphs": self.client.get("/api/recruit-station/runtime/graphs"),
             "/api/recruit-station/runtime/strategy-fragments": self.client.get("/api/recruit-station/runtime/strategy-fragments"),
             "/api/recruit-station/runtime/operator-interactions": self.client.get("/api/recruit-station/runtime/operator-interactions"),
