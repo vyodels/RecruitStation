@@ -9644,13 +9644,6 @@ button.application-followup-info-card:hover {
   overflow: auto;
 }
 
-.agent-config-sop-prompt-textarea {
-  min-height: 420px;
-  resize: vertical;
-  font-family: var(--font-family-ui);
-  line-height: 1.55;
-}
-
 .agent-config-scheduler-grid {
   min-width: 0;
   display: grid;

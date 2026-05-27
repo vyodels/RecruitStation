@@ -5330,11 +5330,59 @@ export function ChatOverlay({
 
             {selectedAutomationConfigPage === "sop" ? (
             <section className="agent-config-independent-panel agent-config-sop-panel">
-              <FormTextarea
-                value={automationConfigDraft.executionSop.stepsText}
-                onChange={(event) => updateAutomationSop("stepsText", event.target.value)}
-                className="agent-config-sop-prompt-textarea"
-              />
+              <div className="agent-config-panel-head">
+                <div>
+                  <h4>{copy("Execution SOP", "执行 SOP")}</h4>
+                  <p>{copy("Shared run procedure, stop rules, and external site boundaries for all selected JDs.", "对所有生效 JD 统一生效的执行流程、停止规则与外部站点边界。")}</p>
+                </div>
+                <StatusBadge tone="neutral">{copy("Global", "全局")}</StatusBadge>
+              </div>
+              <div className="agent-config-readiness" data-state={siteReady && sopReady ? "ready" : "blocked"}>
+                <strong>{siteReady && sopReady ? copy("SOP ready", "SOP 已就绪") : copy("SOP incomplete", "SOP 未完整")}</strong>
+                <span>
+                  {siteReady && sopReady
+                    ? copy("The saved SOP will be combined with JD strategy, scheduling rules, and tool permissions at run time.", "保存后的 SOP 会在运行时与 JD 策略、调度规则和工具权限一起使用。")
+                    : copy("Complete the recruiting target page and SOP steps before starting automation.", "启动自动化前需要补全招聘网站目标网页与 SOP 步骤。")}
+                </span>
+              </div>
+              <div className="agent-config-editor__fields agent-config-editor__fields--two">
+                <label className="agent-config-editor__field agent-config-editor__field--wide">
+                  <span>{copy("Recruiting target page URL", "招聘网站目标网页 URL")}</span>
+                  <small>{copy("Automation starts from this configured page and uses the current logged-in browser session.", "自动化从这个已配置网页出发，并复用当前已登录浏览器会话。")}</small>
+                  <FormInput
+                    placeholder="https://..."
+                    value={automationConfigDraft.executionSop.siteEntryUrl}
+                    onChange={(event) => updateAutomationSop("siteEntryUrl", event.target.value)}
+                  />
+                </label>
+                <label className="agent-config-editor__field agent-config-editor__field--wide">
+                  <span>{copy("Site execution boundaries", "站点执行边界")}</span>
+                  <small>{copy("One boundary per line. Keep login, captcha, account switching, and site-specific selectors outside product code.", "每行一条边界；登录、验证码、账号切换和站点专属选择器不得进入产品代码。")}</small>
+                  {renderLineEditor(
+                    automationConfigDraft.executionSop.siteAccessRulesText,
+                    (next) => updateAutomationSop("siteAccessRulesText", next),
+                    copy("Add boundary", "添加边界"),
+                  )}
+                </label>
+                <label className="agent-config-editor__field">
+                  <span>{copy("SOP steps", "SOP 步骤")}</span>
+                  <small>{copy("Recruiting execution procedure used after the site and JD context are loaded.", "加载站点与 JD 上下文后使用的招聘执行流程。")}</small>
+                  <FormTextarea
+                    value={automationConfigDraft.executionSop.stepsText}
+                    onChange={(event) => updateAutomationSop("stepsText", event.target.value)}
+                    className="chat-overlay-form-textarea--medium"
+                  />
+                </label>
+                <label className="agent-config-editor__field">
+                  <span>{copy("Stop and handoff rules", "停止与交接规则")}</span>
+                  <small>{copy("When to pause, wait for approval, escalate, or hand off to a human operator.", "何时暂停、等待审批、升级或交给人工处理。")}</small>
+                  <FormTextarea
+                    value={automationConfigDraft.executionSop.stopRulesText}
+                    onChange={(event) => updateAutomationSop("stopRulesText", event.target.value)}
+                    className="chat-overlay-form-textarea--medium"
+                  />
+                </label>
+              </div>
             </section>
             ) : null}
 
