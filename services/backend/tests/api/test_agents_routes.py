@@ -829,11 +829,17 @@ def test_autonomous_process_next_task_completes_run_and_projects_primary_convers
         client,
         LLMResponse(
             content="Completed candidate search.",
-            result_data={"execution_status": "completed"},
+            result_data={
+                "execution_status": "completed",
+                "candidate_records": [{"candidate_id": "candidate-1", "evidence": ["profile card read"]}],
+            },
         ),
         LLMResponse(
             content="Second task completed after clear.",
-            result_data={"execution_status": "completed"},
+            result_data={
+                "execution_status": "completed",
+                "candidate_records": [{"candidate_id": "candidate-2", "evidence": ["profile card read"]}],
+            },
         ),
     )
     _force_start_workspace(client)
@@ -909,11 +915,17 @@ def test_autonomous_primary_conversation_clear_resets_projected_history(tmp_path
         client,
         LLMResponse(
             content="Completed candidate search.",
-            result_data={"execution_status": "completed"},
+            result_data={
+                "execution_status": "completed",
+                "candidate_records": [{"candidate_id": "candidate-1", "evidence": ["profile card read"]}],
+            },
         ),
         LLMResponse(
             content="Second task completed after clear.",
-            result_data={"execution_status": "completed"},
+            result_data={
+                "execution_status": "completed",
+                "candidate_records": [{"candidate_id": "candidate-2", "evidence": ["profile card read"]}],
+            },
         ),
     )
     _force_start_workspace(client)

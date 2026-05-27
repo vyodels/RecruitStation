@@ -393,10 +393,14 @@ class AutonomousAdapter:
                         resolve_permission=bool(approved_tool_calls),
                         output_sink=lambda output: _record_engine_output(session, run=run, turn_id=turn.turn_id, output=output),
                         engine_sink=_bind_engine,
-                        structured_status_resolver=_outcome_from_structured_result_data,
+                        structured_status_resolver=_structured_status_resolver(
+                            agent_kind=str(run.agent_kind or "autonomous"),
+                            run_constraints=run_constraints,
+                        ),
                         final_output_status_resolver=_outcome_from_final_output_text,
                         final_output_continuation_resolver=_final_output_continuation_resolver(
-                            agent_kind=str(run.agent_kind or "autonomous")
+                            agent_kind=str(run.agent_kind or "autonomous"),
+                            run_constraints=run_constraints,
                         ),
                         runtime={
                             "permission_policy": _runtime_permission_policy(run_constraints),
@@ -887,6 +891,23 @@ def _outcome_from_structured_result_data(value: Any) -> tuple[str, str] | None:
     return None
 
 
+def _structured_status_resolver(
+    *,
+    agent_kind: str,
+    run_constraints: dict[str, Any] | None = None,
+) -> Callable[[Any], tuple[str, str] | None]:
+    constraints = dict(run_constraints or {})
+
+    def _resolver(value: Any) -> tuple[str, str] | None:
+        if _requires_candidate_discovery_completion_contract(agent_kind=agent_kind, run_constraints=constraints):
+            candidate_outcome = _candidate_discovery_structured_outcome(value)
+            if candidate_outcome is not None:
+                return candidate_outcome
+        return _outcome_from_structured_result_data(value)
+
+    return _resolver
+
+
 def _outcome_from_final_output_text(value: str) -> tuple[str, str] | None:
     text = str(value or "").strip()
     if not text:
@@ -1347,7 +1368,10 @@ def _safe_int(value: Any) -> int | None:
 def _final_output_continuation_resolver(
     *,
     agent_kind: str,
+    run_constraints: dict[str, Any] | None = None,
 ) -> Callable[[str, list[dict[str, Any]], list[dict[str, Any]], int], str | None] | None:
+    if _requires_candidate_discovery_completion_contract(agent_kind=agent_kind, run_constraints=run_constraints):
+        return _candidate_discovery_final_output_continuation_resolver()
     if str(agent_kind or "").strip().lower() != "jd_sync":
         return None
 
@@ -1389,6 +1413,201 @@ def _final_output_continuation_resolver(
         )
 
     return _resolver
+
+
+def _candidate_discovery_final_output_continuation_resolver() -> Callable[
+    [str, list[dict[str, Any]], list[dict[str, Any]], int, dict[str, Any] | None],
+    str | None,
+]:
+    def _resolver(
+        final_output: str,
+        tool_calls: list[dict[str, Any]],
+        tool_results: list[dict[str, Any]],
+        attempt: int,
+        result_data: dict[str, Any] | None = None,
+    ) -> str | None:
+        if attempt >= 8:
+            return None
+        if not _candidate_discovery_needs_continuation(
+            final_output=final_output,
+            tool_results=tool_results,
+            result_data=result_data,
+        ):
+            return None
+        if _has_scene_or_candidate_business_tool_interaction(tool_calls, tool_results):
+            return (
+                "上一条回复仍不能作为候选人发现终局：只要 candidate_records 为空且没有登录、验证码、权限、设备绑定、"
+                "风控、missing_hid、unreachable 或 no_candidate_after_allowed_paths 等硬阻塞，就必须继续同一个 turn。"
+                "请基于最近 scene/工具结果继续读取候选人卡片、列表项详情或等价候选人资料证据；"
+                "若已经取得候选人事实，请返回结构化 result_data.candidate_records。"
+            )
+        return (
+            "上一条回复不能作为候选人发现终局：当前没有候选人记录，也没有硬阻塞。"
+            "请调用 delegate_scene_context 继续读取候选人卡片、列表项详情或等价候选人资料证据，"
+            "并按 output_contract 返回 candidate_records、blockers、evidence 和 actions_attempted。"
+        )
+
+    return _resolver
+
+
+def _requires_candidate_discovery_completion_contract(
+    *,
+    agent_kind: str,
+    run_constraints: dict[str, Any] | None,
+) -> bool:
+    constraints = dict(run_constraints or {})
+    success_criteria = constraints.get("success_criteria")
+    if not isinstance(success_criteria, dict):
+        success_criteria = {}
+    context_hints = constraints.get("context_hints")
+    if not isinstance(context_hints, dict):
+        context_hints = {}
+    preferred_values = (
+        constraints.get("preferred_flow"),
+        constraints.get("preferredFlow"),
+        context_hints.get("preferred_flow"),
+        context_hints.get("preferredFlow"),
+        success_criteria.get("outcome"),
+    )
+    preferred = {str(value or "").strip().lower() for value in preferred_values if str(value or "").strip()}
+    if any(value in {"candidate_discovery", "discover_candidate"} for value in preferred):
+        return True
+    run_values = (
+        agent_kind,
+        constraints.get("run_kind"),
+        constraints.get("plan_kind"),
+        constraints.get("kind"),
+        constraints.get("task_type"),
+    )
+    normalized = {str(value or "").strip().lower() for value in run_values if str(value or "").strip()}
+    target_entity = str(constraints.get("target_entity") or success_criteria.get("entity") or "").strip().lower()
+    candidate_target = _safe_int(constraints.get("candidate_count_target")) or 0
+    return candidate_target > 0 and (
+        target_entity == "candidate"
+        or any(value in {"automation_recruiting", "multi_jd_recruiting", "candidate_discovery"} for value in normalized)
+    )
+
+
+def _candidate_discovery_structured_outcome(value: Any) -> tuple[str, str] | None:
+    if not isinstance(value, dict):
+        return None
+    if _candidate_discovery_has_hard_blocker(value):
+        return "escalate", "escalate"
+    execution_status = extract_execution_status(value)
+    if execution_status in {"completed", "complete", "success", "done"} and _candidate_record_count(value) < 1:
+        return "escalate", "escalate"
+    return None
+
+
+def _candidate_discovery_needs_continuation(
+    *,
+    final_output: str,
+    tool_results: list[dict[str, Any]],
+    result_data: dict[str, Any] | None,
+) -> bool:
+    if _candidate_discovery_has_hard_blocker(result_data):
+        return False
+    if _candidate_record_count(result_data) > 0:
+        return False
+    if isinstance(result_data, dict) and result_data:
+        status = str(result_data.get("status") or result_data.get("execution_status") or "").strip().lower()
+        if status in {"blocked", "blocked_environment", "escalate"}:
+            return False
+        if status in {"completed", "complete", "success", "done", "incomplete", "partial", "needs_continuation"}:
+            return True
+    for item in tool_results:
+        output = item.get("output") if isinstance(item, dict) else None
+        if not isinstance(output, dict):
+            continue
+        if _candidate_discovery_has_hard_blocker(output):
+            return False
+        if _candidate_record_count(output) > 0:
+            return False
+        text = json.dumps(output, ensure_ascii=False, default=str).lower()
+        if any(marker in text for marker in ("candidate_records", "candidate cards", "候选人卡片", "候选人记录", "未读取候选人")):
+            return True
+        status = str(output.get("status") or output.get("execution_status") or "").strip().lower()
+        if status in {"completed", "complete", "success", "done", "incomplete", "partial", "blocked"}:
+            return True
+    text = str(final_output or "").strip().lower()
+    if not text:
+        return False
+    if any(marker in text for marker in ("下一步", "继续", "未读取候选人", "候选人卡片", "candidate_records", "candidate cards")):
+        return True
+    return False
+
+
+def _candidate_record_count(value: Any) -> int:
+    if not isinstance(value, dict):
+        return 0
+    for key in (
+        "candidate_records",
+        "candidateRecords",
+        "candidates",
+        "discovered_candidates",
+        "discoveredCandidates",
+        "candidate_cards",
+        "candidateCards",
+    ):
+        records = value.get(key)
+        if isinstance(records, list):
+            return len(records)
+    nested = value.get("result_data") or value.get("business_result")
+    if isinstance(nested, dict) and nested is not value:
+        return _candidate_record_count(nested)
+    return 0
+
+
+_HARD_CANDIDATE_DISCOVERY_BLOCKERS: frozenset[str] = frozenset(
+    {
+        "login",
+        "auth",
+        "auth_required",
+        "captcha",
+        "permission",
+        "permission_required",
+        "device_binding",
+        "risk_control",
+        "missing_hid",
+        "missing_required_tools",
+        "unreachable",
+        "site_unreachable",
+        "target_unreachable",
+        "no_candidate_after_allowed_paths",
+    }
+)
+
+
+def _candidate_discovery_has_hard_blocker(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    blockers = value.get("blockers")
+    if not isinstance(blockers, list):
+        blockers = [blockers] if blockers not in (None, "", {}, []) else []
+    for blocker in blockers:
+        if isinstance(blocker, dict):
+            values = (blocker.get("kind"), blocker.get("code"), blocker.get("type"), blocker.get("reason"))
+        else:
+            values = (blocker,)
+        for item in values:
+            if str(item or "").strip().lower() in _HARD_CANDIDATE_DISCOVERY_BLOCKERS:
+                return True
+    nested = value.get("result_data") or value.get("business_result")
+    return isinstance(nested, dict) and nested is not value and _candidate_discovery_has_hard_blocker(nested)
+
+
+def _has_scene_or_candidate_business_tool_interaction(
+    tool_calls: list[dict[str, Any]],
+    tool_results: list[dict[str, Any]],
+) -> bool:
+    progress_tools = {"delegate_scene_context", "upsert_candidate", "list_candidates"}
+    for item in [*tool_calls, *tool_results]:
+        if not isinstance(item, dict):
+            continue
+        tool_name = str(item.get("tool_name") or item.get("name") or "").strip()
+        if tool_name in progress_tools:
+            return True
+    return False
 
 
 def _jd_sync_has_scene_or_write_tool_interaction(

@@ -21,7 +21,10 @@ from recruit_station.repositories.domain import (
     ExternalObservationRawPayloadRepository,
     TaskSpecRepository,
 )
-from recruit_station.product_adapters.limits import SceneExecutionLimits
+from recruit_station.product_adapters.limits import (
+    SCENE_BROWSER_COMPUTER_MIN_LLM_INVOCATIONS,
+    SceneExecutionLimits,
+)
 from recruit_station.product_adapters.context_builder import build_scene_turn_context
 from recruit_station.agents.outcome import AgentTurnOutcome
 from recruit_station.agent_runtime.providers import LLMProvider
@@ -451,6 +454,8 @@ class SceneContextService:
                     "blockers": contract_blockers,
                 },
             }
+        if not blockers:
+            blockers.extend(_scene_result_data_blockers(result_data))
         public_status = _public_status(outcome, blockers, result_data=result_data)
         result_data = _align_result_data_status(result_data, public_status)
         stored_status = _stored_status(public_status)
@@ -550,6 +555,21 @@ def _normalize_optional_positive_int(value: Any, *, default: int | None = None) 
     return parsed
 
 
+def _clamp_browser_computer_scene_llm_invocations(
+    value: int | None,
+    *,
+    preferred_capabilities: list[str],
+    browser_target: dict[str, Any] | None,
+    computer_target: dict[str, Any] | None,
+) -> int | None:
+    if value is None:
+        return None
+    capabilities = _scene_capabilities(preferred_capabilities)
+    if not (capabilities & {"browser", "computer"} or browser_target or computer_target):
+        return value
+    return max(value, SCENE_BROWSER_COMPUTER_MIN_LLM_INVOCATIONS)
+
+
 def _normalize_scene_request(
     arguments: dict[str, Any],
     *,
@@ -634,6 +654,12 @@ def _normalize_scene_request(
         arguments.get("max_llm_invocations"),
         default=default_max_llm_invocations,
     )
+    max_llm_invocations = _clamp_browser_computer_scene_llm_invocations(
+        max_llm_invocations,
+        preferred_capabilities=preferred_capabilities,
+        browser_target=browser_target,
+        computer_target=computer_target,
+    )
     requested_by = str(arguments.get("requested_by") or context.get("requested_by") or "").strip() or None
     approval_policy.setdefault("requires_confirmation", bool(approval_policy.get("requires_confirmation")))
     return {
@@ -705,7 +731,7 @@ def _build_scene_instruction(request: dict[str, Any]) -> str:
         parts.append(f"成功标准：{request['success_criteria']}")
     if request["output_contract"]:
         parts.append(f"结果合同：{request['output_contract']}")
-        if request["output_contract"].get("result_data_required"):
+        if _scene_result_data_contract_required(request["output_contract"]):
             parts.append(
                 "结果合同要求结构化 result_data：最终回答必须是单个有效 JSON object（json object），不要使用 Markdown 代码块或额外解释。"
                 "JSON/json 必须直接包含 output_contract.required_fields 中列出的字段；不要把这些字段藏在 summary、business_summary、"
@@ -791,7 +817,7 @@ def _build_scene_instruction(request: dict[str, Any]) -> str:
 
 def _scene_text_format(request: dict[str, Any]) -> dict[str, Any] | None:
     output_contract = _as_dict(request.get("output_contract"))
-    if output_contract.get("result_data_required"):
+    if _scene_result_data_contract_required(output_contract):
         return {"type": "json_object"}
     return None
 
@@ -1037,8 +1063,25 @@ def _scene_outcome_from_engine(
             status = "wait_human"
             gate_signal = "wait_human"
         elif output.type == "turn_failed":
-            status = "error"
-            gate_signal = "escalate"
+            error = str(output.data.get("error") or "").strip()
+            if error == "max_llm_invocations_exhausted":
+                status = "escalate"
+                gate_signal = "budget_exhausted"
+                final_output = "scene context exhausted its LLM invocation budget before producing a terminal result"
+                result_data = {
+                    "status": "blocked",
+                    "blockers": [
+                        {
+                            "kind": "budget_exhausted",
+                            "code": error,
+                            "message": final_output,
+                        }
+                    ],
+                    "remaining_work": ["resume_scene_with_larger_llm_invocation_budget"],
+                }
+            else:
+                status = "error"
+                gate_signal = "escalate"
         elif output.type == "turn_interrupted":
             status = "cancelled"
             gate_signal = "paused"
@@ -2858,7 +2901,7 @@ def _collect_blockers(
             )
     if outcome.gate_signal == "budget_exhausted":
         blockers.append({"kind": "budget_exhausted", "message": "scene context reached explicit safety budget"})
-    if outcome.status == "escalate":
+    if outcome.status == "escalate" and outcome.gate_signal != "budget_exhausted":
         blockers.append({"kind": "escalate", "message": outcome.escalate_reason or "scene context escalated"})
     return blockers
 
@@ -2958,14 +3001,33 @@ def _public_summary(outcome: AgentTurnOutcome, blockers: list[dict[str, Any]]) -
     return "scene context finished without a terminal summary"
 
 
+def _scene_result_data_contract_required(output_contract: dict[str, Any] | None) -> bool:
+    contract = _as_dict(output_contract)
+    if contract.get("result_data_required"):
+        return True
+    return bool(_scene_contract_required_fields(contract))
+
+
+def _scene_contract_required_fields(output_contract: dict[str, Any] | None) -> list[str]:
+    contract = _as_dict(output_contract)
+    fields: list[str] = []
+    for source in (contract, _as_dict(contract.get("result_data"))):
+        for item in source.get("required_fields") or []:
+            field = str(item or "").strip()
+            if field and field not in fields:
+                fields.append(field)
+    return fields
+
+
 def _scene_result_data(outcome: AgentTurnOutcome, *, output_contract: dict[str, Any] | None = None) -> dict[str, Any]:
     if isinstance(outcome.result_data, dict) and outcome.result_data:
         return dict(outcome.result_data)
     contract = _as_dict(output_contract)
-    if contract.get("result_data_required"):
+    if _scene_result_data_contract_required(contract):
         final_payload = _scene_final_control_payload(outcome)
         if isinstance(final_payload, dict) and final_payload:
-            return dict(final_payload)
+            result_data, _skill_draft = normalize_result_payload(final_payload)
+            return result_data
     return {}
 
 
@@ -2974,13 +3036,9 @@ def _normalize_scene_result_contract_data(
     output_contract: dict[str, Any] | None,
 ) -> dict[str, Any]:
     contract = _as_dict(output_contract)
-    if not contract.get("result_data_required") or not result_data:
+    if not _scene_result_data_contract_required(contract) or not result_data:
         return result_data
-    required_fields = {
-        str(item).strip()
-        for item in contract.get("required_fields") or []
-        if str(item or "").strip()
-    }
+    required_fields = set(_scene_contract_required_fields(contract))
     if not required_fields:
         return result_data
 
@@ -3051,8 +3109,22 @@ def _normalize_scene_result_contract_data(
         )
     if "blockers" in required_fields and "blockers" not in normalized:
         normalized["blockers"] = first_list("blockers")
+    if "candidate_records" in required_fields and "candidate_records" not in normalized:
+        candidate_records = first_list(
+            "candidate_records",
+            "candidateRecords",
+            "candidates",
+            "discovered_candidates",
+            "discoveredCandidates",
+            "candidate_cards",
+            "candidateCards",
+            "profiles",
+        )
+        normalized["candidate_records"] = candidate_records
     if "limitations" in required_fields and "limitations" not in normalized:
         normalized["limitations"] = first_list("limitations")
+    if "actions_attempted" in required_fields and "actions_attempted" not in normalized:
+        normalized["actions_attempted"] = first_list("actions_attempted", "actionsAttempted", "attempted_paths", "attemptedPaths")
     if "activation_entry_observed" in required_fields and "activation_entry_observed" not in normalized:
         activation = None
         for source in sources:
@@ -3091,13 +3163,9 @@ def _normalize_scene_result_contract_data(
 
 def _scene_result_contract_blockers(result_data: dict[str, Any], output_contract: dict[str, Any] | None) -> list[dict[str, Any]]:
     contract = _as_dict(output_contract)
-    if not contract.get("result_data_required"):
+    if not _scene_result_data_contract_required(contract):
         return []
-    required_fields = [
-        str(item).strip()
-        for item in contract.get("required_fields") or []
-        if str(item or "").strip()
-    ]
+    required_fields = _scene_contract_required_fields(contract)
     missing_fields = [
         field
         for field in required_fields
@@ -3108,6 +3176,7 @@ def _scene_result_contract_blockers(result_data: dict[str, Any], output_contract
         blockers.append(
             {
                 "kind": "output_contract_incomplete",
+                "code": "contract_incomplete",
                 "message": "scene result_data is missing required output_contract fields",
                 "missing_fields": missing_fields,
             }
@@ -3119,6 +3188,7 @@ def _scene_result_contract_blockers(result_data: dict[str, Any], output_contract
             blockers.append(
                 {
                     "kind": "output_contract_incomplete",
+                    "code": "contract_incomplete",
                     "message": "scene cannot be completed without completed_job_details",
                     "missing_fields": ["completed_job_details"],
                 }
@@ -3129,11 +3199,73 @@ def _scene_result_contract_blockers(result_data: dict[str, Any], output_contract
                 blockers.append(
                     {
                         "kind": "output_contract_incomplete",
+                        "code": "contract_incomplete",
                         "message": "scene completed_job_details must contain original JD field text, not observation summaries",
                         "invalid_fields": summary_like_fields,
                     }
                 )
+    candidate_records = result_data.get("candidate_records")
+    if "candidate_records" in required_fields and status in {"completed", "complete", "success", "succeeded"}:
+        if (not isinstance(candidate_records, list) or not candidate_records) and not _scene_has_hard_candidate_blocker(result_data):
+            blockers.append(
+                {
+                    "kind": "output_contract_incomplete",
+                    "code": "contract_incomplete",
+                    "message": "candidate discovery scene cannot be completed without candidate_records or a hard blocker",
+                    "missing_fields": ["candidate_records"],
+                }
+            )
     return blockers
+
+
+def _scene_result_data_blockers(result_data: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_blockers = result_data.get("blockers") if isinstance(result_data, dict) else None
+    if not isinstance(raw_blockers, list):
+        return []
+    blockers: list[dict[str, Any]] = []
+    for blocker in raw_blockers:
+        if isinstance(blocker, dict):
+            kind = str(blocker.get("kind") or blocker.get("code") or "blocked").strip() or "blocked"
+            blockers.append({"kind": kind, **dict(blocker)})
+        elif str(blocker or "").strip():
+            blockers.append({"kind": str(blocker).strip(), "message": str(blocker).strip()})
+    return blockers
+
+
+_HARD_CANDIDATE_DISCOVERY_BLOCKERS: frozenset[str] = frozenset(
+    {
+        "login",
+        "auth",
+        "auth_required",
+        "captcha",
+        "permission",
+        "permission_required",
+        "device_binding",
+        "risk_control",
+        "missing_hid",
+        "missing_required_tools",
+        "unreachable",
+        "site_unreachable",
+        "target_unreachable",
+        "no_candidate_after_allowed_paths",
+    }
+)
+
+
+def _scene_has_hard_candidate_blocker(result_data: dict[str, Any]) -> bool:
+    blockers = result_data.get("blockers")
+    if not isinstance(blockers, list):
+        blockers = [blockers] if blockers not in (None, "", {}, []) else []
+    for blocker in blockers:
+        if isinstance(blocker, dict):
+            values = (blocker.get("kind"), blocker.get("code"), blocker.get("type"), blocker.get("reason"))
+        else:
+            values = (blocker,)
+        for value in values:
+            normalized = str(value or "").strip().lower()
+            if normalized in _HARD_CANDIDATE_DISCOVERY_BLOCKERS:
+                return True
+    return False
 
 
 def _summary_like_completed_job_detail_fields(completed_details: list[Any]) -> list[dict[str, Any]]:

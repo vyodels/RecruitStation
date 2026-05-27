@@ -46,16 +46,13 @@ def normalize_result_payload(payload: Mapping[str, Any] | None) -> tuple[dict[st
     raw_payload = dict(payload or {})
     result_data: dict[str, Any] = {}
 
-    nested_data = raw_payload.get("data")
-    if isinstance(nested_data, Mapping):
-        result_data.update(dict(nested_data))
-
-    nested_result = raw_payload.get("result")
-    if isinstance(nested_result, Mapping):
-        result_data.update(dict(nested_result))
+    for nested_key in ("result_data", "data", "result"):
+        nested_payload = raw_payload.get(nested_key)
+        if isinstance(nested_payload, Mapping):
+            result_data.update(dict(nested_payload))
 
     for key, value in raw_payload.items():
-        if key in {"data", "result", "skill_draft"}:
+        if key in {"result_data", "data", "result", "skill_draft"}:
             continue
         result_data[key] = value
 

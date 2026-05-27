@@ -87,6 +87,42 @@ def _runtime_requires_browser_computer_scene(runtime: dict[str, Any]) -> bool:
     return plan_kind == "jd_sync"
 
 
+def _runtime_requires_candidate_discovery_scene(runtime: dict[str, Any]) -> bool:
+    constraints = runtime.get("constraints")
+    if not isinstance(constraints, dict):
+        constraints = {}
+    context_hints = runtime.get("context_hints")
+    if not isinstance(context_hints, dict):
+        context_hints = {}
+    success_criteria = constraints.get("success_criteria")
+    if not isinstance(success_criteria, dict):
+        success_criteria = {}
+    preferred_values = (
+        constraints.get("preferred_flow"),
+        constraints.get("preferredFlow"),
+        context_hints.get("preferred_flow"),
+        context_hints.get("preferredFlow"),
+        success_criteria.get("outcome"),
+    )
+    preferred = {str(value or "").strip().lower() for value in preferred_values if str(value or "").strip()}
+    if any(value in {"candidate_discovery", "discover_candidate"} for value in preferred):
+        return True
+    run_values = (
+        runtime.get("run_kind"),
+        constraints.get("run_kind"),
+        constraints.get("plan_kind"),
+        constraints.get("kind"),
+        constraints.get("task_type"),
+    )
+    normalized = {str(value or "").strip().lower() for value in run_values if str(value or "").strip()}
+    candidate_target = (_positive_int(constraints.get("candidate_count_target")) or 0) > 0
+    target_entity = str(constraints.get("target_entity") or success_criteria.get("entity") or "").strip().lower()
+    return candidate_target and (
+        target_entity == "candidate"
+        or any(value in {"automation_recruiting", "multi_jd_recruiting", "candidate_discovery"} for value in normalized)
+    )
+
+
 def _positive_int(value: Any) -> int | None:
     try:
         parsed = int(value)
@@ -190,6 +226,10 @@ class ToolRegistry:
                             JD_SYNC_SCENE_MIN_LLM_INVOCATIONS,
                         )
                         arguments = _normalize_jd_sync_scene_arguments(arguments)
+                    elif _runtime_requires_candidate_discovery_scene(runtime):
+                        if not arguments.get("preferred_capabilities"):
+                            arguments["preferred_capabilities"] = ["browser", "computer"]
+                        arguments = _normalize_candidate_discovery_scene_arguments(arguments, runtime=runtime)
                 return arguments
 
         return [
@@ -638,6 +678,33 @@ def _normalize_jd_sync_scene_arguments(arguments: dict[str, Any]) -> dict[str, A
     return normalized
 
 
+def _normalize_candidate_discovery_scene_arguments(arguments: dict[str, Any], *, runtime: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(arguments or {})
+    instruction = str(normalized.get("instruction") or "").strip()
+    normalized["instruction"] = "\n".join(
+        part for part in (_CANDIDATE_DISCOVERY_SCENE_INSTRUCTION, instruction) if part
+    )
+    normalized["output_contract"] = _merge_dicts(
+        _candidate_discovery_scene_output_contract(),
+        _as_dict(normalized.get("output_contract")),
+    )
+    constraints = runtime.get("constraints") if isinstance(runtime.get("constraints"), dict) else {}
+    context = _as_dict(normalized.get("context"))
+    context["prompt_policy"] = {
+        **_as_dict(context.get("prompt_policy")),
+        "progress_must_be_returned_as_structured_result_data": True,
+        "candidate_discovery_requires_candidate_records_or_hard_blocker": True,
+    }
+    preferred_flow = constraints.get("preferred_flow") or constraints.get("preferredFlow")
+    if preferred_flow and "preferred_flow" not in context:
+        context["preferred_flow"] = preferred_flow
+    allowed_entry_flows = constraints.get("allowed_entry_flows") or constraints.get("allowedEntryFlows")
+    if allowed_entry_flows and "allowed_entry_flows" not in context:
+        context["allowed_entry_flows"] = allowed_entry_flows
+    normalized["context"] = context
+    return normalized
+
+
 _JD_SYNC_SCENE_INSTRUCTION = (
     "执行招聘站点 JD 同步 scene。规则：从当前同源招聘网页出发，使用 browser 观察和 computer/HID 页面内操作，"
     "基于页面可见导航发现职位列表并逐个进入职位详情；列表摘要、职位数量或候选人概况不能作为职位详情完成证据。"
@@ -658,6 +725,18 @@ _JD_SYNC_SCENE_INSTRUCTION = (
     "返回必须遵守 output_contract：把本次实际观察到的职位发现、完整详情、未完成项、下架/关闭线索和生效入口线索写入结构化 result_data。"
     "不要把历史摘要中的具体职位名、数量、比例或推断进度写进 instruction 或自然语言结论；具体进度只允许出现在结构化字段中。"
     "若页面证据表明仍有岗位未读取详情，status 必须是 partial/blocked，不能 completed。"
+)
+
+
+_CANDIDATE_DISCOVERY_SCENE_INSTRUCTION = (
+    "执行候选人发现 scene。规则：从当前同源招聘网页出发，使用 browser 观察和 computer/HID 页面内操作，"
+    "围绕当前 JD 或运行约束发现候选人并读取候选人卡片、列表项详情或等价候选人资料证据。"
+    "入口路径只能来自本次 run constraints、preferred_flow、allowed_entry_flows、SOP 或页面当前可见导航，不得把站点名称、页面词表或 selector 当作全局规则。"
+    "发送消息、索要简历、职位发布/编辑/关闭/删除等外部副作用不得在 scene 内放宽，必须继续遵守审批/禁止策略。"
+    "只有候选人记录已经结构化返回，或遇到登录、验证码、权限、设备绑定、风控、必要 browser/computer/HID 工具缺失、目标不可达，"
+    "或已按允许路径完成查找但确认无候选人，才可结束。"
+    "如果只是观察到搜索页、列表入口、推荐页或搜索条件，但尚未读取候选人卡片/资料并产出 candidate_records，"
+    "status 必须是 incomplete/blocked，不能 completed，也不要把“下一步继续读取候选人”作为成功终局。"
 )
 
 
@@ -689,6 +768,32 @@ def _jd_sync_scene_output_contract() -> dict[str, Any]:
             "status may be completed only when the scene has returned all currently required complete JD details in completed_job_details "
             "and no required detail is missing. If only list summaries, partial details, visible but unopened job-bound entries, stale-host evidence, or inferred jobs are available, status must be partial or blocked and must not be presented as a final scene result when a safe entry can still be opened. "
             "Returning a recommendation/next_step to open a visible safe job-bound detail/edit entry is an output-contract violation; execute that page action inside the scene instead."
+        ),
+    }
+
+
+def _candidate_discovery_scene_output_contract() -> dict[str, Any]:
+    return {
+        "format": "json",
+        "result_data_required": True,
+        "status_values": ["completed", "incomplete", "blocked"],
+        "required_fields": [
+            "status",
+            "candidate_records",
+            "blockers",
+            "evidence",
+            "actions_attempted",
+        ],
+        "field_contract": {
+            "candidate_records": "Candidates actually read from current-page candidate cards, list items, detail panels, or equivalent candidate profile evidence. Each record should include the visible candidate identity fields available, matching evidence, source surface, and current-page evidence reference. Empty is allowed only with a hard blocker or no_candidate_after_allowed_paths.",
+            "blockers": "Hard blockers only: login, captcha, permission, device_binding, risk_control, missing_hid, unreachable, or no_candidate_after_allowed_paths.",
+            "evidence": "Short current-host evidence references or page facts proving candidate records or the hard blocker.",
+            "actions_attempted": "Business-level paths attempted from run constraints or visible page navigation, not DOM selectors or site-specific click traces.",
+        },
+        "completion_rule": (
+            "status may be completed only when candidate_records contains at least one candidate. "
+            "If candidate_records is empty, status must be blocked/incomplete unless blockers contains a hard blocker: "
+            "login, captcha, permission, device_binding, risk_control, missing_hid, unreachable, or no_candidate_after_allowed_paths."
         ),
     }
 
@@ -727,17 +832,26 @@ def _project_scene_result_for_parent_context(output: Any) -> Any:
 def _scene_business_result(output: dict[str, Any]) -> dict[str, Any]:
     result_data = _as_dict(output.get("result_data"))
     if result_data:
-        return result_data
+        return _business_result_with_result_data(result_data)
     current_progress = _as_dict(output.get("current_progress"))
     if current_progress:
-        return current_progress
+        return _business_result_with_result_data(current_progress)
     progress = _as_dict(output.get("progress"))
     if progress:
-        return progress
+        return _business_result_with_result_data(progress)
     real_progress = _as_dict(output.get("real_progress"))
     if real_progress:
-        return real_progress
+        return _business_result_with_result_data(real_progress)
     return output
+
+
+def _business_result_with_result_data(result_data: dict[str, Any]) -> dict[str, Any]:
+    projected = dict(result_data)
+    nested_result_data = _as_dict(projected.get("result_data"))
+    if nested_result_data:
+        return projected
+    projected["result_data"] = dict(result_data)
+    return projected
 
 
 def _project_scene_coverage(result: dict[str, Any]) -> dict[str, Any]:

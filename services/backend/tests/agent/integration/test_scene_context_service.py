@@ -21,6 +21,7 @@ from agent_runtime.fixtures import LLMResponse, ToolCall
 from agent_runtime.fixtures import ScriptedProvider
 from recruit_station.capabilities.tools import ToolDefinition, ToolRegistry
 from recruit_station.agents.outcome import AgentTurnOutcome
+from recruit_station.product_adapters.limits import SCENE_BROWSER_COMPUTER_MIN_LLM_INVOCATIONS
 from recruit_station.services.scene_context import (
     SceneContextService,
     _scene_tool_registry,
@@ -181,6 +182,63 @@ def test_scene_context_creates_episode_records_without_learning_side_effects(tmp
         assert observed_snapshot.resource_locator == "https://example.test/jobs/1"
         assert observed_snapshot.action_hints == [{"kind": "button", "label": "立即沟通"}]
         assert observed_snapshot.environment_descriptor["environment_kind"] == "job_detail"
+
+
+def test_browser_scene_clamps_low_explicit_llm_invocation_budget(tmp_path: Path) -> None:
+    session_factory = _session_factory(tmp_path)
+    provider = ScriptedProvider(
+        provider_name="scene-scripted",
+        responses=[
+            LLMResponse(
+                tool_calls=[ToolCall(id=f"snapshot-{index}", name="browser_snapshot", arguments={"step": index})],
+                finish_reason="tool_calls",
+            )
+            for index in range(3)
+        ]
+        + [
+            LLMResponse(
+                content="已完成 browser scene。",
+                result_data={"status": "completed", "summary": "已完成 browser scene。"},
+            )
+        ],
+    )
+    tools = ToolRegistry()
+    tools.register(
+        ToolDefinition(
+            name="browser_snapshot",
+            description="Capture current browser scene.",
+            parameters={"type": "object"},
+            handler=lambda arguments: {
+                "success": True,
+                "url": "https://recruit.example.test/jobs",
+                "title": "Jobs",
+                "runtime_metadata": {"step": arguments.get("step")},
+            },
+            metadata={"capabilities": ["browser"], "external_tool": True, "real_environment": True},
+        )
+    )
+    service = SceneContextService(
+        session_factory=session_factory,
+        provider=provider,
+        tool_registry=tools,
+        plugin_host=PluginHost(),
+    )
+
+    result = service.delegate(
+        {
+            "title": "低预算 browser scene",
+            "instruction": "观察招聘网页并完成多步 browser scene。",
+            "preferred_capabilities": ["browser"],
+            "browser_target": {"url": "https://recruit.example.test/jobs"},
+            "max_llm_invocations": 3,
+        }
+    )
+
+    assert result["status"] == "completed"
+    assert len(provider.captured_requests) == 4
+    with session_factory() as session:
+        task_spec = session.query(TaskSpec).one()
+        assert task_spec.compiled_payload["max_llm_invocations"] == SCENE_BROWSER_COMPUTER_MIN_LLM_INVOCATIONS
 
 
 def test_scene_context_persists_raw_browser_snapshot_payload_losslessly(tmp_path: Path) -> None:
@@ -900,6 +958,49 @@ def test_scene_context_only_uses_round_budget_when_explicit(tmp_path: Path) -> N
     assert result["metrics"]["engine_output_count"] >= 1
 
 
+def test_scene_context_projects_max_llm_invocation_exhaustion_as_blocker(tmp_path: Path) -> None:
+    session_factory = _session_factory(tmp_path)
+    provider = ScriptedProvider(
+        provider_name="scene-scripted",
+        responses=[
+            LLMResponse(
+                tool_calls=[ToolCall(id="probe", name="scene_probe", arguments={})],
+                finish_reason="tool_calls",
+            )
+        ],
+    )
+    tools = ToolRegistry()
+    tools.register(
+        ToolDefinition(
+            name="scene_probe",
+            description="Keep the scene turn active.",
+            parameters={"type": "object"},
+            handler=lambda arguments: {"success": True},
+            metadata={"capabilities": ["scene"]},
+        )
+    )
+
+    service = SceneContextService(
+        session_factory=session_factory,
+        provider=provider,
+        tool_registry=tools,
+        plugin_host=PluginHost(),
+    )
+
+    result = service.delegate(
+        {
+            "title": "预算耗尽测试",
+            "instruction": "调用一次工具后继续，直到 LLM invocation 预算耗尽。",
+            "max_llm_invocations": 1,
+        }
+    )
+
+    assert result["status"] == "blocked"
+    assert result["summary"] == "scene context exhausted its LLM invocation budget before producing a terminal result"
+    assert result["blockers"][0]["kind"] == "budget_exhausted"
+    assert result["result_data"]["blockers"][0]["code"] == "max_llm_invocations_exhausted"
+
+
 def test_scene_context_rejects_browser_tab_from_different_target_origin(tmp_path: Path) -> None:
     session_factory = _session_factory(tmp_path)
     provider = ScriptedProvider(
@@ -1272,6 +1373,114 @@ def test_scene_context_uses_final_json_as_result_data_when_contract_requires_it(
     assert provider.captured_requests[0].text_format == {"type": "json_object"}
 
 
+def test_scene_context_normalizes_nested_provider_result_data(tmp_path: Path) -> None:
+    session_factory = _session_factory(tmp_path)
+    provider = ScriptedProvider(
+        provider_name="scene-scripted",
+        responses=[
+            LLMResponse(
+                content="Structured scene result returned.",
+                result_data={
+                    "result_data": {
+                        "status": "completed",
+                        "observations": [{"kind": "job_detail", "title": "Backend Engineer"}],
+                        "business_actions": [
+                            {"tool": "upsert_job_description", "arguments": {"external_id": "jd-1"}}
+                        ],
+                        "next_steps": [],
+                    }
+                },
+                finish_reason="stop",
+            )
+        ],
+    )
+    service = SceneContextService(
+        session_factory=session_factory,
+        provider=provider,
+        tool_registry=ToolRegistry(),
+        plugin_host=PluginHost(),
+    )
+
+    result = service.delegate({"instruction": "Return nested structured result_data."})
+
+    assert result["status"] == "completed"
+    assert result["result_data"]["observations"] == [{"kind": "job_detail", "title": "Backend Engineer"}]
+    assert result["result_data"]["business_actions"][0]["tool"] == "upsert_job_description"
+    assert "result_data" not in result["result_data"]
+
+
+def test_scene_context_blocks_required_contract_without_structured_result_data(tmp_path: Path) -> None:
+    session_factory = _session_factory(tmp_path)
+    provider = ScriptedProvider(
+        provider_name="scene-scripted",
+        responses=[LLMResponse(content="已完成观察，但没有提供结构化 result_data。", finish_reason="stop")],
+    )
+    service = SceneContextService(
+        session_factory=session_factory,
+        provider=provider,
+        tool_registry=ToolRegistry(),
+        plugin_host=PluginHost(),
+    )
+
+    result = service.delegate(
+        {
+            "instruction": "Return scene result.",
+            "output_contract": {
+                "required_fields": ["status", "observations", "business_actions", "next_steps"],
+            },
+        }
+    )
+
+    assert result["status"] == "blocked"
+    assert result["blockers"][0]["kind"] == "output_contract_incomplete"
+    assert result["blockers"][0]["code"] == "contract_incomplete"
+    assert result["blockers"][0]["missing_fields"] == [
+        "status",
+        "observations",
+        "business_actions",
+        "next_steps",
+    ]
+    assert result["result_data"]["contract_validation"]["status"] == "failed"
+    assert result["result_data"]["contract_validation"]["blockers"][0]["code"] == "contract_incomplete"
+    assert provider.captured_requests[0].text_format == {"type": "json_object"}
+
+
+def test_scene_context_blocks_nested_result_data_required_contract_without_structured_result_data(tmp_path: Path) -> None:
+    session_factory = _session_factory(tmp_path)
+    provider = ScriptedProvider(
+        provider_name="scene-scripted",
+        responses=[LLMResponse(content="{}", result_data={}, finish_reason="stop")],
+    )
+    service = SceneContextService(
+        session_factory=session_factory,
+        provider=provider,
+        tool_registry=ToolRegistry(),
+        plugin_host=PluginHost(),
+    )
+
+    result = service.delegate(
+        {
+            "instruction": "Return scene result.",
+            "output_contract": {
+                "result_data": {
+                    "required_fields": ["status", "candidate_records", "blockers", "evidence", "actions_attempted"],
+                }
+            },
+        }
+    )
+
+    assert result["status"] == "blocked"
+    assert result["blockers"][0]["kind"] == "output_contract_incomplete"
+    assert result["blockers"][0]["missing_fields"] == [
+        "status",
+        "candidate_records",
+        "blockers",
+        "evidence",
+        "actions_attempted",
+    ]
+    assert provider.captured_requests[0].text_format == {"type": "json_object"}
+
+
 def test_scene_context_blocks_completed_result_missing_required_contract_fields(tmp_path: Path) -> None:
     session_factory = _session_factory(tmp_path)
     final_payload = {
@@ -1303,6 +1512,76 @@ def test_scene_context_blocks_completed_result_missing_required_contract_fields(
     assert result["result_data"]["contract_validation"]["status"] == "failed"
     assert result["blockers"][0]["kind"] == "output_contract_incomplete"
     assert "completed_job_details" in result["blockers"][0]["missing_fields"]
+
+
+def test_scene_context_blocks_completed_candidate_discovery_without_candidates_or_hard_blocker(tmp_path: Path) -> None:
+    session_factory = _session_factory(tmp_path)
+    final_payload = {
+        "status": "completed",
+        "candidate_records": [],
+        "blockers": [],
+        "evidence": ["search page observed"],
+        "actions_attempted": ["allowed discovery flow"],
+    }
+    provider = ScriptedProvider(
+        provider_name="scene-scripted",
+        responses=[LLMResponse(content=json.dumps(final_payload, ensure_ascii=False), finish_reason="stop")],
+    )
+    service = SceneContextService(
+        session_factory=session_factory,
+        provider=provider,
+        tool_registry=ToolRegistry(),
+        plugin_host=PluginHost(),
+    )
+
+    result = service.delegate(
+        {
+            "instruction": "Return candidate discovery scene result JSON.",
+            "output_contract": {
+                "result_data_required": True,
+                "required_fields": ["status", "candidate_records", "blockers", "evidence", "actions_attempted"],
+            },
+        }
+    )
+
+    assert result["status"] == "blocked"
+    assert result["blockers"][0]["kind"] == "output_contract_incomplete"
+    assert result["blockers"][0]["missing_fields"] == ["candidate_records"]
+
+
+def test_scene_context_allows_candidate_discovery_hard_blocker_without_candidates(tmp_path: Path) -> None:
+    session_factory = _session_factory(tmp_path)
+    final_payload = {
+        "status": "blocked",
+        "candidate_records": [],
+        "blockers": [{"kind": "login", "message": "login required"}],
+        "evidence": ["login gate"],
+        "actions_attempted": ["allowed discovery flow"],
+    }
+    provider = ScriptedProvider(
+        provider_name="scene-scripted",
+        responses=[LLMResponse(content=json.dumps(final_payload, ensure_ascii=False), finish_reason="stop")],
+    )
+    service = SceneContextService(
+        session_factory=session_factory,
+        provider=provider,
+        tool_registry=ToolRegistry(),
+        plugin_host=PluginHost(),
+    )
+
+    result = service.delegate(
+        {
+            "instruction": "Return candidate discovery hard blocker JSON.",
+            "output_contract": {
+                "result_data_required": True,
+                "required_fields": ["status", "candidate_records", "blockers", "evidence", "actions_attempted"],
+            },
+        }
+    )
+
+    assert result["status"] == "blocked"
+    assert result["blockers"][0]["kind"] == "login"
+    assert result["result_data"]["blockers"][0]["kind"] == "login"
 
 
 def test_scene_context_normalizes_contract_aliases_without_marking_complete(tmp_path: Path) -> None:

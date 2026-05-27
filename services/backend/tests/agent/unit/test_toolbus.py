@@ -152,7 +152,11 @@ def test_jd_sync_scene_delegate_instruction_is_rule_only_and_structured() -> Non
     assert "国际销售工程师" not in instruction
     assert "客户成功经理" not in instruction
     assert "规则" in instruction
-    assert result.content["business_result"] == {"status": "partial", "completed_job_details": []}
+    assert result.content["business_result"] == {
+        "status": "partial",
+        "completed_job_details": [],
+        "result_data": {"status": "partial", "completed_job_details": []},
+    }
     assert "business_summary" not in result.content
 
 
@@ -339,7 +343,11 @@ def test_delegate_scene_context_tool_projects_scene_capsule_for_parent_context()
     assert result.metadata["scene_result_projection"] is True
     assert result.content == {
         "status": "blocked",
-        "business_result": {"found_jobs": 5, "completed_jobs": 1},
+        "business_result": {
+            "found_jobs": 5,
+            "completed_jobs": 1,
+            "result_data": {"found_jobs": 5, "completed_jobs": 1},
+        },
         "blockers": [{"kind": "continuable", "message": "需要继续读取详情"}],
         "evidence_refs": [
             {"kind": "execution_episode", "id": "episode-1"},
@@ -356,6 +364,43 @@ def test_delegate_scene_context_tool_projects_scene_capsule_for_parent_context()
     assert "execution_contract" not in projected_text
     assert "clickPoint" not in projected_text
     assert "raw_hid" not in projected_text
+
+
+def test_delegate_scene_context_projects_structured_result_data_under_business_result() -> None:
+    registry = ToolRegistry()
+
+    def _handler(arguments: dict[str, object]) -> dict[str, object]:
+        return {
+            "status": "completed",
+            "summary": "Scene returned structured result_data.",
+            "result_data": {
+                "status": "completed",
+                "observations": [{"kind": "job_detail", "title": "Backend Engineer"}],
+                "business_actions": [{"tool": "upsert_job_description", "arguments": {"external_id": "jd-1"}}],
+                "next_steps": [],
+            },
+        }
+
+    registry.register(build_delegate_scene_context_tool(_handler))
+    runtime_tool = registry.to_agent_runtime_tools()[0]
+    context = TurnContext(turn_id="turn-1", conversation_id="conversation-1", tools=[], runtime={})
+
+    result = runtime_tool.handler.handle(
+        ToolCall(
+            id="tool-1",
+            turn_id="turn-1",
+            llm_invocation_id="llm-1",
+            tool_use_id="use-1",
+            name="delegate_scene_context",
+            input={"instruction": "Return structured scene result_data."},
+        ),
+        context,
+    )
+
+    assert result.content["business_result"]["result_data"]["observations"] == [
+        {"kind": "job_detail", "title": "Backend Engineer"}
+    ]
+    assert result.content["business_result"]["business_actions"][0]["tool"] == "upsert_job_description"
 
 
 def test_jd_sync_delegate_scene_context_defaults_to_browser_and_computer_capabilities() -> None:
@@ -406,6 +451,63 @@ def test_jd_sync_delegate_scene_context_defaults_to_browser_and_computer_capabil
     field_contract = captured["output_contract"]["field_contract"]  # type: ignore[index]
     assert "employer-side editable job form" in field_contract["completed_job_details"]
     assert "communication/message pages" in field_contract["evidence"]
+
+
+def test_candidate_discovery_delegate_scene_context_injects_required_result_contract() -> None:
+    captured: dict[str, object] = {}
+    registry = ToolRegistry()
+
+    def _handler(arguments: dict[str, object]) -> dict[str, object]:
+        captured.update(arguments)
+        return {
+            "status": "blocked",
+            "result_data": {
+                "status": "blocked",
+                "candidate_records": [],
+                "blockers": [{"kind": "captcha"}],
+                "evidence": ["captcha prompt"],
+                "actions_attempted": ["allowed candidate discovery flow"],
+            },
+        }
+
+    registry.register(build_delegate_scene_context_tool(_handler))
+    runtime_tool = registry.to_agent_runtime_tools()[0]
+    context = TurnContext(
+        turn_id="turn-1",
+        conversation_id="conversation-1",
+        tools=[],
+        runtime={
+            "constraints": {
+                "run_kind": "candidate_discovery",
+                "candidate_count_target": 1,
+                "preferred_flow": "allowed_candidate_discovery_flow",
+            }
+        },
+    )
+    call = ToolCall(
+        id="tool-1",
+        turn_id="turn-1",
+        llm_invocation_id="llm-1",
+        tool_use_id="use-1",
+        name="delegate_scene_context",
+        input={"instruction": "Find candidates for this JD."},
+    )
+
+    result = runtime_tool.handler.handle(call, context)
+
+    assert result.is_error is False
+    output_contract = captured["output_contract"]  # type: ignore[index]
+    assert output_contract["result_data_required"] is True  # type: ignore[index]
+    assert output_contract["required_fields"] == [  # type: ignore[index]
+        "status",
+        "candidate_records",
+        "blockers",
+        "evidence",
+        "actions_attempted",
+    ]
+    assert "candidate_records" in output_contract["field_contract"]  # type: ignore[index]
+    assert captured["preferred_capabilities"] == ["browser", "computer"]
+    assert captured["context"]["preferred_flow"] == "allowed_candidate_discovery_flow"  # type: ignore[index]
 
 
 def test_recruit_plugin_tools_are_marked_as_business_tools(tmp_path: Path) -> None:

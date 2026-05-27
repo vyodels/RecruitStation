@@ -8,6 +8,7 @@ from recruit_station.agents.autonomous import (
     _final_output_continuation_resolver,
     _jd_sync_recoverable_scene_retry_needed,
     _outcome_from_final_output_text,
+    _structured_status_resolver,
 )
 from recruit_station.product_adapters.agent_runner import run_agent_turn
 from recruit_station.product_adapters.context_builder import build_assistant_turn_context, build_autonomous_turn_context
@@ -453,3 +454,111 @@ def test_jd_sync_continuation_allows_terminal_login_scene_boundary() -> None:
     )
 
     assert continuation is None
+
+
+def test_candidate_discovery_continuation_rejects_no_candidate_next_step_output() -> None:
+    resolver = _final_output_continuation_resolver(
+        agent_kind="autonomous",
+        run_constraints={"run_kind": "candidate_discovery", "candidate_count_target": 1},
+    )
+    assert resolver is not None
+
+    continuation = resolver(
+        "我还没有读取候选人卡片，下一步可以继续读取候选人资料。",
+        [{"tool_name": "delegate_scene_context"}],
+        [
+            {
+                "tool_name": "delegate_scene_context",
+                "output": {
+                    "status": "completed",
+                    "result_data": {
+                        "status": "completed",
+                        "candidate_records": [],
+                        "blockers": [],
+                        "evidence": ["search page observed"],
+                        "actions_attempted": ["observed search results"],
+                    },
+                },
+            }
+        ],
+        0,
+        {"execution_status": "completed", "candidate_records": []},
+    )
+
+    assert continuation is not None
+    assert "candidate_records 为空" in continuation
+
+
+def test_candidate_discovery_structured_status_blocks_empty_completed_result() -> None:
+    resolver = _structured_status_resolver(
+        agent_kind="autonomous",
+        run_constraints={"run_kind": "candidate_discovery", "candidate_count_target": 1},
+    )
+
+    assert resolver({"execution_status": "completed", "candidate_records": []}) == ("escalate", "escalate")
+
+
+def test_candidate_discovery_structured_status_uses_preferred_flow_without_count_target() -> None:
+    resolver = _structured_status_resolver(
+        agent_kind="automation_recruiting",
+        run_constraints={"preferred_flow": "candidate_discovery"},
+    )
+
+    assert resolver({"execution_status": "completed", "candidate_records": []}) == ("escalate", "escalate")
+
+
+def test_candidate_discovery_structured_status_allows_hard_blocker_escalation() -> None:
+    resolver = _structured_status_resolver(
+        agent_kind="autonomous",
+        run_constraints={"run_kind": "candidate_discovery", "candidate_count_target": 1},
+    )
+
+    result = resolver(
+        {
+            "status": "blocked",
+            "candidate_records": [],
+            "blockers": [{"kind": "captcha", "message": "captcha required"}],
+            "evidence": ["captcha prompt"],
+            "actions_attempted": ["opened allowed candidate discovery flow"],
+        }
+    )
+
+    assert result == ("escalate", "escalate")
+
+
+def test_candidate_discovery_run_turn_does_not_run_done_without_candidates() -> None:
+    provider = ScriptedProvider(
+        provider_name="autonomous-scripted",
+        responses=[
+            LLMResponse(
+                content="我还没有读取候选人卡片，下一步可以继续读取候选人资料。",
+                result_data={"execution_status": "completed", "candidate_records": []},
+            ),
+            LLMResponse(
+                content="候选人发现阻塞：仍未读取候选人卡片。",
+                result_data={"status": "blocked", "candidate_records": [], "blockers": []},
+            ),
+        ],
+    )
+
+    result = run_agent_turn(
+        provider=provider,
+        tool_registry=ToolRegistry(),
+        agent_definition_id=None,
+        conversation_id="autonomous-conv",
+        initial_messages=[],
+        turn_input="run",
+        max_llm_invocations=2,
+        structured_status_resolver=_structured_status_resolver(
+            agent_kind="autonomous",
+            run_constraints={"run_kind": "candidate_discovery", "candidate_count_target": 1},
+        ),
+        final_output_continuation_resolver=_final_output_continuation_resolver(
+            agent_kind="autonomous",
+            run_constraints={"run_kind": "candidate_discovery", "candidate_count_target": 1},
+        ),
+    )
+
+    assert result.status == "escalate"
+    assert result.gate_signal == "escalate"
+    assert result.continuation_attempts == 1
